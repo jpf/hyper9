@@ -6,6 +6,7 @@
 const std = @import("std");
 const vmm = @import("vmm.zig");
 const loader = @import("loader.zig");
+const aout = @import("aout.zig");
 
 pub const Sys = enum(u64) {
     exits = 8,
@@ -22,17 +23,23 @@ pub const Status = union(enum) {
 
 pub const Machine = struct {
     pub const Options = struct {
+        backend: vmm.BackendKind = .auto,
+        /// Architecture of the binaries this machine runs; null means the host's.
+        arch: ?vmm.Arch = null,
         trace: bool = false,
     };
 
     gpa: std.mem.Allocator,
     io: std.Io,
-    backend: *vmm.Backend,
+    backend: vmm.Backend,
+    arch: vmm.Arch,
     opts: Options,
     msg_buf: [128]u8 = undefined,
 
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Machine {
-        return .{ .gpa = gpa, .io = io, .opts = opts, .backend = try vmm.Backend.create(gpa, io, .{}) };
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, opts: Options) vmm.CreateError!Machine {
+        const arch = opts.arch orelse vmm.host_arch orelse return error.WrongArch;
+        const backend = try vmm.create(gpa, io, opts.backend, .{ .arch = arch });
+        return .{ .gpa = gpa, .io = io, .opts = opts, .arch = arch, .backend = backend };
     }
 
     pub fn deinit(m: *Machine) void {
@@ -41,15 +48,16 @@ pub const Machine = struct {
 
     /// Runs a binary to completion on the calling thread.
     pub fn run(m: *Machine, bytes: []const u8, argv: []const []const u8) !Status {
+        if ((try aout.parse(bytes)).arch != m.arch) return error.WrongArch;
         const as = try m.backend.newAddressSpace();
         defer as.destroy();
-        const img = try loader.load(as, bytes, argv, 1);
+        const img = try loader.load(m.backend, as, bytes, argv, 1);
 
         var vcpu = try m.backend.createVcpu();
         defer vcpu.destroy();
         try vcpu.setAddressSpace(as);
 
-        var u = vmm.Ureg.initExec(img.entry, img.sp, img.tos);
+        var u: vmm.Ureg = .initExec(img.arch, img.entry, img.sp, img.tos);
         vcpu.setUreg(&u);
         while (true) {
             const exit = try vcpu.run();
@@ -59,21 +67,21 @@ pub const Machine = struct {
                     if (try m.syscall(as, &u)) |status| return status;
                     vcpu.setUreg(&u);
                 },
-                .fault => |f| return .{ .killed = try std.fmt.bufPrint(&m.msg_buf, "sys: trap: fault {t} addr=0x{x} pc=0x{x}", .{ f.access, f.addr, u.pc }) },
+                .fault => |f| return .{ .killed = try std.fmt.bufPrint(&m.msg_buf, "sys: trap: fault {t} addr=0x{x} pc=0x{x}", .{ f.access, f.addr, u.pc() }) },
                 .interrupted => {},
                 .halted => return .{ .killed = "halted" },
-                .other => |code| return .{ .killed = try std.fmt.bufPrint(&m.msg_buf, "sys: trap: unexpected exit 0x{x} pc=0x{x}", .{ code, u.pc }) },
+                .other => |code| return .{ .killed = try std.fmt.bufPrint(&m.msg_buf, "sys: trap: unexpected exit 0x{x} pc=0x{x}", .{ code, u.pc() }) },
             }
         }
     }
 
-    fn arg(as: *vmm.AddressSpace, u: *const vmm.Ureg, i: u64) ?u64 {
+    fn arg(as: vmm.AddressSpace, u: *const vmm.Ureg, i: u64) ?u64 {
         const p = as.translate(u.syscallArgs() + 8 * i, 8) orelse return null;
         return std.mem.readInt(u64, p[0..8], .little);
     }
 
     /// Copies a NUL-terminated guest string, truncated to buf.len (ERRMAX).
-    fn readString(as: *vmm.AddressSpace, va: u64, buf: []u8) ?[]const u8 {
+    fn readString(as: vmm.AddressSpace, va: u64, buf: []u8) ?[]const u8 {
         for (buf, 0..) |*c, i| {
             const p = as.translate(va + i, 1) orelse return null;
             if (p[0] == 0) return buf[0..i];
@@ -82,7 +90,7 @@ pub const Machine = struct {
         return buf;
     }
 
-    fn syscall(m: *Machine, as: *vmm.AddressSpace, u: *vmm.Ureg) !?Status {
+    fn syscall(m: *Machine, as: vmm.AddressSpace, u: *vmm.Ureg) !?Status {
         const nr: Sys = @enumFromInt(u.syscallNumber());
         const bad: Status = .{ .killed = "sys: bad address in syscall" };
         switch (nr) {

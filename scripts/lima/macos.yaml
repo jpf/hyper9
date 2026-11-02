@@ -1,0 +1,10 @@
+# macOS 15 arm64 guest for testing hp9's emu backend on macOS (vz guests have
+# no nested Hypervisor.framework). Created by scripts/lima/vm; see
+# scripts/lima/README.md.
+base: template:_images/macos-15
+cpus: 4
+memory: 8GiB
+disk: 64GiB
+plain: true
+video:
+  display: default

@@ -18,6 +18,7 @@ pub const Tos = extern struct {
 };
 
 pub const Image = struct {
+    arch: aout.Arch,
     entry: u64,
     sp: u64,
     tos: u64,
@@ -29,7 +30,7 @@ fn pageRound(x: u64) u64 {
     return std.mem.alignForward(u64, x, page);
 }
 
-pub fn load(as: *vmm.AddressSpace, bytes: []const u8, argv: []const []const u8, pid: u32) !Image {
+pub fn load(b: vmm.Backend, as: vmm.AddressSpace, bytes: []const u8, argv: []const []const u8, pid: u32) !Image {
     const h = try aout.parse(bytes);
     const l = aout.layout(h.arch);
 
@@ -43,8 +44,6 @@ pub fn load(as: *vmm.AddressSpace, bytes: []const u8, argv: []const []const u8, 
     const ebss = pageRound(adata + h.data + h.bss);
     const stack_base = l.ustktop - l.stack_size;
     if (ebss >= stack_base) return error.BadExec;
-
-    const b = as.backend;
 
     const text = try b.allocPages(pageRound(file_text) / page);
     @memcpy(text[0..file_text], bytes[0..file_text]);
@@ -85,7 +84,7 @@ pub fn load(as: *vmm.AddressSpace, bytes: []const u8, argv: []const []const u8, 
     const argc_off = argv_off - 8;
     std.mem.writeInt(u64, stack[argc_off..][0..8], argv.len, .little);
 
-    return .{ .entry = h.entry, .sp = stack_base + argc_off, .tos = stack_base + tos_off };
+    return .{ .arch = h.arch, .entry = h.entry, .sp = stack_base + argc_off, .tos = stack_base + tos_off };
 }
 
 test "Tos layout matches tos.h" {

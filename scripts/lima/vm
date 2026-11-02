@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Lima VMs for testing hp9's emu backend: linux, macos and windows (arm64)
+# and linux-amd64 (emulated x86_64). Instances live in .local/lima (their
+# LIMA_HOME).
+#
+#   scripts/lima/vm up <os>            create (first time), start and provision
+#   scripts/lima/vm down <os>          stop it
+#   scripts/lima/vm rm <os>            delete it
+#   scripts/lima/vm status             list the VMs
+#   scripts/lima/vm shell <os> [cmd]   ssh into it (cmd.exe on windows)
+#   scripts/lima/vm push <os> file...  copy files into ~/hp9 in the guest
+#
+# Env: WIN_ISO (Windows 11 Arm64 installer ISO).
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/../.." && pwd)"
+# Lima's UNIX socket paths are limited to 104 characters, so keep this short.
+export LIMA_HOME="$ROOT/.local/lima"
+OSES=(linux linux-amd64 macos windows)
+
+die() { echo "vm: $*" >&2; exit 1; }
+log() { echo "vm: $*" >&2; }
+
+check_os() {
+	case "${1:-}" in linux|linux-amd64|macos|windows) ;; *) die "unknown os '${1:-}' (want: ${OSES[*]})" ;; esac
+}
+
+field() { limactl list "$1" --format "{{.$2}}" 2>/dev/null || true; }
+exists() { [[ -n "$(field "$1" Name)" ]]; }
+running() { [[ "$(field "$1" Status)" == Running ]]; }
+need_running() { running "$1" || die "$1 is not running (scripts/lima/vm up $1)"; }
+
+ssh_() { local os=$1; shift; ssh -F "$LIMA_HOME/$os/ssh.config" "lima-$os" "$@"; }
+scp_() { local os=$1; shift; scp -q -F "$LIMA_HOME/$os/ssh.config" "$@"; }
+
+cmd_up() {
+	local os=$1
+	mkdir -p "$LIMA_HOME"
+	if ! exists "$os"; then
+		local set=()
+		if [[ "$os" == windows ]]; then
+			local iso="${WIN_ISO:-$HOME/Downloads/Win11_25H2_English_Arm64_v2.iso}"
+			[[ -f "$iso" ]] || die "no ISO at $iso (set WIN_ISO)"
+			set=(--set ".images[0].location=\"$iso\"")
+			log "first boot runs the unattended Windows install (~15 min); watch the VM display"
+		fi
+		limactl create --tty=false --name "$os" ${set[@]+"${set[@]}"} "$HERE/$os.yaml"
+	fi
+	running "$os" || limactl start --tty=false --timeout 4h "$os"
+	"provision_$os"
+	log "$os ready"
+}
+
+provision_linux() { :; }
+provision_linux-amd64() { :; }
+provision_macos() { :; }
+
+provision_windows() {
+	scp_ windows "$HERE/provision.ps1" "lima-windows:provision.ps1" </dev/null
+	ssh_ windows powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File provision.ps1 </dev/null
+}
+
+cmd_push() {
+	local os=$1; shift
+	[[ $# -gt 0 ]] || die "usage: scripts/lima/vm push <os> file..."
+	need_running "$os"
+	ssh_ "$os" mkdir hp9 </dev/null >/dev/null 2>&1 || true
+	scp_ "$os" "$@" "lima-$os:hp9/" </dev/null
+}
+
+[[ $# -gt 0 ]] || { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+cmd=$1; shift
+case "$cmd" in
+	status) limactl list; exit ;;
+	up|down|rm|shell|push) check_os "${1:-}"; os=$1; shift ;;
+	*) die "unknown command '$cmd'" ;;
+esac
+case "$cmd" in
+	up) cmd_up "$os" ;;
+	down) limactl stop "$os" ;;
+	rm) limactl delete --force "$os" ;;
+	shell) need_running "$os"; if [[ $# -gt 0 ]]; then ssh_ "$os" "$@"; else ssh_ "$os" -t; fi ;;
+	push) cmd_push "$os" "$@" ;;
+esac

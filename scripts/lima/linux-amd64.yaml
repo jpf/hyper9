@@ -1,0 +1,10 @@
+# Ubuntu 24.04 x86_64 guest for testing hp9's emu backend with amd64
+# binaries. Fully emulated (QEMU TCG) on Apple Silicon, so it's slow.
+# Created by scripts/lima/vm; see scripts/lima/README.md.
+base: template:ubuntu-24.04
+vmType: qemu
+arch: x86_64
+cpus: 4
+memory: 4GiB
+disk: 20GiB
+plain: true

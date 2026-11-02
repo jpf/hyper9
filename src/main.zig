@@ -1,42 +1,37 @@
 const std = @import("std");
 const hp9 = @import("hp9");
-
-const usage = "usage: hp9 [--trace] binary [args...]\n";
+const cli = @import("cli.zig");
 
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(arena);
 
-    var opts: hp9.Machine.Options = .{};
-    var i: usize = 1;
-    while (i < args.len and std.mem.startsWith(u8, args[i], "--")) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--trace")) {
-            opts.trace = true;
-        } else {
-            std.debug.print(usage, .{});
-            return 2;
-        }
-    }
-    if (i >= args.len) {
-        std.debug.print(usage, .{});
+    const cfg = cli.parse(args) catch {
+        std.debug.print(cli.usage, .{});
         return 2;
-    }
-    const path = args[i];
-    const argv = args[i..];
+    };
+    const path = cfg.argv[0];
 
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 30)) catch |err| {
         std.debug.print("hp9: {s}: {t}\n", .{ path, err });
         return 1;
     };
+    const hdr = hp9.aout.parse(bytes) catch |err| {
+        std.debug.print("hp9: {s}: not a 9front executable: {t}\n", .{ path, err });
+        return 1;
+    };
 
-    var machine = hp9.Machine.init(init.gpa, io, opts) catch |err| {
-        std.debug.print("hp9: cannot create VM: {t} (is hp9 signed with hp9.entitlements?)\n", .{err});
+    var machine = hp9.Machine.init(init.gpa, io, .{ .backend = cfg.backend, .arch = hdr.arch, .trace = cfg.trace }) catch |err| {
+        std.debug.print("hp9: cannot create {t} machine for {t}: {s}\n", .{ cfg.backend, hdr.arch, explain(cfg.backend, err) });
         return 1;
     };
     defer machine.deinit();
+    if (cfg.backend == .auto and machine.backend.kind() == .emu) {
+        std.debug.print("hp9: warning: no usable hypervisor; using the emulator\n", .{});
+    }
 
-    const status = machine.run(bytes, argv) catch |err| {
+    const status = machine.run(bytes, cfg.argv) catch |err| {
         std.debug.print("hp9: {s}: {t}\n", .{ path, err });
         return 1;
     };
@@ -51,4 +46,21 @@ pub fn main(init: std.process.Init) !u8 {
             return 1;
         },
     }
+}
+
+fn explain(want: hp9.vmm.BackendKind, err: hp9.vmm.CreateError) []const u8 {
+    return switch (err) {
+        error.HypervisorUnavailable => "no usable hypervisor (on macOS, is hp9 signed with hp9.entitlements?)",
+        error.BackendNotBuilt => switch (want) {
+            .emu, .auto => "the emulator isn't built into this hp9 (build with -Demu=unicorn)",
+            else => "backend not built into this hp9",
+        },
+        error.WrongArch => "backend can't run this architecture",
+        error.NotImplemented => "backend not implemented yet",
+        else => @errorName(err),
+    };
+}
+
+test {
+    _ = cli;
 }

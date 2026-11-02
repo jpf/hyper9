@@ -10,7 +10,7 @@ const std = @import("std");
 const vmm = @import("../vmm.zig");
 const arm64 = @import("../arch/arm64.zig");
 
-pub const Ureg = arm64.Ureg;
+const Ureg = arm64.Ureg;
 
 const shim_code = @embedFile("shim_arm64");
 
@@ -135,9 +135,8 @@ pub const Backend = struct {
     kernel_root: u64 = 0,
     nvcpus: u32 = 0,
 
-    pub const Options = struct {};
-
-    pub fn create(gpa: std.mem.Allocator, io: std.Io, _: Options) !*Backend {
+    pub fn create(gpa: std.mem.Allocator, io: std.Io, opts: vmm.Options) vmm.CreateError!*Backend {
+        if (opts.arch != .arm64) return error.WrongArch;
         try check(hv_vm_create(null));
         errdefer _ = hv_vm_destroy();
 
@@ -181,14 +180,14 @@ pub const Backend = struct {
         return mem;
     }
 
-    pub fn newAddressSpace(b: *Backend) !*AddressSpace {
+    pub fn newAddressSpace(b: *Backend) vmm.CreateError!*AddressSpace {
         const as = try b.gpa.create(AddressSpace);
         as.* = .{ .backend = b, .root = try b.allocTable() };
         return as;
     }
 
     /// Must be called on the thread that will run the vCPU.
-    pub fn createVcpu(b: *Backend) !Vcpu {
+    pub fn createVcpu(b: *Backend) vmm.CreateError!Vcpu {
         const index = blk: {
             b.lock.lockUncancelable(b.io);
             defer b.lock.unlock(b.io);
@@ -222,11 +221,11 @@ pub const Backend = struct {
         return @ptrCast(@alignCast(b.ram[ipa - ram_ipa ..][0..vmm.page_size]));
     }
 
-    fn allocTable(b: *Backend) !u64 {
+    fn allocTable(b: *Backend) vmm.Error!u64 {
         return b.ipaOf(try b.allocPages(1));
     }
 
-    fn mapPage(b: *Backend, root: u64, va: u64, ipa: u64, attrs: u64) !void {
+    fn mapPage(b: *Backend, root: u64, va: u64, ipa: u64, attrs: u64) vmm.Error!void {
         var t = root;
         var shift: u6 = 39;
         while (shift > 12) : (shift -= 9) {
@@ -246,7 +245,7 @@ pub const AddressSpace = struct {
     const Region = struct { va: u64, mem: []u8 };
 
     /// Maps backend-allocated memory at a page-aligned user address.
-    pub fn map(as: *AddressSpace, va: u64, mem: []align(vmm.page_size) u8, perms: vmm.Perms) !void {
+    pub fn map(as: *AddressSpace, va: u64, mem: []align(vmm.page_size) u8, perms: vmm.Perms) vmm.CreateError!void {
         if (va % vmm.page_size != 0 or mem.len % vmm.page_size != 0) return error.BadAddress;
         const b = as.backend;
         const ipa = b.ipaOf(mem);
@@ -283,17 +282,17 @@ pub const Vcpu = struct {
         _ = hv_vcpu_destroy(v.id);
     }
 
-    pub fn setAddressSpace(v: *Vcpu, as: *AddressSpace) !void {
+    pub fn setAddressSpace(v: *Vcpu, as: *AddressSpace) vmm.Error!void {
         // TODO(M3): ASIDs or a TLB flush once a vCPU switches between spaces.
         try check(hv_vcpu_set_sys_reg(v.id, SYS_TTBR0_EL1, as.root));
     }
 
-    pub fn getUreg(v: *Vcpu, u: *Ureg) void {
-        u.* = v.shared.ureg;
+    pub fn getUreg(v: *Vcpu, u: *vmm.Ureg) void {
+        u.* = .{ .arm64 = v.shared.ureg };
     }
 
-    pub fn setUreg(v: *Vcpu, u: *const Ureg) void {
-        v.shared.ureg = u.*;
+    pub fn setUreg(v: *Vcpu, u: *const vmm.Ureg) void {
+        v.shared.ureg = u.arm64;
     }
 
     /// Safe to call from any thread.
@@ -301,7 +300,7 @@ pub const Vcpu = struct {
         _ = hv_vcpus_exit(@ptrCast(&v.id), 1);
     }
 
-    pub fn run(v: *Vcpu) !vmm.Exit {
+    pub fn run(v: *Vcpu) vmm.Error!vmm.Exit {
         if (v.fresh) {
             // The first entry goes straight to EL0; after that the shim reloads the Ureg.
             const u = &v.shared.ureg;

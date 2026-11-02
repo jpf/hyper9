@@ -1,0 +1,9 @@
+# Ubuntu 24.04 arm64 guest for testing hp9's emu backend on Linux.
+# Created by scripts/lima/vm; see scripts/lima/README.md.
+base: template:ubuntu-24.04
+vmType: vz
+arch: aarch64
+cpus: 4
+memory: 4GiB
+disk: 20GiB
+plain: true

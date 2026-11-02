@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Fetches reference sources and the pinned 9front arm64 image into .local.
+# Fetches reference sources, the pinned 9front arm64 image and prebuilt
+# Unicorn libraries into .local.
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 . "$HP9_ROOT/scripts/pins.sh"
 
-mkdir -p "$HP9_LOCAL"/{bin,src,cache,9front}
+mkdir -p "$HP9_LOCAL"/{bin,src,cache,9front,unicorn}
 
 clone() {
 	local repo=$1 dir="$HP9_LOCAL/src/$2"
@@ -25,3 +26,19 @@ if [ ! -f "$HP9_LOCAL/9front/$img" ]; then
 	gunzip "$HP9_LOCAL/9front/$img.gz"
 fi
 echo "9front/$img"
+
+# Unicorn: headers and libunicorn.a for each target into .local/unicorn/<name>.
+echo "$UNICORN_WHEELS" | while read -r name tag sha; do
+	[ -n "$name" ] || continue
+	dir="$HP9_LOCAL/unicorn/$name"
+	if [ ! -f "$dir/lib/libunicorn.a" ]; then
+		whl="$HP9_LOCAL/cache/unicorn-$UNICORN_VERSION-$tag.whl"
+		curl -fsSL -o "$whl" "$UNICORN_WHEEL_URL/unicorn-$UNICORN_VERSION-py2-none-$tag.whl"
+		echo "$sha  $whl" | shasum -a 256 -c --quiet
+		rm -rf "$dir" "$dir.tmp"
+		unzip -q "$whl" 'unicorn/lib/libunicorn.a' 'unicorn/include/*' -d "$dir.tmp"
+		mv "$dir.tmp/unicorn" "$dir"
+		rm -rf "$dir.tmp" "$whl"
+	fi
+	echo "unicorn/$name: $UNICORN_VERSION"
+done

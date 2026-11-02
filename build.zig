@@ -30,15 +30,83 @@ fn addSdkPaths(b: *std.Build, m: *std.Build.Module) void {
     m.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/lib" }) });
 }
 
+pub const Emu = enum { none, unicorn };
+
+/// Directory under .local/unicorn (see UNICORN_WHEELS in scripts/pins.sh)
+/// with the prebuilt libunicorn.a for this target, if one exists.
+fn unicornDir(t: std.Target) ?[]const u8 {
+    return switch (t.os.tag) {
+        .macos => if (t.cpu.arch == .aarch64) "aarch64-macos" else null,
+        .linux => if (t.abi.isMusl()) switch (t.cpu.arch) {
+            .aarch64 => "aarch64-linux-musl",
+            .x86_64 => "x86_64-linux-musl",
+            else => null,
+        } else null,
+        else => null,
+    };
+}
+
+/// Adds the prebuilt Unicorn: returns its translated header as a module and
+/// records the static library for `linkUnicorn`.
+fn addUnicorn(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) ?*std.Build.Module {
+    const name = unicornDir(target.result) orelse {
+        b.getInstallStep().dependOn(&b.addFail("-Demu=unicorn: no prebuilt Unicorn for this target (macOS arm64 and linux-musl arm64/x86_64 only)").step);
+        return null;
+    };
+    const dir = b.pathJoin(&.{ ".local/unicorn", name });
+    const lib = b.pathJoin(&.{ dir, "lib/libunicorn.a" });
+    if (b.build_root.handle.access(b.graph.io, lib, .{})) {} else |_| {
+        b.getInstallStep().dependOn(&b.addFail(b.fmt("{s} is missing; run scripts/fetch.sh", .{lib})).step);
+        return null;
+    }
+    const wf = b.addWriteFiles();
+    const h = wf.add("unicorn.h", "#include <unicorn/unicorn.h>\n");
+    const tc = b.addTranslateC(.{ .root_source_file = h, .target = target, .optimize = optimize });
+    tc.addIncludePath(b.path(b.pathJoin(&.{ dir, "include" })));
+    unicorn_lib = b.path(lib);
+    if (target.result.os.tag == .linux and target.result.cpu.arch == .aarch64) {
+        // An archive, not a source file: the root module's objects can reach
+        // the linker twice, and archive members don't clash.
+        const compat = b.addLibrary(.{
+            .name = "unicorn_compat",
+            .linkage = .static,
+            .root_module = b.createModule(.{ .target = target, .optimize = optimize }),
+        });
+        compat.root_module.addAssemblyFile(b.path("src/vmm/unicorn_compat_aarch64.S"));
+        unicorn_compat = compat;
+    }
+    return tc.createModule();
+}
+
+var unicorn_lib: ?std.Build.LazyPath = null;
+var unicorn_compat: ?*std.Build.Step.Compile = null;
+
+/// Links the prebuilt Unicorn into the compile step's root module.
+fn linkUnicorn(c: *std.Build.Step.Compile) void {
+    const lib = unicorn_lib orelse return;
+    const m = c.root_module;
+    m.link_libc = true;
+    m.addObjectFile(lib);
+    if (unicorn_compat) |compat| m.linkLibrary(compat);
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const os = target.result.os.tag;
+    var emu = b.option(Emu, "emu", "Emulator backend to build in (GPLv2 Unicorn: dev and CI builds only)") orelse .none;
 
     const mod = b.addModule("hp9", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
+    if (emu == .unicorn) {
+        // On failure addUnicorn has already made the install step fail.
+        if (addUnicorn(b, target, optimize)) |uc| mod.addImport("unicorn", uc) else emu = .none;
+    }
+    const options = b.addOptions();
+    options.addOption(Emu, "emu", emu);
+    mod.addOptions("build_options", options);
 
     // The arm64 guest shim, assembled freestanding and embedded as raw bytes.
     const shim_obj = b.addObject(.{
@@ -71,7 +139,13 @@ pub fn build(b: *std.Build) void {
         const fail = b.addFail(drawterm ++ " is missing; run scripts/vendor-drawterm.sh");
         kern.step.dependOn(&fail.step);
     }
-    kern_step.dependOn(&kern.step);
+    // TODO(M2): build kern for Windows (drawterm's Make.win64 configuration).
+    const build_kern = have_drawterm and os != .windows;
+    if (os == .windows) {
+        kern_step.dependOn(&b.addFail("kern doesn't build for Windows yet (M2)").step);
+    } else {
+        kern_step.dependOn(&kern.step);
+    }
 
     const exe = b.addExecutable(.{
         .name = "hp9",
@@ -87,8 +161,9 @@ pub fn build(b: *std.Build) void {
         addSdkPaths(b, kern.root_module);
         exe.root_module.linkFramework("Hypervisor", .{});
     }
-    // TODO(M1): link kern into hp9 once the syscall seam exists.
-    if (have_drawterm) exe.step.dependOn(&kern.step);
+    linkUnicorn(exe);
+    // TODO(M2): link kern into hp9 once the syscall seam exists.
+    if (build_kern) exe.step.dependOn(&kern.step);
 
     const install_exe = b.addInstallArtifact(exe, .{});
     b.getInstallStep().dependOn(&install_exe.step);
@@ -109,7 +184,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_cmd.addArgs(args);
     b.step("run", "Run hp9").dependOn(&run_cmd.step);
 
-    // M0 fixture: a hand-assembled arm64 hello a.out.
+    // M0/M1 fixtures: hand-assembled hello a.outs for arm64 and amd64.
     const mkhello = b.addExecutable(.{
         .name = "mkhello",
         .root_module = b.createModule(.{
@@ -121,19 +196,35 @@ pub fn build(b: *std.Build) void {
             }) }},
         }),
     });
-    const gen_hello = b.addRunArtifact(mkhello);
-    const hello = gen_hello.addOutputFileArg("hello");
-    const install_hello = b.addInstallFileWithDir(hello, .{ .custom = "fixtures" }, "hello");
-    b.getInstallStep().dependOn(&install_hello.step);
+    var hellos: [2]std.Build.LazyPath = undefined;
+    for (&hellos, [_][]const u8{ "arm64", "amd64" }, [_][]const u8{ "hello", "hello-amd64" }) |*out, arch, name| {
+        const gen = b.addRunArtifact(mkhello);
+        gen.addArg(arch);
+        out.* = gen.addOutputFileArg(name);
+        b.getInstallStep().dependOn(&b.addInstallFileWithDir(out.*, .{ .custom = "fixtures" }, name).step);
+    }
 
     const m0 = b.addSystemCommand(&.{b.getInstallPath(.bin, exe.out_filename)});
-    m0.addFileArg(hello);
+    m0.addFileArg(hellos[0]);
     m0.expectStdOutEqual("hello\n");
     m0.step.dependOn(signed_step);
     b.step("m0", "Run the M0 demo: hp9 ./hello").dependOn(&m0.step);
 
+    // The M1 demo runs the host architecture's hello on the emulator.
+    const m1_step = b.step("m1", "Run the M1 demo: hp9 --backend emu ./hello (needs -Demu=unicorn)");
+    if (emu != .unicorn) {
+        m1_step.dependOn(&b.addFail("the M1 demo needs -Demu=unicorn").step);
+    } else {
+        const m1 = b.addSystemCommand(&.{ b.getInstallPath(.bin, exe.out_filename), "--backend", "emu" });
+        m1.addFileArg(if (target.result.cpu.arch == .x86_64) hellos[1] else hellos[0]);
+        m1.expectStdOutEqual("hello\n");
+        m1.step.dependOn(signed_step);
+        m1_step.dependOn(&m1.step);
+    }
+
     const mod_tests = b.addTest(.{ .root_module = mod });
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
+    linkUnicorn(mod_tests); // exe_tests shares exe's root module, already linked
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);

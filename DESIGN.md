@@ -45,27 +45,36 @@ Each Plan 9 process runs in user mode on its own vCPU. A syscall traps into the 
 A small Zig interface hides the three hypervisor APIs and the emulator. Everything above it is written once.
 
 ```zig
+// vmm.create picks a backend at run time: .auto tries the host hypervisor, then the emulator.
+pub fn create(gpa, io, want: BackendKind, opts: Options) !Backend;   // Options: { arch: Arch }
+
 // One address space per Plan 9 process. Each backend decides how to realize it:
 // the hypervisors build 4K page tables, the emulator keeps a virtual-address -> host-memory map.
-const AddressSpace = struct {
-    pub fn map(self: *AddressSpace, va: u64, mem: []align(4096) u8, perms: Perms) !void;
-    pub fn unmap(self: *AddressSpace, va: u64, len: u64) !void;
-    pub fn protect(self: *AddressSpace, va: u64, len: u64, perms: Perms) !void;
+const AddressSpace = union(Kind) {             // Kind: hvf, emu (kvm and whp from M8 and M9)
+    pub fn map(self, va: u64, mem: []align(4096) u8, perms: Perms) !void;
+    pub fn unmap(self, va: u64, len: u64) !void;          // from M3
+    pub fn protect(self, va: u64, len: u64, perms: Perms) !void;
+    pub fn translate(self, va: u64, len: u64) ?[]u8;      // host view, for syscall arguments
 };
-const Backend = struct {                       // HVF, KVM, WHP or Emu
-    pub fn create(opts: Options) !Backend;
-    pub fn newAddressSpace(self: *Backend) !*AddressSpace;
-    pub fn createVcpu(self: *Backend) !Vcpu;   // on the thread that will run it
+const Backend = union(Kind) {
+    pub fn kind(self) Kind;
+    pub fn allocPages(self, n: usize) ![]align(4096) u8;  // memory that address spaces can map
+    pub fn maxVcpus(self) !u32;
+    pub fn newAddressSpace(self) !AddressSpace;
+    pub fn createVcpu(self) !Vcpu;             // on the thread that will run it
 };
-const Vcpu = struct {
-    pub fn setAddressSpace(self: *Vcpu, as: *AddressSpace) void;
+const Vcpu = union(Kind) {
+    pub fn setAddressSpace(self: *Vcpu, as: AddressSpace) !void;
     pub fn run(self: *Vcpu) !Exit;             // blocks until the next exit
     pub fn getUreg(self: *Vcpu, u: *Ureg) void;        // Plan 9 Ureg layout
     pub fn setUreg(self: *Vcpu, u: *const Ureg) void;
     pub fn kick(self: *Vcpu) void;             // safe from any thread
 };
-const Exit = union(enum) { syscall, fault: Fault, interrupted, halted, other: u32 };
+const Ureg = union(Arch) { arm64: arm64.Ureg, amd64: amd64.Ureg };
+const Exit = union(enum) { syscall, fault: Fault, interrupted, halted, other: u64 };
 ```
+
+Each backend is a file under `src/vmm/` with the same method set; the unions dispatch to it. Backends not built into a given hp9 are replaced by a stub whose `create` fails with `BackendNotBuilt`, so every host builds the same code. A backend that can't run the binary's architecture fails with `WrongArch`; HVF runs arm64 only.
 
 The contract is in Plan 9 terms (address spaces, Ureg, syscall exits) rather than hardware terms such as guest-physical memory and page tables. That keeps page-table building inside the hypervisor backends, and lets the emulator implement the contract without emulating kernel mode or an MMU.
 
@@ -93,7 +102,7 @@ The emulator lets the system run anywhere, including VMs without nested virtuali
 
 **Implementation**
 
-1. **Unicorn Engine first.** It's a C library built on QEMU's CPU core, covers arm64 and x86\_64, and has hooks for syscall instructions and invalid memory accesses. It's GPLv2, so it sits behind a build flag (`-Demu=unicorn`) and is used for development and CI, never in release builds.
+1. **Unicorn Engine first.** It's a C library built on QEMU's CPU core, covers arm64 and x86\_64, and has hooks for syscall instructions and invalid memory accesses. It's GPLv2, so it sits behind a build flag (`-Demu=unicorn`) and is used for development and CI, never in release builds. We link the prebuilt static `libunicorn.a` from Unicorn's PyPI wheels (pinned in `scripts/pins.sh`, fetched by `scripts/fetch.sh`) rather than building its CMake tree: macOS arm64, and Linux arm64 and x86\_64 with musl, which is Zig's default Linux target. There's no Windows arm64 wheel, so emu on Windows waits for M2, built from source with our own `build.zig`. amd64 binaries are tested on Linux x86\_64 only; there's no amd64 on Darwin.
 2. **A native Zig interpreter later.** It would be MIT, dependency-free and deterministic. It covers the instruction subset that 9front's compilers and libc's assembly routines emit, arm64 first. Unicorn is the reference: single-step both and compare registers after every instruction.
 
 **What it's for**
@@ -329,8 +338,8 @@ pub fn run(m: *Machine, prog: Program, argv: []const []const u8) !ExitStatus;
 Each milestone ends with a demo command that must pass. M0 targets macOS arm64. From M1 on, the emulator lets M2 to M7 be developed and tested on any host. The hypervisor backends for the other hosts follow once the process model settles.
 
 1. **M0, hello:** `zig build` compiles drawterm's kern. The HVF backend, the arm64 shim and the a.out loader run a static binary that calls `pwrite` on fd 1 and `exits`. Demo: `hp9 ./hello`.
-2. **M1, emulator:** the AddressSpace interface, plus the Unicorn backend for arm64 and amd64. Demo: `hp9 --backend emu ./hello` on macOS, Linux and Windows, including inside VMs.
-3. **M2, one process:** syscalls go through drawterm's `sys*` wrappers; the host-tree root and the terminal work. Demo: `hp9 /bin/cat /lib/namespace`.
+2. **M1, emulator:** the AddressSpace interface, plus the Unicorn backend for arm64 and amd64. Demo: `hp9 --backend emu ./hello` on macOS and Linux arm64, including inside VMs, and the amd64 hello on Linux x86\_64.
+3. **M2, one process:** syscalls go through drawterm's `sys*` wrappers; the host-tree root and the terminal work. Unicorn built from source for Windows, and kern for Windows. Demo: `hp9 /bin/cat /lib/namespace`, plus the M1 demo on Windows.
 4. **M3, trees:** rfork, exec, await, devdup and pipes. Demo: `hp9 --rc 'ls /bin | wc -l'`.
 5. **M4, notes and /proc:** notify/noted, interrupt on Ctrl-C, devproc. Demo: an interactive rc session where `kill` and `ps` work.
 6. **M5, servers:** devsrv, rendezvous and semaphores, segattach. Demo: ramfs posts to /srv and is mounted; factotum runs.
@@ -352,6 +361,10 @@ Record design changes as they are made using `- YYYY-MM-DD: <design change> (rea
 - 2026-11-02: On HVF the host programs the arm64 system registers (SCTLR, TCR, MAIR, TTBR0/1, VBAR, SP_EL1) with `hv_vcpu_set_sys_reg`, and the shim is reduced to exception vectors that save the Ureg and ring the doorbell. The shim, doorbell page and per-vCPU shared pages sit at fixed kernel addresses under TTBR1; user space uses TTBR0 (simpler than a shim boot path, and HVF allows it; other backends may still need shim bring-up).
 
 #### M1
+
+- 2026-11-02: The vmm interface is a set of tagged unions over backend structs, and `vmm.create` selects the backend at run time instead of at compile time. `translate`, `allocPages` and `maxVcpus` are part of the interface. `Ureg` is a union over the arm64 and amd64 layouts, since the emulator runs both on one host (so `hp9 --backend auto|hvf|emu` can choose per run, and every host builds the same code).
+- 2026-11-02: Unicorn comes from the prebuilt static libraries in its PyPI wheels, not a source build; Windows emu moves to M2 (no Windows arm64 wheel exists, and Unicorn's CMake build doesn't cross-compile with Zig). amd64 is tested on Linux x86\_64 only.
+- 2026-11-02: kern isn't built for Windows targets until M2; hp9.exe builds without it (kern isn't linked into hp9 yet, and drawterm's Windows configuration needs porting to the Zig build).
 
 #### M2
 

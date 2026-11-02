@@ -25,6 +25,12 @@ pub const Ureg = extern struct {
     }
 };
 
+comptime {
+    const std = @import("std");
+    std.debug.assert(@offsetOf(Ureg, "sp") == 248);
+    std.debug.assert(@offsetOf(Ureg, "type") == 272);
+}
+
 pub const EC_SVC64 = 0x15;
 pub const EC_IABT_LOWER = 0x20;
 pub const EC_DABT_LOWER = 0x24;

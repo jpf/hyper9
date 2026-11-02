@@ -1,0 +1,23 @@
+# Windows 11 ARM64 guest for testing hp9's emu backend on Windows
+# (experimental in Lima: QEMU only, plain mode). The installer ISO is
+# ~/Downloads/Win11_25H2_English_Arm64_v2.iso, or WIN_ISO when running
+# `scripts/lima/vm up windows`. See scripts/lima/README.md.
+os: Windows
+vmType: qemu
+arch: aarch64
+images:
+- location: "~/Downloads/Win11_25H2_English_Arm64_v2.iso"
+  arch: aarch64
+tpm: false
+cpus: 4
+memory: 8GiB
+disk: 64GiB
+osOpts:
+  Windows:
+    virtioWin:
+    - location: https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.271-1/virtio-win-0.1.271.iso
+      arch: aarch64
+      digest: "sha256:bbe6166ad86a490caefad438fef8aa494926cb0a1b37fa1212925cfd81656429"
+plain: true
+video:
+  display: default

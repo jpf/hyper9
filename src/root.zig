@@ -9,4 +9,5 @@ pub const Status = @import("machine.zig").Status;
 test {
     _ = aout;
     _ = loader;
+    _ = vmm;
 }
