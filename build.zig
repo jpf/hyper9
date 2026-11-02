@@ -190,10 +190,10 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/fixtures/mkhello.zig"),
             .target = b.graph.host,
-            .imports = &.{.{ .name = "aout", .module = b.createModule(.{
-                .root_source_file = b.path("src/aout.zig"),
-                .target = b.graph.host,
-            }) }},
+            .imports = &.{
+                .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/aout.zig"), .target = b.graph.host }) },
+                .{ .name = "hello", .module = b.createModule(.{ .root_source_file = b.path("tests/fixtures/hello.zig"), .target = b.graph.host }) },
+            },
         }),
     });
     var hellos: [2]std.Build.LazyPath = undefined;
@@ -225,7 +225,35 @@ pub fn build(b: *std.Build) void {
     const mod_tests = b.addTest(.{ .root_module = mod });
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     linkUnicorn(mod_tests); // exe_tests shares exe's root module, already linked
+    // Runs the same programs on every backend built in and compares them.
+    const backend_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/backends.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "hp9", .module = mod },
+            .{ .name = "hello", .module = b.createModule(.{ .root_source_file = b.path("tests/fixtures/hello.zig"), .target = target }) },
+        },
+    }) });
+    if (os == .macos) {
+        addSdkPaths(b, backend_tests.root_module);
+        backend_tests.root_module.linkFramework("Hypervisor", .{});
+    }
+    linkUnicorn(backend_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);
+    // HVF needs the entitlement, so the test binary is signed like hp9.
+    const run_backend_tests = b.addRunArtifact(backend_tests);
+    if (os == .macos and b.graph.host.result.os.tag == .macos) {
+        const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", "--entitlements" });
+        sign.addFileArg(b.path("hp9.entitlements"));
+        sign.addFileArg(backend_tests.getEmittedBin());
+        run_backend_tests.step.dependOn(&sign.step);
+    }
+    test_step.dependOn(&run_backend_tests.step);
+
+    // For running the backend tests in a VM: zig-out/bin/backend-tests.
+    const install_tests = b.addInstallArtifact(backend_tests, .{ .dest_sub_path = "backend-tests" });
+    b.step("install-tests", "Install the backend tests as zig-out/bin/backend-tests").dependOn(&install_tests.step);
 }

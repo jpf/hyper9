@@ -79,6 +79,21 @@ pub fn writeHeader(out: *[header_size]u8, h: Header) void {
     std.mem.writeInt(u64, out[32..40], h.entry, .big);
 }
 
+/// Writes the header of a text-only a.out whose entry point is the start of
+/// text. Used by tests and fixture generators.
+pub fn writeTextHeader(out: *[header_size]u8, arch: Arch, text_len: usize) void {
+    writeHeader(out, .{
+        .arch = arch,
+        .text = @intCast(text_len),
+        .data = 0,
+        .bss = 0,
+        .syms = 0,
+        .spsz = 0,
+        .pcsz = 0,
+        .entry = layout(arch).utzero + header_size,
+    });
+}
+
 test "magic values" {
     try std.testing.expectEqual(@as(u32, 0x8C47), R_MAGIC);
     try std.testing.expectEqual(@as(u32, 0x8A97), S_MAGIC);

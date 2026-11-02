@@ -100,6 +100,8 @@ The emulator lets the system run anywhere, including VMs without nested virtuali
 
 **Scope:** user-mode arm64 and amd64 code only. On an `SVC` or `SYSCALL`, or on a fault, the emulator fills the Ureg and returns the exit itself, doing the shim's job. There's no guest kernel mode, no system registers and no MMU. The shim is tested only on real hypervisors.
 
+**How the Unicorn backend works.** Each vCPU is one Unicorn engine, running arm64 at EL0 or amd64 in flat 64-bit mode. An address space is a list of regions of host memory; when a vCPU runs, any regions it hasn't seen yet are mapped into its engine with `uc_mem_map_ptr`, so the host and the guest share the pages and syscall arguments are read in place. Hooks stop the engine: `UC_HOOK_INTR` for `SVC` (and other exceptions), `UC_HOOK_INSN` for amd64 `SYSCALL`, and `UC_HOOK_MEM_INVALID` for faults. After a syscall stop the PC is already past the instruction, as with a hypervisor; after a fault it's at the faulting instruction. `Ureg.type` holds what the real kernel puts there for a syscall (the ESR on arm64, vector 64 on amd64). `kick` sets a flag and calls `uc_emu_stop`, which Unicorn allows from another thread.
+
 **Implementation**
 
 1. **Unicorn Engine first.** It's a C library built on QEMU's CPU core, covers arm64 and x86\_64, and has hooks for syscall instructions and invalid memory accesses. It's GPLv2, so it sits behind a build flag (`-Demu=unicorn`) and is used for development and CI, never in release builds. We link the prebuilt static `libunicorn.a` from Unicorn's PyPI wheels (pinned in `scripts/pins.sh`, fetched by `scripts/fetch.sh`) rather than building its CMake tree: macOS arm64, and Linux arm64 and x86\_64 with musl, which is Zig's default Linux target. There's no Windows arm64 wheel, so emu on Windows waits for M2, built from source with our own `build.zig`. amd64 binaries are tested on Linux x86\_64 only; there's no amd64 on Darwin.
@@ -112,7 +114,7 @@ The emulator lets the system run anywhere, including VMs without nested virtuali
 - Cross-architecture runs, for testing only: amd64 binaries on an arm64 Mac, and the reverse.
 - Conformance: one test suite runs against every backend, and each backend must produce the same syscall traces.
 
-**Limits and selection.** It's much slower than the hypervisor backends (to be measured at M1). That's fine for tests and rc pipelines, but slow for self-hosted builds. By default `hp9` uses the host's hypervisor when it's available, and otherwise falls back to the emulator with a warning. `--backend emu|hvf|kvm|whp` forces a choice.
+**Limits and selection.** Measured at M1 on an M3 Max (macOS, release build of Unicorn 2.1.4): a 2-instruction loop of 10⁸ iterations takes 1.1 s on HVF, 5.6 s on emu for arm64 (about 36 M instructions/s; Unicorn's arm64 code generation, not our hooks), and 0.24 s on emu for amd64. A `pwrite` syscall round trip costs about 1 µs on emu, about the same as HVF's 0.86 µs. So syscall-heavy work such as rc pipelines runs at close to hypervisor speed, and arm64 compute runs about 5× slower; that's fine for tests, and tolerable for self-hosted builds. By default `hp9` uses the host's hypervisor when it's available, and otherwise falls back to the emulator with a warning. `--backend emu|hvf|kvm|whp` forces a choice.
 
 ## Guest shims and ABI
 
@@ -364,6 +366,7 @@ Record design changes as they are made using `- YYYY-MM-DD: <design change> (rea
 
 - 2026-11-02: The vmm interface is a set of tagged unions over backend structs, and `vmm.create` selects the backend at run time instead of at compile time. `translate`, `allocPages` and `maxVcpus` are part of the interface. `Ureg` is a union over the arm64 and amd64 layouts, since the emulator runs both on one host (so `hp9 --backend auto|hvf|emu` can choose per run, and every host builds the same code).
 - 2026-11-02: Unicorn comes from the prebuilt static libraries in its PyPI wheels, not a source build; Windows emu moves to M2 (no Windows arm64 wheel exists, and Unicorn's CMake build doesn't cross-compile with Zig). amd64 is tested on Linux x86\_64 only.
+- 2026-11-02: `Machine.Options` takes `stdio` writers and an optional `trace` writer, as planned in the CLI section, so the backend conformance tests (`tests/backends.zig`) can run the same programs on every backend built in and compare output and syscall traces.
 - 2026-11-02: kern isn't built for Windows targets until M2; hp9.exe builds without it (kern isn't linked into hp9 yet, and drawterm's Windows configuration needs porting to the Zig build).
 
 #### M2
@@ -404,7 +407,7 @@ Record design changes as they are made using `- YYYY-MM-DD: <design change> (rea
 - [ ] Startup budget: set a target for `hp9 /bin/echo` wall time (VM create through exit) and measure it at M2.
 - [ ] Should the host-tree root go through devfs as-is, or get a faster read path for exec and compilers?
 - [ ] When to add the binfmt\_misc registration on Linux, so that `./prog` runs directly.
-- [ ] Emulator speed: at M1, measure Unicorn's cost per syscall and per instruction, to decide how soon the native interpreter is needed.
+- [x] Emulator speed: measured at M1 (see Limits and selection). About 5× slower than HVF for arm64 compute and on par for syscalls, so the native interpreter isn't urgent.
 
 ## Sources
 

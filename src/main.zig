@@ -22,7 +22,14 @@ pub fn main(init: std.process.Init) !u8 {
         return 1;
     };
 
-    var machine = hp9.Machine.init(init.gpa, io, .{ .backend = cfg.backend, .arch = hdr.arch, .trace = cfg.trace }) catch |err| {
+    var out = std.Io.File.stdout().writerStreaming(io, &.{});
+    var err_w = std.Io.File.stderr().writerStreaming(io, &.{});
+    var machine = hp9.Machine.init(init.gpa, io, .{
+        .backend = cfg.backend,
+        .arch = hdr.arch,
+        .trace = if (cfg.trace) &err_w.interface else null,
+        .stdio = .{ .out = &out.interface, .err = &err_w.interface },
+    }) catch |err| {
         std.debug.print("hp9: cannot create {t} machine for {t}: {s}\n", .{ cfg.backend, hdr.arch, explain(cfg.backend, err) });
         return 1;
     };

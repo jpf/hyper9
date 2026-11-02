@@ -22,7 +22,7 @@ clean tree; it merges upstream into the subtree and keeps our local changes.
 
 ```sh
 zig build          # builds and ad-hoc signs zig-out/bin/hp9 with hp9.entitlements
-zig build test     # unit tests
+zig build test     # unit tests, and the backend tests on every backend built in
 zig build kern     # compiles drawterm's kern
 zig build m0       # M0 demo: hp9 ./hello must print "hello"
 ```
@@ -47,15 +47,21 @@ zig-out/bin/hp9 [--backend auto|hvf|kvm|whp|emu] [--trace] ./binary [args...]
 ```
 
 `--backend auto` (the default) uses the host hypervisor and otherwise falls
-back to the emulator with a warning. The emulator is linked and probed but
-doesn't run code yet (M1).
+back to the emulator with a warning. The emulator also runs amd64 binaries on
+arm64 hosts, for testing; HVF runs arm64 only.
 
-So far only `pwrite` to fd 1 or 2 and `exits` are served (M0).
+So far only `pwrite` to fd 1 or 2 and `exits` are served (M0/M1).
+`--trace` prints one line per syscall to stderr.
 
 `zig build` also writes the test binaries `zig-out/fixtures/hello` (arm64) and
 `zig-out/fixtures/hello-amd64`. They're hand-assembled a.outs (see
-[tests/fixtures/mkhello.zig](tests/fixtures/mkhello.zig)) because Zig no
-longer links Plan 9 a.out.
+[tests/fixtures/hello.zig](tests/fixtures/hello.zig)) because Zig no longer
+links Plan 9 a.out.
+
+[tests/backends.zig](tests/backends.zig) runs small programs on every backend
+built in and checks that each gives the same output and syscall trace.
+`zig build install-tests` installs it as `zig-out/bin/backend-tests`, to run
+in a VM.
 
 ## Test VMs
 
@@ -79,8 +85,9 @@ scripts/lima/vm shell linux ./hp9/hp9 --backend emu ./hp9/hello
 | `src/machine.zig` | one machine: runs a process and serves its syscalls |
 | `src/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
 | `src/aout.zig` | a.out parser and arch layouts |
-| `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF; emu is a stub until M1) |
+| `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, and emu on Unicorn) |
 | `src/arch/` | per-architecture Ureg/ABI and the guest shims |
 | `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries) |
-| `tests/fixtures` | test binary generators |
+| `tests/backends.zig` | backend conformance tests |
+| `tests/fixtures` | test programs and binary generators |
 | `.local/` | gitignored: tools, caches, upstream clones, 9front images, prebuilt Unicorn, test VMs |

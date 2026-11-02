@@ -26,7 +26,15 @@ pub const Machine = struct {
         backend: vmm.BackendKind = .auto,
         /// Architecture of the binaries this machine runs; null means the host's.
         arch: ?vmm.Arch = null,
-        trace: bool = false,
+        /// Receives a ratrace-style line per syscall.
+        trace: ?*std.Io.Writer = null,
+        stdio: Stdio,
+    };
+
+    /// Host streams behind the guest's fds 1 and 2. Flushed after each write.
+    pub const Stdio = struct {
+        out: *std.Io.Writer,
+        err: *std.Io.Writer,
     };
 
     gpa: std.mem.Allocator,
@@ -75,6 +83,12 @@ pub const Machine = struct {
         }
     }
 
+    fn traceCall(m: *Machine, comptime fmt: []const u8, args: anytype) void {
+        const w = m.opts.trace orelse return;
+        w.print("1 " ++ fmt ++ "\n", args) catch return;
+        w.flush() catch {};
+    }
+
     fn arg(as: vmm.AddressSpace, u: *const vmm.Ureg, i: u64) ?u64 {
         const p = as.translate(u.syscallArgs() + 8 * i, 8) orelse return null;
         return std.mem.readInt(u64, p[0..8], .little);
@@ -96,8 +110,8 @@ pub const Machine = struct {
         switch (nr) {
             .exits => {
                 const p = arg(as, u, 0) orelse return bad;
-                if (p == 0) return .{ .exited = "" };
-                const str = readString(as, p, &m.msg_buf) orelse return bad;
+                const str = if (p == 0) "" else readString(as, p, &m.msg_buf) orelse return bad;
+                m.traceCall("exits \"{s}\"", .{str});
                 return .{ .exited = str };
             },
             .pwrite => {
@@ -105,23 +119,25 @@ pub const Machine = struct {
                 const buf = arg(as, u, 1) orelse return bad;
                 const n = arg(as, u, 2) orelse return bad;
                 const data = as.translate(buf, n) orelse return bad;
-                const file: std.Io.File = switch (fd) {
-                    1 => .stdout(),
-                    2 => .stderr(),
+                const w = switch (fd) {
+                    1 => m.opts.stdio.out,
+                    2 => m.opts.stdio.err,
                     else => {
+                        m.traceCall("pwrite {d} {d} = -1", .{ fd, n });
                         u.setReturn(@bitCast(@as(i64, -1)));
                         return null;
                     },
                 };
-                if (m.opts.trace) std.debug.print("1 pwrite {d} {d} = {d}\n", .{ fd, n, n });
-                file.writeStreamingAll(m.io, data) catch {
-                    u.setReturn(@bitCast(@as(i64, -1)));
-                    return null;
-                };
-                u.setReturn(n);
+                const ok = if (w.writeAll(data)) |_| if (w.flush()) |_| true else |_| false else |_| false;
+                const ret: i64 = if (ok) @intCast(n) else -1;
+                m.traceCall("pwrite {d} {d} = {d}", .{ fd, n, ret });
+                u.setReturn(@bitCast(ret));
                 return null;
             },
-            _ => return .{ .killed = "sys: bad sys call" },
+            _ => {
+                m.traceCall("sys{d}", .{u.syscallNumber()});
+                return .{ .killed = "sys: bad sys call" };
+            },
         }
     }
 };
