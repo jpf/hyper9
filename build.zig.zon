@@ -1,0 +1,14 @@
+.{
+    .name = .hp9,
+    .version = "0.0.0",
+    .fingerprint = 0xc9bfb2743a0c8c8e, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "hp9.entitlements",
+        "src",
+        "tests",
+    },
+}
