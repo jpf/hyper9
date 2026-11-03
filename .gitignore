@@ -6,3 +6,6 @@
 # Zig build output
 /zig-out/
 /.zig-cache/
+
+# Release assets (scripts/release.sh)
+/dist/

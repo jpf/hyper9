@@ -29,8 +29,20 @@ fn open(arch: vmm.Arch) vmm.Error!*uc.uc_engine {
     };
     var engine: ?*uc.uc_engine = null;
     if (uc.uc_open(a, mode, &engine) != uc.UC_ERR_OK) return error.HypervisorFailed;
+    // QEMU reserves a 1 GiB translation buffer per engine by default, and
+    // Windows commits that against the pagefile, so a few dozen engines
+    // (one per process) run it out. When the buffer fills, Unicorn flushes
+    // and reuses it, so a smaller one only costs retranslation.
+    if (uc.uc_ctl(engine, uc_ctl_set_tcg_buffer_size, @as(u32, tcg_buffer_size)) != uc.UC_ERR_OK) {
+        _ = uc.uc_close(engine);
+        return error.HypervisorFailed;
+    }
     return engine.?;
 }
+
+const tcg_buffer_size: u32 = 32 << 20;
+// uc_ctl_set_tcg_buffer_size is a macro: UC_CTL_WRITE(UC_CTL_TCG_BUFFER_SIZE, 1).
+const uc_ctl_set_tcg_buffer_size: c_uint = uc.UC_CTL_TCG_BUFFER_SIZE | (1 << 26) | (1 << 30);
 
 fn check(err: uc.uc_err) vmm.Error!void {
     if (err != uc.UC_ERR_OK) return error.HypervisorFailed;
@@ -338,6 +350,48 @@ const State = struct {
         return .{ .fault = .{ .addr = pc, .access = .exec, .syndrome = n } };
     }
 };
+
+// Unicorn makes newly generated code visible with __builtin___clear_cache,
+// which resolves to compiler-rt's __clear_cache. Zig's (0.16) arm64 port
+// of it leaves out the `dsb ish` after the `ic ivau` loop that LLVM's has,
+// so the invalidation may not finish before the `isb`, and a freshly
+// translated block can run stale: with several engines generating code at
+// once, Linux arm64 guests hit illegal instructions in Unicorn's code
+// buffer. This strong definition overrides compiler-rt's weak one. Apple
+// targets use sys_icache_invalidate and Windows FlushInstructionCache.
+comptime {
+    const builtin = @import("builtin");
+    if (builtin.cpu.arch == .aarch64 and !builtin.os.tag.isDarwin() and builtin.os.tag != .windows) {
+        @export(&clearCache, .{ .name = "__clear_cache", .linkage = .strong });
+    }
+}
+
+fn clearCache(start: usize, end: usize) callconv(.c) void {
+    const ctr = asm volatile ("mrs %[ctr], ctr_el0"
+        : [ctr] "=r" (-> u64),
+    );
+    // CTR_EL0.IDC: no clean to the point of unification needed.
+    if ((ctr >> 28) & 1 == 0) {
+        const line = @as(usize, 4) << @intCast((ctr >> 16) & 15);
+        var a = start & ~(line - 1);
+        while (a < end) : (a += line) asm volatile ("dc cvau, %[a]"
+            :
+            : [a] "r" (a),
+            : .{ .memory = true });
+    }
+    asm volatile ("dsb ish" ::: .{ .memory = true });
+    // CTR_EL0.DIC: no invalidation to the point of unification needed.
+    if ((ctr >> 29) & 1 == 0) {
+        const line = @as(usize, 4) << @intCast(ctr & 15);
+        var a = start & ~(line - 1);
+        while (a < end) : (a += line) asm volatile ("ic ivau, %[a]"
+            :
+            : [a] "r" (a),
+            : .{ .memory = true });
+        asm volatile ("dsb ish" ::: .{ .memory = true });
+    }
+    asm volatile ("isb sy" ::: .{ .memory = true });
+}
 
 // uc_ctl_flush_tb is a macro: UC_CTL_WRITE(UC_CTL_TB_FLUSH, 0).
 const uc_ctl_tb_flush: c_uint = uc.UC_CTL_TB_FLUSH | (1 << 30);

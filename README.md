@@ -45,12 +45,14 @@ skip in `zig build integration` and `zig build test`. Cases for a finished
 milestone are tagged `(M3)` and so on; `zig build m3` runs the M3 ones.
 
 The emulator backend links the prebuilt Unicorn (GPLv2) fetched by
-`scripts/fetch.sh`, so it's opt-in and for development and CI only:
+`scripts/fetch.sh`, so it's opt-in and never part of the MIT `hp9` build. It
+ships separately as `hp9-emu` (see [Releases](#releases)):
 
 ```sh
 zig build -Demu=unicorn                              # macOS arm64
 zig build -Demu=unicorn -Dtarget=aarch64-linux-musl  # Linux arm64 (also x86_64-linux-musl)
 zig build m1 -Demu=unicorn                           # M1 demo: hp9 --backend emu ./hello
+zig build bench -Demu=unicorn                        # compute and syscall speed, emu vs the hypervisor
 ```
 
 `-Dunicorn=source` builds Unicorn from the patched source instead
@@ -59,6 +61,26 @@ fetches it. The prebuilt libraries exist for macOS arm64 and Linux musl only,
 so Windows arm64 (`-Dtarget=aarch64-windows`) always builds from source. kern
 builds for Windows with drawterm's win32 files, so hp9.exe runs programs on
 the emulator, and host paths are `/C:/...` in `#U`.
+
+## Releases
+
+Each GitHub release has two sets of binaries, built by
+`scripts/release.sh [version]` into `dist/<version>/` from a clean checkout:
+
+| Asset | License | Contents |
+| --- | --- | --- |
+| `hp9-<version>-<target>` | MIT | `hp9` with the hypervisor backends only (macOS arm64 for now) |
+| `hp9-emu-<version>-<target>` | GPLv2 | `hp9-emu`: hp9 built with `-Demu=unicorn`, for macOS arm64, Linux arm64 and x86_64 (musl, static) and Windows arm64 |
+| `hp9-emu-<version>-source.tar.gz` | GPLv2 and MIT | complete corresponding source for `hp9-emu`: the hp9 tree plus Unicorn's patched source in `.local/src/unicorn` |
+| `SHA256SUMS` | | checksums |
+
+`hp9-emu` takes the same flags as `hp9` and runs on hosts without a usable
+hypervisor. It links Unicorn Engine, so the binary as a whole is GPLv2, with
+`COPYING`, `NOTICE` and the MIT notices in each archive; see [LICENSE](LICENSE).
+The script builds every binary from the unpacked source tarball, with Unicorn
+from source (`-Dunicorn=source`), so the tarball is exactly what was built. It
+needs `scripts/fetch.sh` to have been run and runs on macOS, which
+cross-compiles the other targets.
 
 ## Run
 
@@ -180,4 +202,5 @@ scripts/lima/vm push-root linux             # the root tree, into ~/hp9/root
 | `tests/integration.zig` | real 9front binaries through the hp9 CLI |
 | `tests/fixtures` | test programs and binary generators |
 | `scripts/mkroot.py` | builds the 9front root tree from the pinned image |
+| `scripts/release.sh` | builds the release assets (`hp9`, `hp9-emu` and its source) into `dist/` |
 | `.local/` | gitignored: tools, caches, upstream clones, 9front images, prebuilt Unicorn, test VMs |

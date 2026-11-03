@@ -8,11 +8,14 @@ in [scripts/pins.sh](../../scripts/pins.sh) (`UNICORN_VERSION`,
 and applies the patches here in order. It redoes that only when the tarball
 pin or a patch changes (`.local/src/unicorn/.hp9-stamp`).
 
-Unicorn is GPLv2, and so are these patches. It's for development and CI
-builds only and never goes into a release build of hp9.
+Unicorn is GPLv2, and so are these patches and config headers (see
+[COPYING](COPYING)). It never goes into the MIT `hp9` release build; it ships
+only in the separate GPLv2 `hp9-emu` release assets, next to their
+corresponding source (see `scripts/release.sh`).
 
 | Path | Contents |
 | --- | --- |
+| `COPYING` | The GPLv2, which covers this directory |
 | `patches/` | Changes to Unicorn, applied with `patch -p1` |
 | `config/<host>/` | QEMU's generated config headers for each host: `config-host.h` and `<target>-softmmu/config-target.h` for the x86_64 and aarch64 guest targets |
 | `genconfig.sh` | Regenerates `config/` |

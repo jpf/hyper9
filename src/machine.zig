@@ -580,14 +580,16 @@ pub const Machine = struct {
         if (p.image) |b| c.image = m.gpa.dupe(u8, b) catch null;
         c.initSys();
         c.sys.notify = p.sys.notify;
-        kern.fork(flag, c.pid, Proc, childMain, c) catch {
+        // The child may run, exit and free itself before kern.fork returns.
+        const pid = c.pid;
+        kern.fork(flag, pid, Proc, childMain, c) catch {
             if (c.image) |b| m.gpa.free(b);
             c.segs.release(cas);
             cas.destroy();
             j.dropProc(c);
             return error.Failed;
         };
-        return c.pid;
+        return pid;
     }
 
     fn failWith(msg: []const u8) error{Failed} {

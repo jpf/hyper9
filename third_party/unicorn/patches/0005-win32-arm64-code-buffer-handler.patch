@@ -6,7 +6,7 @@ diff --git a/qemu/accel/tcg/translate-all.c b/qemu/accel/tcg/translate-all.c
 index 71b6b2b..d508dcd 100644
 --- a/qemu/accel/tcg/translate-all.c
 +++ b/qemu/accel/tcg/translate-all.c
-@@ -900,6 +900,78 @@ static LONG __fastcall code_gen_buffer_handler(PEXCEPTION_POINTERS ptr, struct u
+@@ -900,6 +900,79 @@ static LONG __fastcall code_gen_buffer_handler(PEXCEPTION_POINTERS ptr, struct u
      return EXCEPTION_CONTINUE_SEARCH;
  }
  
@@ -14,10 +14,11 @@ index 71b6b2b..d508dcd 100644
 +/*
 + * arm64: a vectored handler only gets the exception pointers, and there's no
 + * x86 trampoline to bind uc to it, so live code buffers are kept in a list
-+ * and the handler looks the faulting address up in it.
++ * and the handler looks the faulting address up in it. hp9 runs an engine
++ * per guest process, so the list holds far more than a typical embedder's.
 + */
 +static SRWLOCK seh_lock = SRWLOCK_INIT;
-+static struct uc_struct *seh_ucs[64];
++static struct uc_struct *seh_ucs[1024];
 +
 +static LONG CALLBACK code_gen_buffer_handler_arm64(PEXCEPTION_POINTERS ptr)
 +{
@@ -85,7 +86,7 @@ index 71b6b2b..d508dcd 100644
  static inline void may_remove_handler(struct uc_struct *uc) {
      if (uc->seh_closure) {
          if (uc->seh_handle) {
-@@ -997,6 +1069,7 @@ static inline void *alloc_code_gen_buffer(struct uc_struct *uc)
+@@ -997,6 +1070,7 @@ static inline void *alloc_code_gen_buffer(struct uc_struct *uc)
  
      return VirtualAlloc(NULL, size, MEM_RESERVE, PAGE_EXECUTE_READWRITE);
  }

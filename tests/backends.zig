@@ -442,7 +442,7 @@ test "segments: releasing a process's segments frees its memory" {
     }.f);
 }
 
-test "pooled vCPUs carry FP state, the thread pointer and fork across processes" {
+test "pooled vCPUs carry FP state, the thread pointer and fork across processes arm64" {
     // Forks four times (16 processes), then each sets d8 and TPIDR_EL0 from
     // its Tos pid and makes 2000 syscalls, each one a fresh trip through
     // the shared pool when no vCPUs can be owned, so processes keep landing
@@ -484,16 +484,65 @@ test "pooled vCPUs carry FP state, the thread pointer and fork across processes"
         0xd2800100, // mov  x0, #8             EXITS
         0xd4000001, // svc  #0
     });
-    const bytes = try image(std.testing.allocator, .arm64, &code);
-    defer std.testing.allocator.free(bytes);
+    try expectPooled(.arm64, &code);
+}
+
+test "pooled vCPUs carry FP state and fork across processes amd64" {
+    // As the arm64 test, with xmm8 and MXCSR (FS base isn't used by 9front
+    // binaries, and Unicorn's user mode can't write it without a GDT).
+    const code = [_]u8{
+        0x49, 0x89, 0xc4, // movq  %rax, %r12          Tos
+        0x48, 0x83, 0xec, 0x20, // subq  $0x20, %rsp
+        0x49, 0xc7, 0xc5, 0x04, 0x00, 0x00, 0x00, // movq  $4, %r13
+        // fork:
+        0x48, 0xc7, 0x44, 0x24, 0x08, 0x14, 0x00, 0x00, 0x00, // movq $0x14, 8(%rsp)  RFPROC|RFFDG
+        0xbd, 0x13, 0x00, 0x00, 0x00, // movl  $19, %ebp          RFORK
+        0x0f, 0x05, // syscall
+        0x49, 0xff, 0xcd, // decq  %r13
+        0x75, 0xeb, // jne   fork
+        0x41, 0x8b, 0x5c, 0x24, 0x40, // movl  64(%r12), %ebx     Tos.pid
+        0x48, 0x83, 0xc3, 0x64, // addq  $100, %rbx
+        0x66, 0x4c, 0x0f, 0x6e, 0xc3, // movq  %rbx, %xmm8
+        0xc7, 0x44, 0x24, 0x10, 0x80, 0x7f, 0x00, 0x00, // movl $0x7f80, 16(%rsp)
+        0x0f, 0xae, 0x54, 0x24, 0x10, // ldmxcsr 16(%rsp)          round down
+        0x49, 0xc7, 0xc6, 0xd0, 0x07, 0x00, 0x00, // movq  $2000, %r14
+        // loop:
+        0x48, 0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, // movq $0, 8(%rsp)
+        0xbd, 0x11, 0x00, 0x00, 0x00, // movl  $17, %ebp          SLEEP(0)
+        0x0f, 0x05, // syscall
+        0x49, 0xff, 0xce, // decq  %r14
+        0x75, 0xeb, // jne   loop
+        0x66, 0x4c, 0x0f, 0x7e, 0xc1, // movq  %xmm8, %rcx
+        0x48, 0x39, 0xd9, // cmpq  %rbx, %rcx
+        0x75, 0x1a, // jne   bad
+        0x0f, 0xae, 0x5c, 0x24, 0x10, // stmxcsr 16(%rsp)
+        0x81, 0x7c, 0x24, 0x10, 0x80, 0x7f, 0x00, 0x00, // cmpl $0x7f80, 16(%rsp)
+        0x75, 0x0b, // jne   bad
+        0x48, 0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, // movq $0, 8(%rsp)  exits(nil)
+        0xeb, 0x05, // jmp   exit
+        // bad:
+        0x31, 0xc0, // xorl  %eax, %eax
+        0x48, 0x8b, 0x00, // movq  (%rax), %rax       a fault kills it
+        // exit:
+        0xbd, 0x08, 0x00, 0x00, 0x00, // movl  $8, %ebp           EXITS
+        0x0f, 0x05, // syscall
+    };
+    try expectPooled(.amd64, &code);
+}
+
+/// Runs `code` with the pool forced on (no owned vCPUs) and off, on every
+/// backend that can, and expects a clean exit.
+fn expectPooled(arch: aout.Arch, code: []const u8) !void {
     const gpa = std.testing.allocator;
+    const bytes = try image(gpa, arch, code);
+    defer gpa.free(bytes);
     var ran: usize = 0;
     for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| for ([_]u32{ 0, 1 }) |own| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var m = hp9.Machine.init(gpa, std.testing.io, .{
             .backend = kind,
-            .arch = .arm64,
+            .arch = arch,
             .owned_vcpus = own,
             .stdio = .{ .out = &out.writer, .err = &out.writer },
         }) catch |e| switch (e) {
@@ -502,7 +551,7 @@ test "pooled vCPUs carry FP state, the thread pointer and fork across processes"
         };
         defer m.deinit();
         const status = try m.run(.{ .bytes = bytes }, &.{"t"});
-        errdefer std.debug.print("backend {t}, owned_vcpus {d}\n", .{ kind, own });
+        errdefer std.debug.print("backend {t}, {t}, owned_vcpus {d}\n", .{ kind, arch, own });
         var sb: [300]u8 = undefined;
         try std.testing.expectEqualStrings("exited ", switch (status) {
             .exited => |t| try std.fmt.bufPrint(&sb, "exited {s}", .{t}),

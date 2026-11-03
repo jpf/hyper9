@@ -19,3 +19,16 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+This license covers hp9's own source code. Some files and builds are under
+other licenses:
+
+- third_party/drawterm: MIT, see third_party/drawterm/LICENSE.
+- third_party/unicorn: GPLv2 (patches to Unicorn Engine and QEMU's generated
+  configuration headers), see third_party/unicorn/COPYING.
+- Binaries built with -Demu=unicorn, released as "hp9-emu", link Unicorn
+  Engine and are distributed under the GNU General Public License version 2.
+  hp9's own source code in those binaries remains available under the MIT
+  license above.

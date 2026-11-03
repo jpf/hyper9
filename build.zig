@@ -207,7 +207,9 @@ fn addUnicornSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const uc = unicorn_src.build(b, target, optimize).?;
     unicorn_libs = uc.libs;
     const wf = b.addWriteFiles();
-    const h = wf.add("unicorn.h", "#include <unicorn/unicorn.h>\n");
+    // translate-c can't handle mingw's fortified wcscat/wcscpy, which
+    // ReleaseSafe turns on; only Unicorn's declarations are needed here.
+    const h = wf.add("unicorn.h", "#undef _FORTIFY_SOURCE\n#include <unicorn/unicorn.h>\n");
     const tc = b.addTranslateC(.{ .root_source_file = h, .target = target, .optimize = optimize });
     tc.addIncludePath(uc.include);
     return tc.createModule();
@@ -235,7 +237,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const os = target.result.os.tag;
-    var emu = b.option(Emu, "emu", "Emulator backend to build in (GPLv2 Unicorn: dev and CI builds only)") orelse .none;
+    var emu = b.option(Emu, "emu", "Emulator backend to build in (GPLv2 Unicorn: dev, CI and the hp9-emu release only)") orelse .none;
     // No wheel exists for Windows, so it always builds from source.
     const unicorn_from = b.option(UnicornFrom, "unicorn", "With -Demu=unicorn: the prebuilt wheel library or a source build (default: prebuilt, source on Windows)") orelse
         if (os == .windows) UnicornFrom.source else .prebuilt;
@@ -466,6 +468,32 @@ pub fn build(b: *std.Build) void {
     }
     test_step.dependOn(&run_backend_tests.step);
     test_step.dependOn(&run_integration.step);
+
+    // The speed numbers in DESIGN.md's "Limits and selection". Always
+    // ReleaseFast (the hp9 module inherits it), whatever -Doptimize says.
+    const bench = b.addExecutable(.{
+        .name = "bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "hp9", .module = mod }},
+        }),
+    });
+    if (os == .macos) {
+        addSdkPaths(b, bench.root_module);
+        bench.root_module.linkFramework("Hypervisor", .{});
+    }
+    linkUnicorn(bench);
+    const run_bench = b.addRunArtifact(bench);
+    run_bench.has_side_effects = true;
+    if (os == .macos and b.graph.host.result.os.tag == .macos) {
+        const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", "--entitlements" });
+        sign.addFileArg(b.path("hp9.entitlements"));
+        sign.addFileArg(bench.getEmittedBin());
+        run_bench.step.dependOn(&sign.step);
+    }
+    b.step("bench", "Time a compute loop and pwrite round trips on every backend built in").dependOn(&run_bench.step);
 
     // For running the backend tests in a VM: zig-out/bin/backend-tests.
     const install_tests = b.addInstallArtifact(backend_tests, .{ .dest_sub_path = "backend-tests" });

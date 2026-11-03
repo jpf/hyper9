@@ -231,7 +231,7 @@ fn explain(want: hp9.vmm.BackendKind, err: hp9.Machine.InitError) []const u8 {
     return switch (err) {
         error.HypervisorUnavailable => "no usable hypervisor (on macOS, is hp9 signed with hp9.entitlements?)",
         error.BackendNotBuilt => switch (want) {
-            .emu, .auto => "the emulator isn't built into this hp9 (build with -Demu=unicorn)",
+            .emu, .auto => "the emulator isn't built into this hp9 (use hp9-emu from the releases, or build with -Demu=unicorn)",
             else => "backend not built into this hp9",
         },
         error.WrongArch => "backend can't run this architecture",
