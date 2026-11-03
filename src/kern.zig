@@ -520,10 +520,19 @@ fn hp9_policy_check(path: [*]const u8, len: c_long, op: c_int) callconv(.c) c_in
 fn hp9_cons_read(id: c_ulong, buf: [*]u8, n: c_long) callconv(.c) c_long {
     const con = console(id) orelse return -1;
     const r = con.in orelse return 0;
+    if (n == 0) return 0;
     while (!con.rmutex.tryLock()) std.Thread.yield() catch {};
     defer con.rmutex.unlock();
-    const got = r.readSliceShort(buf[0..@intCast(n)]) catch return -1;
-    return @intCast(got);
+    // One host read, as on a terminal: readSliceShort would wait for the
+    // whole buffer, so a typed line wouldn't arrive until EOF.
+    var data = [1][]u8{buf[0..@intCast(n)]};
+    while (true) {
+        const got = r.readVec(&data) catch |err| switch (err) {
+            error.EndOfStream => return 0,
+            error.ReadFailed => return -1,
+        };
+        if (got > 0) return @intCast(got);
+    }
 }
 
 fn hp9_cons_write(id: c_ulong, fd: c_int, buf: [*]const u8, n: c_long) callconv(.c) c_long {

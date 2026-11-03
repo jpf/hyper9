@@ -210,6 +210,8 @@ const State = struct {
     generation: u64 = 0,
     stop: Stop = .none,
     kicked: std.atomic.Value(bool) = .init(false),
+    /// Set from just before `kicked` is checked until uc_emu_start returns.
+    in_run: std.atomic.Value(bool) = .init(false),
 
     fn addHooks(s: *State) vmm.Error!void {
         var h: uc.uc_hook = 0;
@@ -302,13 +304,17 @@ const State = struct {
 
     fn run(s: *State) vmm.Error!vmm.Exit {
         if (s.as == null) return error.BadAddress;
-        // TODO(M4): a kick landing between this check and uc_emu_start is
-        // lost, because uc_emu_start clears Unicorn's stop request.
-        if (s.kicked.swap(false, .acquire)) return .interrupted;
+        // `in_run` is set before `kicked` is checked, so a kick either is
+        // seen here or finds `in_run` set and repeats its stop request
+        // until this run ends (see `kick`).
+        s.in_run.store(true, .seq_cst);
+        defer s.in_run.store(false, .release);
+        if (s.kicked.swap(false, .seq_cst)) return .interrupted;
         try s.sync();
         try s.writeRegs();
         s.stop = .none;
         const err = uc.uc_emu_start(s.engine, s.ureg.pc(), std.math.maxInt(u64), 0, 0);
+        s.in_run.store(false, .release);
         try s.readRegs();
         const stop = s.stop;
         s.stop = .none;
@@ -504,8 +510,18 @@ pub const Vcpu = struct {
     /// Safe from any thread. A kick before `run` makes the next run return
     /// `.interrupted` at once.
     pub fn kick(v: *Vcpu) void {
-        v.s.kicked.store(true, .release);
-        _ = uc.uc_emu_stop(v.s.engine);
+        const s = v.s;
+        s.kicked.store(true, .seq_cst);
+        _ = uc.uc_emu_stop(s.engine);
+        // uc_emu_start clears Unicorn's stop request, so a stop landing
+        // just before it is lost. Repeat it until the run has seen the kick
+        // (taking `kicked`) or ended. The bound only guards against a run
+        // stuck outside Unicorn; a running engine stops within microseconds.
+        var tries: u32 = 0;
+        while (s.in_run.load(.seq_cst) and s.kicked.load(.seq_cst) and tries < 10_000) : (tries += 1) {
+            std.Thread.yield() catch {};
+            if (tries % 16 == 15) _ = uc.uc_emu_stop(s.engine);
+        }
     }
 
     pub fn run(v: *Vcpu) vmm.Error!vmm.Exit {

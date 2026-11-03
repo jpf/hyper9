@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const hp9 = @import("hp9");
 const cli = @import("cli.zig");
+const Stdin = @import("stdin.zig").Stdin;
 
 /// Exit codes for hp9's own failures (DESIGN.md, "Exit codes").
 const exit_failed = 125;
@@ -124,7 +125,8 @@ pub fn main(init: std.process.Init) !u8 {
     };
 
     var in_buf: [4096]u8 = undefined;
-    var in = std.Io.File.stdin().readerStreaming(io, &in_buf);
+    var in: Stdin = undefined;
+    in.init(io, &in_buf);
     var out = std.Io.File.stdout().writerStreaming(io, &.{});
     var err_w = std.Io.File.stderr().writerStreaming(io, &.{});
     var opts = base;
@@ -132,7 +134,7 @@ pub fn main(init: std.process.Init) !u8 {
     opts.trace = if (cfg.trace) |t| (if (t.len > 0) &trace_w.interface else &err_w.interface) else null;
     opts.dump_on_fault = cfg.dump_on_fault;
     opts.ns = cfg.ns;
-    opts.stdio = .{ .in = &in.interface, .out = &out.interface, .err = &err_w.interface };
+    opts.stdio = .{ .in = in.reader(), .out = &out.interface, .err = &err_w.interface };
     var machine = hp9.Machine.init(init.gpa, io, opts) catch |err| {
         const a: hp9.vmm.Arch = arch orelse hp9.vmm.host_arch orelse .arm64;
         std.debug.print("hp9: cannot create {t} machine for {t}: {s}\n", .{ cfg.backend, a, explain(cfg.backend, err) });

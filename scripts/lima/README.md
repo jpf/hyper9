@@ -55,6 +55,39 @@ page, not UTF-8).
 `vm status` lists the VMs, `vm shell <os>` with no command opens a shell
 (`cmd.exe` on Windows), and `vm rm <os>` deletes one.
 
+## Tests
+
+`vm test <os>` runs the backend and integration tests in the guest on the
+emulator. Build them first with the same target as the table above, adding
+`install-tests`:
+
+```sh
+zig build install install-tests -Demu=unicorn -Dtarget=aarch64-linux-musl --prefix zig-out/linux
+scripts/lima/vm test linux                  # both sets
+scripts/lima/vm test windows integration    # just one
+HP9_TEST_PENDING=1 scripts/lima/vm test macos integration  # include the "M4: ..." cases
+```
+
+It pushes `hp9` and the test binaries from `zig-out/<os>/bin`, runs
+`push-root`, then runs each set over ssh with `HP9_TEST_BIN`,
+`HP9_TEST_ROOT` and `HP9_TEST_BACKENDS=emu`. The root tree is arm64 only, so
+`linux-amd64` runs just the backend tests. `HP9_TEST_SLOW` multiplies the
+interactive cases' timeouts; it defaults to 10 on `linux-amd64` and 3 on
+`windows`, where each guest process takes about 0.4 s to start.
+
+ssh gives the tests no terminal, so the interactive cases make their own
+([tests/term.zig](../../tests/term.zig)): a pty on Linux and macOS, ConPTY
+on Windows. On Windows that differs from a local console in two ways the
+tests allow for: ConPTY redraws the screen rather than passing output
+through, so trailing spaces can come out as cursor movements, and Windows
+OpenSSH itself runs everything under ConPTY, so a manual `vm shell windows`
+session behaves like the tests, not like a local console window.
+
+Windows Defender blocks some command lines as malware: a host command line
+with 79 `| cat` stages is flagged as `Trojan:Win32/Commando.A!ml`, and
+CreateProcess fails with access denied. Tests that need long pipelines
+build them inside rc instead.
+
 ## First boot
 
 - **linux** boots in seconds from the Ubuntu cloud image.

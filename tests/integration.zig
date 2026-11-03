@@ -6,15 +6,21 @@
 //! .local/9front/root) and the backends to test (HP9_TEST_BACKENDS, the
 //! ones built in) through the environment. Every case runs on each backend
 //! that can run arm64 here. Without a root tree, the tests are skipped.
+//! `zig build install-tests` builds this file for another target, and
+//! `scripts/lima/vm test` runs it in a test VM with the same variables.
 //!
 //! Cases named "M4: ..." (and so on) are for a milestone in progress. They
 //! call `pending`, which skips them unless HP9_TEST_PENDING is set; when
 //! the milestone is done, drop the prefix and the call. Cases for a done
 //! milestone are tagged "(M3)" and the like, so `zig build m3` can select
 //! them.
+//!
+//! Interactive cases run hp9 on a terminal from tests/term.zig. Their
+//! timeouts are multiplied by HP9_TEST_SLOW (default 1), for emulated VMs.
 
 const std = @import("std");
 const builtin = @import("builtin");
+const Term = @import("term.zig").Term;
 
 const gpa = std.testing.allocator;
 
@@ -24,17 +30,39 @@ const Env = struct {
     backends: []const u8,
 };
 
+var env_buf: [4][std.Io.Dir.max_path_bytes]u8 = undefined;
+
+/// An environment variable, on every host (getPosix doesn't build on
+/// Windows). Values live in one of four slots, chosen by the caller.
+fn getenv(comptime slot: usize, key: []const u8) ?[]const u8 {
+    var map = std.testing.environ.createMap(gpa) catch return null;
+    defer map.deinit();
+    const v = map.get(key) orelse return null;
+    if (v.len > env_buf[slot].len) return null;
+    @memcpy(env_buf[slot][0..v.len], v);
+    return env_buf[slot][0..v.len];
+}
+
 fn env() !Env {
-    const hp9 = std.testing.environ.getPosix("HP9_TEST_BIN") orelse return error.SkipZigTest;
-    const root = std.testing.environ.getPosix("HP9_TEST_ROOT") orelse return error.SkipZigTest;
+    const hp9 = getenv(0, "HP9_TEST_BIN") orelse return error.SkipZigTest;
+    const root = getenv(1, "HP9_TEST_ROOT") orelse return error.SkipZigTest;
+    // The tree from scripts/mkroot.py is arm64 only, and hp9 runs the
+    // host's architecture, so x86_64 hosts (linux-amd64) skip these.
+    if (builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     std.Io.Dir.cwd().access(std.testing.io, try hostPath(root, "arm64/bin/cat"), .{}) catch return error.SkipZigTest;
-    const backends = std.testing.environ.getPosix("HP9_TEST_BACKENDS") orelse "auto";
+    const backends = getenv(2, "HP9_TEST_BACKENDS") orelse "auto";
     return .{ .hp9 = hp9, .root = root, .backends = backends };
 }
 
 /// Skips a case for a milestone that isn't done yet, unless asked for.
 fn pending() !void {
-    if (std.testing.environ.getPosix("HP9_TEST_PENDING") == null) return error.SkipZigTest;
+    if (getenv(3, "HP9_TEST_PENDING") == null) return error.SkipZigTest;
+}
+
+/// `ms` scaled by HP9_TEST_SLOW.
+fn slow(ms: u32) u32 {
+    const f = std.fmt.parseInt(u32, getenv(3, "HP9_TEST_SLOW") orelse "1", 10) catch 1;
+    return ms *| @max(f, 1);
 }
 
 var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -87,33 +115,51 @@ fn runOn(e: Env, backend: []const u8, args: []const []const u8, stdin: ?[]const 
     defer argv.deinit(gpa);
     try argv.appendSlice(gpa, &.{ e.hp9, "--backend", backend, "--root", e.root });
     try argv.appendSlice(gpa, args);
-    const r = if (stdin) |data| blk: {
-        // std.process.run has no stdin; feed it through a file.
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "in", .data = data });
-        var p: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const n = try tmp.dir.realPathFile(std.testing.io, "in", &p);
-        var sh: std.ArrayList(u8) = .empty;
-        defer sh.deinit(gpa);
-        for (argv.items) |a| try sh.print(gpa, "'{s}' ", .{a});
-        try sh.print(gpa, "< '{s}'", .{p[0..n]});
-        break :blk try std.process.run(gpa, std.testing.io, .{
-            .argv = &.{ "/bin/sh", "-c", sh.items },
-            .timeout = .{ .duration = .{ .raw = .fromSeconds(30), .clock = .awake } },
-        });
-    } else try std.process.run(gpa, std.testing.io, .{
-        .argv = argv.items,
-        .timeout = .{ .duration = .{ .raw = .fromSeconds(30), .clock = .awake } },
-    });
+    const r = try runProcess(argv.items, stdin);
     const code = switch (r.term) {
         .exited => |c| c,
         else => {
             std.debug.print("hp9 {s}: {any}\n{s}", .{ args[0], r.term, r.stderr });
+            gpa.free(r.stdout);
+            gpa.free(r.stderr);
             return error.Crashed;
         },
     };
     return .{ .code = code, .out = r.stdout, .err = r.stderr };
+}
+
+/// std.process.run, with `stdin` written to a pipe (closed at the end) or,
+/// if null, the null device.
+fn runProcess(argv: []const []const u8, stdin: ?[]const u8) !std.process.RunResult {
+    const io = std.testing.io;
+    const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(slow(30_000)), .clock = .awake } };
+    var child = try std.process.spawn(io, .{
+        .argv = argv,
+        .stdin = if (stdin != null) .pipe else .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+        .create_no_window = true,
+    });
+    defer child.kill(io);
+    if (stdin) |data| {
+        // Small inputs fit in the pipe, so this doesn't wait on the reader.
+        child.stdin.?.writeStreamingAll(io, data) catch {};
+        child.stdin.?.close(io);
+        child.stdin = null;
+    }
+    var mr_buf: std.Io.File.MultiReader.Buffer(2) = undefined;
+    var mr: std.Io.File.MultiReader = undefined;
+    mr.init(gpa, io, mr_buf.toStreams(), &.{ child.stdout.?, child.stderr.? });
+    defer mr.deinit();
+    while (mr.fill(64, timeout)) |_| {} else |err| switch (err) {
+        error.EndOfStream => {},
+        else => |e| return e,
+    }
+    try mr.checkAnyError();
+    const term = try child.wait(io);
+    const out = try mr.toOwnedSlice(0);
+    errdefer gpa.free(out);
+    return .{ .term = term, .stdout = out, .stderr = try mr.toOwnedSlice(1) };
 }
 
 test "cat /lib/namespace (M2 demo)" {
@@ -451,11 +497,9 @@ test "many processes, one after another (M3)" {
 test "more live processes than HVF has vCPUs (M3)" {
     const e = try env();
     // 80 processes alive at once, all but the first blocked reading a pipe.
-    var cmd: std.ArrayList(u8) = .empty;
-    defer cmd.deinit(gpa);
-    try cmd.appendSlice(gpa, "echo deep");
-    for (0..79) |_| try cmd.appendSlice(gpa, " | cat");
-    const r = try run(e, &.{ "--rc", cmd.items });
+    // rc builds the pipeline: Windows Defender blocks a host command line
+    // of 79 "| cat"s as Trojan:Win32/Commando.A!ml.
+    const r = try run(e, &.{ "--rc", "c='echo deep'; for(i in `{seq 79}) c=$c^' | cat'; eval $c" });
     defer r.deinit();
     try std.testing.expectEqualStrings("deep\n", r.out);
     try std.testing.expectEqual(0, r.code);
@@ -490,4 +534,224 @@ test "--ns replays a namespace file (M3)" {
     defer r.deinit();
     try std.testing.expectEqualStrings("/lib/acid\n", r.out);
     try std.testing.expectEqual(0, r.code);
+}
+
+// The terminal. These run hp9 on a pty or pseudoconsole from tests/term.zig.
+
+/// Enter, as a terminal sends it: cooked mode turns it into a newline on
+/// every host.
+const enter = "\r";
+
+/// rc's prompt. ConPTY redraws the screen rather than passing output
+/// through, and draws the trailing space of "% " as a cursor movement.
+const prompt = "%";
+
+/// Runs `hp9 --backend <backend> --root <root> args...` on a new terminal.
+fn spawnTerm(e: Env, backend: []const u8, args: []const []const u8) !Term {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ e.hp9, "--backend", backend, "--root", e.root });
+    try argv.appendSlice(gpa, args);
+    return Term.spawn(gpa, argv.items);
+}
+
+fn backendList(e: Env) std.mem.TokenIterator(u8, .scalar) {
+    return std.mem.tokenizeScalar(u8, e.backends, ',');
+}
+
+test "an interactive rc reads typed lines" {
+    const e = try env();
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        var t = try spawnTerm(e, backend, &.{ "rc", "-i" });
+        defer t.deinit();
+        try t.expect(prompt, slow(10_000));
+        // The output, xy, isn't in the echoed input, echo x^y.
+        try t.send("echo x^y" ++ enter);
+        try t.expect("xy", slow(10_000));
+        try t.expect(prompt, slow(10_000));
+        try t.send("exit" ++ enter);
+        try std.testing.expectEqual(0, try t.wait(slow(10_000)));
+    }
+}
+
+// Notes and /proc (M4).
+
+test "M4: kill and ps work in an interactive rc (M4 demo)" {
+    try pending();
+    const e = try env();
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "rc", "-i" });
+        defer t.deinit();
+        try t.expect(prompt, slow(10_000));
+        try t.send("sleep 1000 &" ++ enter);
+        try t.expect(prompt, slow(10_000));
+        // ps names each process by its program, so only sleep's line matches.
+        try t.send("ps | grep -c sle^ep" ++ enter);
+        try t.expect("\n1", slow(10_000));
+        try t.expect(prompt, slow(10_000));
+        try t.send("kill sleep | rc" ++ enter);
+        try t.expect(prompt, slow(10_000));
+        try t.send("wait; ps | grep -c sle^ep" ++ enter);
+        try t.expect("\n0", slow(10_000));
+        try t.expect(prompt, slow(10_000));
+        try t.send("exit" ++ enter);
+        _ = try t.wait(slow(10_000));
+    }
+}
+
+test "M4: Ctrl-C interrupts the foreground command and rc carries on" {
+    try pending();
+    const e = try env();
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "rc", "-i" });
+        defer t.deinit();
+        try t.expect(prompt, slow(10_000));
+        try t.send("sleep 1000" ++ enter);
+        try t.drain(slow(500));
+        try t.send("\x03");
+        try t.expect(prompt, slow(10_000));
+        try t.send("echo x^y" ++ enter);
+        try t.expect("xy", slow(10_000));
+        try t.send("exit" ++ enter);
+        _ = try t.wait(slow(10_000));
+    }
+}
+
+test "M4: a second Ctrl-C within a second tears the machine down" {
+    try pending();
+    const e = try env();
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        // rc traps interrupt and loops, so only the second Ctrl-C stops it.
+        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--rc", "fn sigint {}; echo ready; while() sleep 1" });
+        defer t.deinit();
+        try t.expect("ready", slow(10_000));
+        try t.send("\x03");
+        try t.drain(100);
+        try t.send("\x03");
+        try std.testing.expect(try t.wait(slow(5_000)) != 0);
+    }
+}
+
+test "M4: rawon puts the host terminal in raw mode until exit" {
+    try pending();
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // no termios to check
+    const e = try env();
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--rc", ">/dev/consctl { echo rawon; echo ready >/dev/cons; read >/dev/null }" });
+        defer t.deinit();
+        try std.testing.expect(t.cooked());
+        try t.expect("ready", slow(10_000));
+        try std.testing.expect(!t.cooked());
+        // Raw mode doesn't turn \r into \n, so read needs a newline.
+        try t.send("x\n");
+        try std.testing.expectEqual(0, try t.wait(slow(10_000)));
+        try std.testing.expect(t.cooked());
+    }
+}
+
+test "M4: closing the terminal posts hangup" {
+    try pending();
+    const e = try env();
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        // The terminal is gone, so the handler leaves its mark in a file.
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--cwd", s.path, "--rc", "fn sighup { echo >hup }; echo ready; sleep 1000" });
+        defer t.deinit();
+        try t.expect("ready", slow(10_000));
+        t.hangup();
+        _ = try t.wait(slow(5_000));
+        try std.testing.expect(s.exists("hup"));
+    }
+}
+
+test "M4: SIGTERM posts hangup" {
+    try pending();
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const e = try env();
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--rc", "fn sighup { echo got hangup }; echo ready; sleep 1000" });
+        defer t.deinit();
+        try t.expect("ready", slow(10_000));
+        t.signal(.TERM);
+        try t.expect("got hangup", slow(5_000));
+        _ = try t.wait(slow(5_000));
+    }
+}
+
+test "M4: a note handler catches a note and the process continues" {
+    try pending();
+    const e = try env();
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", "fn sighup { echo caught }; echo hangup >/proc/$pid/note; echo after" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("caught\nafter\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "M4: an unhandled note kills the process with the note as its status" {
+    try pending();
+    const e = try env();
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", "sleep 1000 & echo die >/proc/$apid/note; wait $apid; echo $status" });
+    defer r.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "die") != null);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "M4: --timeout posts hangup before tearing down" {
+    try pending();
+    const e = try env();
+    const r = try run(e, &.{ "--timeout", "300ms", "--rc", "fn sighup { echo got hangup }; sleep 10" });
+    defer r.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "got hangup") != null);
+}
+
+test "M4: /proc/n/ctl kill stops a process" {
+    try pending();
+    const e = try env();
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", "sleep 1000 & echo kill >/proc/$apid/ctl; wait; echo done" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("done\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "M4: notepg reaches the note group and not a new one" {
+    try pending();
+    const e = try env();
+    // The block in braces makes its own note group (rfork s), so the
+    // hangup posted to rc's group doesn't reach it; sleep 1000 is in rc's.
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", "fn sighup {}; { rfork s; sleep 1; echo survived } & sleep 1000 & echo hangup >/proc/$pid/notepg; wait; echo done" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("survived\ndone\n", r.out);
+}
+
+test "M4: /proc/n has status, fd, ns and args" {
+    try pending();
+    const e = try env();
+    const st = try run(e, &.{ "--rc", "cat /proc/$pid/status" });
+    defer st.deinit();
+    try std.testing.expect(std.mem.startsWith(u8, st.out, "rc "));
+    const fd = try run(e, &.{ "--rc", "cat /proc/$pid/fd" });
+    defer fd.deinit();
+    try std.testing.expect(std.mem.startsWith(u8, fd.out, "/mnt/term/cwd\n"));
+    const ns = try run(e, &.{ "--rc", "cat /proc/$pid/ns" });
+    defer ns.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, ns.out, "bind ") != null);
+    const ls = try run(e, &.{ "--rc", "ls /proc | wc -l" });
+    defer ls.deinit();
+    try std.testing.expect(try std.fmt.parseInt(usize, std.mem.trim(u8, ls.out, " \n"), 10) >= 2);
 }

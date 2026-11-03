@@ -175,7 +175,7 @@ Each CLI invocation is one machine: one host process with one VM. Each Plan 9 pr
 
 **Several machines per host process.** An embedder, or the test suite, can run several machines in one host process. They share the one drawterm kernel, but each machine's first Proc starts with a fresh Pgrp, Fgrp and Egrp, so each has its own namespace, device mask, console and environment. The CLI always runs one.
 
-**Notes on blocked and running processes.** A note to a process blocked in a host syscall wakes it through drawterm's sleep/wakeup, and the syscall fails with "interrupted". A note to a process running guest code kicks its vCPU, and the note is delivered at the exit.
+**Notes on blocked and running processes.** A note to a process blocked in a host syscall wakes it through drawterm's sleep/wakeup, and the syscall fails with "interrupted". A note to a process running guest code kicks its vCPU, and the note is delivered at the exit. Pending notes are queued on hp9's process record, not in drawterm's Proc: drawterm's `postnote` keeps only `notepending`, which `enderror` clears after every failed syscall, so it serves only as the "interrupt this call" flag.
 
 **vCPU limits.** v1 is one vCPU per process. Measure each hypervisor's maximum early (`hv_vm_get_max_vcpu_count`, `KVM_CAP_MAX_VCPUS`, WHP's partition property). If a big tree hits the limit, release a process's vCPU while it is blocked in a long host syscall, keep its registers in the Proc, and reacquire a vCPU from a pool when it resumes. On HVF a vCPU is bound to its thread, so the pool has to be pool threads that run the guest on the process's behalf.
 
@@ -230,7 +230,7 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 
 The host's working directory is bound at the guest's `/mnt/term/cwd` and set as the guest's cwd, so that `hp9 ls` lists what the user expects.
 
-**Terminal (default):** `/dev/cons` is the machine's console device, which maps to the `Stdio` in `Machine.Options`: the host stdin and stdout for the CLI. Writing `rawon` to `/dev/consctl` switches the host TTY to raw mode (console mode on Windows). Ctrl-C posts an `interrupt` note to the foreground note group. Exit status: an empty `exits` string gives 0; any other string gives 1, and the string is printed to stderr.
+**Terminal (default):** `/dev/cons` is the machine's console device, which maps to the `Stdio` in `Machine.Options`: the host stdin and stdout for the CLI. A read returns after one host read, as on a terminal, so a typed line reaches the guest when Enter is pressed. Writing `rawon` to `/dev/consctl` switches the host TTY to raw mode (console mode on Windows). Ctrl-C posts an `interrupt` note to the foreground note group (see the CLI section's Signals and TTY for each host). Exit status: an empty `exits` string gives 0; any other string gives 1, and the string is printed to stderr.
 
 **Graphics (`--gfx`):** opens one host window through drawterm's GUI backend (Cocoa/Metal, X11 or Wayland, Win32) and serves `/dev/draw`, `/dev/mouse` and `/dev/kbd`, plus snarf mapped to the host clipboard. One screen per machine: running rio gives the full desktop. A seamless mode, where each rio window becomes a host window, is a later project.
 
@@ -467,6 +467,18 @@ The 125–127 codes follow `env` and `docker run`, so scripts can tell hp9 failu
 - **SIGTERM and SIGHUP:** post a `hangup` note to every process, then exit after a grace period.
 - **Raw mode:** the host TTY goes raw only when the guest writes `rawon` to `/dev/consctl`. It's always restored on exit, including after a panic.
 
+How each host delivers these:
+
+| | Linux and macOS | Windows |
+| --- | --- | --- |
+| Ctrl-C | The terminal driver turns it into SIGINT (ISIG) in cooked mode | `CTRL_C_EVENT` to a `SetConsoleCtrlHandler` handler, while `ENABLE_PROCESSED_INPUT` is on |
+| Ctrl-C in raw mode | ISIG is off, so 0x03 reaches the guest as a key, as Del does on 9front under rawon | Processed input is off, so the same |
+| Hangup | SIGHUP (terminal closed), SIGTERM | `CTRL_CLOSE_EVENT`, `CTRL_LOGOFF_EVENT`, `CTRL_SHUTDOWN_EVENT`; Windows kills the process about 5 s after these, so the grace period has to be shorter. `CTRL_BREAK_EVENT` posts `interrupt` |
+| Raw mode | termios: clear ICANON, ECHO and ISIG | Console mode: clear `ENABLE_LINE_INPUT`, `ENABLE_ECHO_INPUT` and `ENABLE_PROCESSED_INPUT`; set `ENABLE_VIRTUAL_TERMINAL_INPUT` |
+| Line endings | The driver gives `\n` | A console in line mode gives `\r\n`, which the stdin reader turns into `\n` |
+
+The handlers only set a flag and wake a watcher. The watcher posts the notes from a thread that's a kernel process, as seam rule 4 requires.
+
 **Code structure**
 
 | File | Role |
@@ -571,6 +583,11 @@ Record design changes as they are made using `- YYYY-MM-DD: <design change> (rea
 
 #### M4
 
+- 2026-11-03: The integration tests run in every test VM: `zig build install-tests` builds them for `-Dtarget` next to the backend tests, and `scripts/lima/vm test <os>` pushes hp9, the tests and the root tree, then runs them on the emulator over ssh. Interactive cases run hp9 on a terminal the test creates (`tests/term.zig`: a pty on Linux and macOS, ConPTY on Windows), since ssh without `-t` gives none, and a human at `vm shell` can't be automated. `HP9_TEST_SLOW` scales their timeouts for the emulated VMs. (M4's demo is an interactive rc, and Ctrl-C, raw mode and hangup are host-terminal behaviour that differs on each host; until now only `backend-tests` ran in the VMs, and the M2 and M3 cases were checked there by hand.)
+- 2026-11-03: A console read returns after one host read instead of filling the guest's buffer, and on Windows hp9 reads stdin with `ReadFile`, turning a console's `\r\n` into `\n`. (rc reads its console in blocks, so with a terminal on stdin no typed line reached it until EOF; std's Windows reader treats a pending console read as unreachable and panicked under ConPTY.)
+- 2026-11-03: The emulator no longer loses a kick that lands just before `uc_emu_start`, which clears Unicorn's stop request: `kick` repeats `uc_emu_stop` until the run has taken the kick or ended. (Notes kick a running process, so a lost kick would leave a spinning process deaf to Ctrl-C on the emulator.)
+- 2026-11-03: The integration cases need the root tree's architecture, so they skip on x86\_64 hosts until there's an amd64 tree; `linux-amd64` runs only the backend tests. (`scripts/mkroot.py` builds an arm64 tree, and hp9 runs the host's architecture.)
+- 2026-11-03: M4 order: first a note queue and note group on hp9's process record in `src/kern/proc.c`, with drawterm's `postnote` reaching it through a `-Dpostnote=hp9_postnote` define on the drawterm files that post notes (only `devpipe.c`), so the vendor tree is untouched and `notepending` stays the "interrupt this call" flag. `RFNOTEG` then gives a process a new group. Next, delivery: at a syscall exit or kick, push a Ureg and the note string on the user stack (growing it as for arguments) and enter the `notify` handler, with `noted` restoring or killing the process as 9front's `noted` does; an unhandled note kills the process with the note as its status. The closed-pipe special case in `syscall.zig` and the `takeNote` path go away. Then devproc `#p` ported from 9front, serving through Zig leaves as devdup does: `args`, `ctl` (kill, hang, close), `fd`, `note`, `noteid`, `notepg`, `ns`, `ppid`, `status` and `wait`. `mem`, `regs`, `fpregs`, `segment` and `text` (acid) wait for M6, where self-hosted debugging needs them, and `proc`, `kregs`, `profile`, `syscall` and `watchpt` have no meaning here. Then the host side: Ctrl-C, hangup and raw mode as the Signals and TTY table says, a console read that can be interrupted (poll with a wake pipe on POSIX, `CancelIoEx` on Windows), and `--timeout` posting `hangup` with a grace period before the M2 teardown. The cases named "M4: ..." in `tests/integration.zig` cover each step, and `zig build m4` runs them. (Delivery needs the queue, devproc's `note` and `notepg` need delivery, and Ctrl-C needs both plus a console read it can interrupt.)
 - 2026-11-03: Unicorn ships in releases as a separate GPLv2 asset, `hp9-emu` (hp9 built with `-Demu=unicorn -Dunicorn=source`), next to the MIT `hp9` and a source tarball holding the hp9 tree and Unicorn's patched source; `LICENSE` notes which files and builds aren't MIT, and `third_party/unicorn` carries the GPLv2 as `COPYING`. Previously Unicorn was for development and CI only (so the emulator is usable without building from source, while `hp9` itself stays MIT).
 
 #### M5

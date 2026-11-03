@@ -196,6 +196,60 @@ test "kick interrupts a running vcpu amd64" {
     try expectKick(.amd64, &[_]u8{ 0xeb, 0xfe }); // jmp .
 }
 
+/// Kicks with no delay, many times over, so some kicks land while `run` is
+/// starting. Every run must still return `.interrupted`; a lost kick hangs.
+fn expectKickRace(arch: aout.Arch, text: []const u8) !void {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const bytes = try image(gpa, arch, text);
+    defer gpa.free(bytes);
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        var b = vmm.create(gpa, io, kind, .{ .arch = arch }) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
+            else => return e,
+        };
+        defer b.destroy();
+        const as = try b.newAddressSpace();
+        defer as.destroy();
+        var img = try hp9.loader.load(gpa, b, as, bytes, &.{"spin"}, 1);
+        defer img.segs.release(as);
+        var v = try b.createVcpu();
+        defer v.destroy();
+        try v.setAddressSpace(as);
+        const u: vmm.Ureg = .initExec(arch, img.entry, img.sp, img.tos);
+
+        const Kicker = struct {
+            fn run(vc: *vmm.Vcpu, go: *std.atomic.Value(u32), n: u32) void {
+                for (0..n) |i| {
+                    while (go.load(.acquire) <= i) std.atomic.spinLoopHint();
+                    vc.kick();
+                }
+            }
+        };
+        const rounds = 200;
+        var go: std.atomic.Value(u32) = .init(0);
+        const t = try std.Thread.spawn(.{}, Kicker.run, .{ &v, &go, rounds });
+        defer t.join();
+        errdefer std.debug.print("backend {t}, {t} binary\n", .{ kind, arch });
+        for (0..rounds) |_| {
+            v.setUreg(&u);
+            _ = go.fetchAdd(1, .release);
+            try std.testing.expectEqual(vmm.Exit.interrupted, try v.run());
+        }
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+test "a kick racing the start of a run isn't lost arm64" {
+    try expectKickRace(.arm64, &words(&.{0x14000000})); // b .
+}
+
+test "a kick racing the start of a run isn't lost amd64" {
+    try expectKickRace(.amd64, &[_]u8{ 0xeb, 0xfe }); // jmp .
+}
+
 /// Runs `bytes` as a machine with `pol` on every backend that can, and
 /// returns the statuses.
 fn runPolicy(arch: aout.Arch, bytes: []const u8, pol: hp9.Policy, want: []const u8) !void {

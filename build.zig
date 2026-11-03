@@ -103,21 +103,27 @@ const kern_flags_win32 = kern_flags ++ [_][]const u8{ "-DWINDOWS", "-DUNICODE" }
 /// cases by name; with `pending`, cases for a milestone not yet done (named
 /// "M4: ..." and so on) run instead of skipping.
 fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, hp9_bin: []const u8, root: []const u8, backends: []const u8, pending: bool) *std.Build.Step.Run {
-    const t = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/integration.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-        }),
-        .filters = filters,
-    });
-    const run = b.addRunArtifact(t);
+    const run = b.addRunArtifact(integrationTests(b, b.graph.host, optimize, filters));
     run.setEnvironmentVariable("HP9_TEST_BIN", hp9_bin);
     run.setEnvironmentVariable("HP9_TEST_ROOT", root);
     run.setEnvironmentVariable("HP9_TEST_BACKENDS", backends);
     if (pending) run.setEnvironmentVariable("HP9_TEST_PENDING", "1");
     run.has_side_effects = true;
     return run;
+}
+
+/// tests/integration.zig as a test binary. It links libc for the pty in
+/// tests/term.zig.
+fn integrationTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, filters: []const []const u8) *std.Build.Step.Compile {
+    return b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = target.result.os.tag != .windows,
+        }),
+        .filters = filters,
+    });
 }
 
 /// The number of entries in the root tree's /arm64/bin and /rc/bin, which
@@ -373,19 +379,18 @@ pub fn build(b: *std.Build) void {
         b.getInstallStep().dependOn(&b.addInstallFileWithDir(out.*, .{ .custom = "fixtures" }, name).step);
     }
 
+    // The M0 and M1 demos: the host architecture's hello on the default
+    // backend, and on the emulator when it's built in.
+    const host_hello = if (target.result.cpu.arch == .x86_64) hellos[1] else hellos[0];
+    const m1_step = b.step("m1", "Run the M0 and M1 demos: hp9 ./hello, and hp9 --backend emu ./hello with -Demu=unicorn");
     const m0 = b.addSystemCommand(&.{b.getInstallPath(.bin, exe.out_filename)});
-    m0.addFileArg(hellos[0]);
+    m0.addFileArg(host_hello);
     m0.expectStdOutEqual("hello\n");
     m0.step.dependOn(signed_step);
-    b.step("m0", "Run the M0 demo: hp9 ./hello").dependOn(&m0.step);
-
-    // The M1 demo runs the host architecture's hello on the emulator.
-    const m1_step = b.step("m1", "Run the M1 demo: hp9 --backend emu ./hello (needs -Demu=unicorn)");
-    if (emu != .unicorn) {
-        m1_step.dependOn(&b.addFail("the M1 demo needs -Demu=unicorn").step);
-    } else {
+    m1_step.dependOn(&m0.step);
+    if (emu == .unicorn) {
         const m1 = b.addSystemCommand(&.{ b.getInstallPath(.bin, exe.out_filename), "--backend", "emu" });
-        m1.addFileArg(if (target.result.cpu.arch == .x86_64) hellos[1] else hellos[0]);
+        m1.addFileArg(host_hello);
         m1.expectStdOutEqual("hello\n");
         m1.step.dependOn(signed_step);
         m1_step.dependOn(&m1.step);
@@ -436,6 +441,14 @@ pub fn build(b: *std.Build) void {
     const run_m3_cases = addIntegration(b, optimize, &.{"(M3"}, hp9_bin, root, backend_list, false);
     run_m3_cases.step.dependOn(signed_step);
     m3_step.dependOn(&run_m3_cases.step);
+
+    // The M4 demo is an interactive rc where kill and ps work. It runs on a
+    // pty (ConPTY on Windows) from tests/term.zig, as the "M4: ..." cases
+    // do, so zig build m4 is those cases. It fails until M4 is done.
+    const m4_step = b.step("m4", "Run the M4 demo (kill and ps in an interactive rc, on a pty) and the M4 integration cases (needs a root tree)");
+    const run_m4_cases = addIntegration(b, optimize, &.{"M4: "}, hp9_bin, root, backend_list, true);
+    run_m4_cases.step.dependOn(signed_step);
+    m4_step.dependOn(&run_m4_cases.step);
 
     const mod_tests = b.addTest(.{ .root_module = mod });
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
@@ -495,7 +508,9 @@ pub fn build(b: *std.Build) void {
     }
     b.step("bench", "Time a compute loop and pwrite round trips on every backend built in").dependOn(&run_bench.step);
 
-    // For running the backend tests in a VM: zig-out/bin/backend-tests.
-    const install_tests = b.addInstallArtifact(backend_tests, .{ .dest_sub_path = "backend-tests" });
-    b.step("install-tests", "Install the backend tests as zig-out/bin/backend-tests").dependOn(&install_tests.step);
+    // For running the tests in a VM (scripts/lima/vm test): the backend
+    // tests and the integration tests, built for the target.
+    const install_tests_step = b.step("install-tests", "Install the backend and integration tests as zig-out/bin/backend-tests and integration-tests");
+    install_tests_step.dependOn(&b.addInstallArtifact(backend_tests, .{ .dest_sub_path = b.fmt("backend-tests{s}", .{target.result.exeFileExt()}) }).step);
+    install_tests_step.dependOn(&b.addInstallArtifact(integrationTests(b, target, optimize, &.{}), .{ .dest_sub_path = b.fmt("integration-tests{s}", .{target.result.exeFileExt()}) }).step);
 }

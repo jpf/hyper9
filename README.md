@@ -2,6 +2,25 @@
 
 Run native Plan 9 (9front) executables directly on host hypervisors. See [DESIGN.md](DESIGN.md).
 
+## Status
+
+hp9 is under active development and isn't ready for general use yet. Work
+proceeds through the milestones below; see [Milestones](DESIGN.md#milestones)
+in the design for the full scope and demo of each.
+
+- [x] **M0, hello:** HVF backend, arm64 shim and a.out loader run a static binary
+- [x] **M1, emulator:** Unicorn backend for arm64 and amd64
+- [x] **M2, one process:** syscalls through drawterm's kern, host-tree root, terminal, sandbox policy core, Windows build
+- [x] **M3, trees:** rfork, exec, await, devdup and pipes; process and CPU caps
+- [ ] **M4, notes and /proc:** notify/noted, Ctrl-C interrupts, devproc
+- [ ] **M5, servers:** devsrv, rendezvous, semaphores, segattach, outbound network, Go compatibility
+- [ ] **M6, self-host:** compilers, linkers and mk run inside
+- [ ] **M7, graphics:** `--gfx` with devdraw; rio and acme in a host window
+- [ ] **M8, Linux:** KVM backend
+- [ ] **M9, Windows:** WHP backend
+- [ ] **M10, 9P roots:** `--root` over 9P, disk images, copy-on-write overlay
+
+
 ## Setup (macOS arm64)
 
 Requires Zig 0.16.x and Xcode (for the macOS SDK and `codesign`).
@@ -32,17 +51,21 @@ clean tree; it merges upstream into the subtree and keeps our local changes.
 zig build          # builds and ad-hoc signs zig-out/bin/hp9 with hp9.entitlements
 zig build test     # unit tests, and the backend tests on every backend built in
 zig build kern     # compiles drawterm's kern and the libraries it uses
-zig build m0       # M0 demo: hp9 ./hello must print "hello"
+zig build m1       # M0 demo: hp9 ./hello must print "hello" (plus the M1 demo with -Demu=unicorn)
 zig build m2       # M2 demos: hp9 /bin/cat /lib/namespace, and a write under --profile=tight fails
 zig build m3       # M3 demo, hp9 --rc 'ls /bin | wc -l', and the M3 integration cases
+zig build m4       # M4 demo (kill and ps in an interactive rc, on a pty) and the M4 cases; fails until M4 is done
 zig build integration  # real 9front binaries from the root tree through the hp9 CLI
 ```
 
-The M2 and M3 demos and the integration tests use the root tree from
+The M2 to M4 demos and the integration tests use the root tree from
 `scripts/mkroot.py`, or `-Droot=DIR`. The integration tests skip when there's
 no tree. Cases for the milestone in progress are named `M4: ...` and so on, and
 skip in `zig build integration` and `zig build test`. Cases for a finished
 milestone are tagged `(M3)` and so on; `zig build m3` runs the M3 ones.
+Interactive cases run hp9 on a terminal the test creates
+([tests/term.zig](tests/term.zig): a pty, or ConPTY on Windows), so they need
+no human and no `ssh -t`.
 
 The emulator backend links the prebuilt Unicorn (GPLv2) fetched by
 `scripts/fetch.sh`, so it's opt-in and never part of the MIT `hp9` build. It
@@ -51,7 +74,7 @@ ships separately as `hp9-emu` (see [Releases](#releases)):
 ```sh
 zig build -Demu=unicorn                              # macOS arm64
 zig build -Demu=unicorn -Dtarget=aarch64-linux-musl  # Linux arm64 (also x86_64-linux-musl)
-zig build m1 -Demu=unicorn                           # M1 demo: hp9 --backend emu ./hello
+zig build m1 -Demu=unicorn                           # M0 and M1 demos, adding hp9 --backend emu ./hello
 zig build bench -Demu=unicorn                        # compute and syscall speed, emu vs the hypervisor
 ```
 
@@ -128,6 +151,8 @@ registers and the symbolized PC when the guest faults.
 
 ### Sandbox
 
+> **Warning!** This is a ~~stable~~ in-development research prototype, but it has not been through any formal security audits or any other verification. Such a review would be essential before trusting hp9 to handle malicious code in the wild. USE AT YOUR OWN RISK!
+
 By default the guest sees the root tree read-only, the host cwd read-write
 at `/mnt/term/cwd`, the host temp dir at `/tmp`, and nothing else of the
 host. `#U` and `#C` are masked, so the guest can't attach more of the host,
@@ -164,9 +189,11 @@ links Plan 9 a.out.
 
 [tests/backends.zig](tests/backends.zig) runs small programs on every backend
 built in and checks that each gives the same output and syscall trace.
-`zig build install-tests` installs it as `zig-out/bin/backend-tests`, to run
-in a VM. [tests/integration.zig](tests/integration.zig) runs real binaries
-from the root tree through `hp9` itself, checking output and exit codes.
+[tests/integration.zig](tests/integration.zig) runs real binaries from the
+root tree through `hp9` itself, checking output and exit codes. `zig build
+install-tests` installs both, built for `-Dtarget`, as
+`zig-out/bin/backend-tests` and `zig-out/bin/integration-tests`, to run in a
+VM.
 
 ## Test VMs
 
@@ -180,13 +207,16 @@ scripts/lima/vm up linux
 scripts/lima/vm push linux zig-out/linux/bin/hp9 zig-out/fixtures/hello
 scripts/lima/vm shell linux ./hp9/hp9 --backend emu ./hp9/hello
 scripts/lima/vm push-root linux             # the root tree, into ~/hp9/root
+
+zig build install install-tests -Demu=unicorn -Dtarget=aarch64-linux-musl --prefix zig-out/linux
+scripts/lima/vm test linux                  # backend and integration tests on the emulator
 ```
 
 ## Layout
 
 | Path | Contents |
 | --- | --- |
-| `src/main.zig`, `src/cli.zig` | CLI: entry point, and flag parsing with no I/O |
+| `src/main.zig`, `src/cli.zig`, `src/stdin.zig` | CLI: entry point, flag parsing with no I/O, and the host stdin reader |
 | `src/root.zig` | library root |
 | `src/machine.zig` | one machine: builds its namespace, runs a process and serves its syscalls |
 | `src/policy.zig` | the sandbox policy: profiles, the compiled plan, `--print` and the access rules devfs checks |
@@ -200,6 +230,7 @@ scripts/lima/vm push-root linux             # the root tree, into ~/hp9/root
 | `third_party/unicorn`, `build/unicorn.zig` | patches, per-host config headers and the Zig build for Unicorn from source (GPLv2; source fetched, not vendored) |
 | `tests/backends.zig` | backend conformance tests |
 | `tests/integration.zig` | real 9front binaries through the hp9 CLI |
+| `tests/term.zig` | a pty (ConPTY on Windows) for the interactive integration cases |
 | `tests/fixtures` | test programs and binary generators |
 | `scripts/mkroot.py` | builds the 9front root tree from the pinned image |
 | `scripts/release.sh` | builds the release assets (`hp9`, `hp9-emu` and its source) into `dist/` |

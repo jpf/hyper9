@@ -22,7 +22,7 @@ Run the narrowest relevant check, and run broader checks when the change warrant
 ```sh
 zig build test
 zig build
-zig build m0
+zig build m1
 zig build kern
 ```
 

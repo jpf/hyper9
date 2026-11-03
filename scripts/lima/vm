@@ -10,8 +10,12 @@
 #   scripts/lima/vm shell <os> [cmd]   ssh into it (cmd.exe on windows)
 #   scripts/lima/vm push <os> file...  copy files into ~/hp9 in the guest
 #   scripts/lima/vm push-root <os> [-f] copy the 9front root tree into ~/hp9/root
+#   scripts/lima/vm test <os> [backend|integration]...
+#                                      push zig-out/<os> and the root tree, then
+#                                      run the backend and integration tests
 #
-# Env: WIN_ISO (Windows 11 Arm64 installer ISO).
+# Env: WIN_ISO (Windows 11 Arm64 installer ISO); HP9_TEST_PENDING and
+# HP9_TEST_SLOW are passed to the integration tests.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -110,11 +114,54 @@ cmd_push_root() {
 	log "$os: hp9/root ready"
 }
 
-[[ $# -gt 0 ]] || { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+# Runs the tests built by `zig build install install-tests -Demu=unicorn
+# --prefix zig-out/<os>` (plus -Dtarget, see README.md) in the guest, on
+# the emulator, against hp9/root. The test binaries get no terminal from
+# ssh; the interactive cases make their own (tests/term.zig).
+cmd_test() {
+	local os=$1; shift
+	local which=("$@")
+	# The root tree is arm64 only, so x86_64 has no integration tests yet.
+	if [[ ${#which[@]} -eq 0 ]]; then
+		if [[ "$os" == linux-amd64 ]]; then which=(backend); else which=(backend integration); fi
+	fi
+	local bin="$ROOT/zig-out/$os/bin" exe=""
+	[[ "$os" == windows ]] && exe=.exe
+	local files=("$bin/hp9$exe")
+	for w in "${which[@]}"; do
+		case "$w" in backend|integration) files+=("$bin/$w-tests$exe") ;; *) die "unknown test set '$w' (want: backend integration)" ;; esac
+	done
+	for f in "${files[@]}"; do [[ -f "$f" ]] || die "no $f (see scripts/lima/README.md, Tests)"; done
+	cmd_push "$os" "${files[@]}"
+	[[ " ${which[*]} " == *" integration "* ]] && cmd_push_root "$os"
+	# Emulated x86_64 is about ten times slower than the others, and on
+	# Windows each guest process takes about 0.4 s to start.
+	local slow=${HP9_TEST_SLOW:-1}
+	if [[ -z "${HP9_TEST_SLOW:-}" ]]; then
+		case "$os" in linux-amd64) slow=10 ;; windows) slow=3 ;; esac
+	fi
+	local pend=${HP9_TEST_PENDING:-}
+	local status=0
+	for w in "${which[@]}"; do
+		log "$os: $w tests"
+		if [[ "$os" == windows ]]; then
+			local set="set HP9_TEST_BIN=%USERPROFILE%\\hp9\\hp9.exe&& set HP9_TEST_ROOT=%USERPROFILE%/hp9/root&& set HP9_TEST_BACKENDS=emu&& set HP9_TEST_SLOW=$slow&&"
+			[[ -n "$pend" ]] && set+=" set HP9_TEST_PENDING=1&&"
+			ssh_ "$os" "$set cd hp9 && $w-tests.exe" </dev/null || status=1
+		else
+			local vars="HP9_TEST_BIN=\$HOME/hp9/hp9 HP9_TEST_ROOT=\$HOME/hp9/root HP9_TEST_BACKENDS=emu HP9_TEST_SLOW=$slow"
+			[[ -n "$pend" ]] && vars+=" HP9_TEST_PENDING=1"
+			ssh_ "$os" "cd hp9 && env $vars ./$w-tests" </dev/null || status=1
+		fi
+	done
+	return $status
+}
+
+[[ $# -gt 0 ]] || { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 cmd=$1; shift
 case "$cmd" in
 	status) limactl list; exit ;;
-	up|down|rm|shell|push|push-root) check_os "${1:-}"; os=$1; shift ;;
+	up|down|rm|shell|push|push-root|test) check_os "${1:-}"; os=$1; shift ;;
 	*) die "unknown command '$cmd'" ;;
 esac
 case "$cmd" in
@@ -124,4 +171,5 @@ case "$cmd" in
 	shell) need_running "$os"; if [[ $# -gt 0 ]]; then ssh_ "$os" "$@"; else ssh_ "$os" -t; fi ;;
 	push) cmd_push "$os" "$@" ;;
 	push-root) cmd_push_root "$os" "$@" ;;
+	test) need_running "$os"; cmd_test "$os" "$@" ;;
 esac
