@@ -36,7 +36,7 @@ fn runOn(gpa: std.mem.Allocator, kind: vmm.BackendKind, arch: aout.Arch, bytes: 
     };
     defer m.deinit();
 
-    const status = try m.run(bytes, &.{"hello"});
+    const status = try m.run(.{ .bytes = bytes }, &.{"hello"});
     const s = switch (status) {
         .exited => |msg| try std.fmt.allocPrint(gpa, "exited \"{s}\"", .{msg}),
         .killed => |msg| try std.fmt.allocPrint(gpa, "killed \"{s}\"", .{msg}),

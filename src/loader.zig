@@ -22,6 +22,10 @@ pub const Image = struct {
     entry: u64,
     sp: u64,
     tos: u64,
+    /// End of bss, page-rounded: the initial break for brk_.
+    ebss: u64,
+    /// Lowest address the break may reach (the start of data).
+    data_base: u64,
 };
 
 pub const Error = error{BadExec} || aout.ParseError;
@@ -84,7 +88,14 @@ pub fn load(b: vmm.Backend, as: vmm.AddressSpace, bytes: []const u8, argv: []con
     const argc_off = argv_off - 8;
     std.mem.writeInt(u64, stack[argc_off..][0..8], argv.len, .little);
 
-    return .{ .arch = h.arch, .entry = h.entry, .sp = stack_base + argc_off, .tos = stack_base + tos_off };
+    return .{
+        .arch = h.arch,
+        .entry = h.entry,
+        .sp = stack_base + argc_off,
+        .tos = stack_base + tos_off,
+        .ebss = ebss,
+        .data_base = adata,
+    };
 }
 
 test "Tos layout matches tos.h" {

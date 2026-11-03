@@ -1,0 +1,327 @@
+//! The 9front syscall table, served by drawterm's kern. Runs on the
+//! process's own kernel thread (kern.spawn), so `up` is the calling Proc.
+//!
+//! Numbers and argument layouts are from 9front's libc/9syscall/sys.h and
+//! port/sys*.c at the pinned release. Arguments are 8-byte slots on the user
+//! stack from SP+8; narrower values sit in the low bytes of their slot.
+//! Calls not here post "sys: bad sys call", as 9front does for unknown ones.
+
+const std = @import("std");
+const vmm = @import("vmm.zig");
+const kern = @import("kern.zig");
+const gm = @import("guestmem.zig");
+
+pub const Nr = enum(u64) {
+    errstr = 41,
+    bind = 2,
+    chdir = 3,
+    close = 4,
+    dup = 5,
+    exits = 8,
+    open = 14,
+    create = 22,
+    fd2path = 23,
+    brk_ = 24,
+    remove = 25,
+    wstat = 44,
+    fwstat = 45,
+    notify = 28,
+    noted = 29,
+    seek = 39,
+    stat = 42,
+    fstat = 43,
+    pread = 50,
+    pwrite = 51,
+    _,
+};
+
+/// What the process should do after a syscall.
+pub const Outcome = union(enum) {
+    /// Return `ret` to the guest.
+    ret: u64,
+    /// The process exits with this status (copied into Process.msg).
+    exits: []const u8,
+    /// The process dies with this note.
+    killed: []const u8,
+};
+
+/// Per-process state the syscalls need beyond the kernel's.
+pub const Process = struct {
+    /// Machine-local pid, as in the trace and Tos.
+    pid: u32 = 1,
+    backend: vmm.Backend,
+    as: vmm.AddressSpace,
+    /// Current break and its floor, for brk_.
+    brk: u64,
+    brk_floor: u64,
+    brk_limit: u64,
+    /// The note handler from notify; notes are delivered from M4.
+    notify: u64 = 0,
+    trace: ?*std.Io.Writer = null,
+    /// Holds the exits string or note.
+    msg: [kern.ERRMAX + 64]u8 = undefined,
+    name_buf: [1024]u8 = undefined,
+    name2_buf: [1024]u8 = undefined,
+    /// The current call's arguments, formatted for the trace.
+    targs: [256]u8 = undefined,
+    targs_len: usize = 0,
+
+    fn note(p: *Process, comptime fmt: []const u8, args: anytype) void {
+        if (p.trace == null) return;
+        p.targs_len = if (std.fmt.bufPrint(&p.targs, " " ++ fmt, args)) |t| t.len else |_| p.targs.len;
+    }
+};
+
+const bad_addr: Outcome = .{ .killed = "sys: bad address in syscall" };
+const fail: Outcome = .{ .ret = @bitCast(@as(i64, -1)) };
+
+fn ok(v: anytype) Outcome {
+    return .{ .ret = @bitCast(@as(i64, @intCast(v))) };
+}
+
+const Args = struct {
+    as: vmm.AddressSpace,
+    base: u64,
+
+    fn u(a: Args, i: u64) gm.Error!u64 {
+        return gm.readU64(a.as, a.base + 8 * i);
+    }
+    fn int(a: Args, i: u64) gm.Error!i32 {
+        return @bitCast(@as(u32, @truncate(try a.u(i))));
+    }
+    fn uint(a: Args, i: u64) gm.Error!u32 {
+        return @truncate(try a.u(i));
+    }
+    fn vlong(a: Args, i: u64) gm.Error!i64 {
+        return @bitCast(try a.u(i));
+    }
+};
+
+pub fn dispatch(p: *Process, u: *const vmm.Ureg) Outcome {
+    const a: Args = .{ .as = p.as, .base = u.syscallArgs() };
+    p.targs_len = 0;
+    const nr: Nr = @enumFromInt(u.syscallNumber());
+    const out = serve(p, nr, a) catch |e| switch (e) {
+        error.BadAddress => bad_addr,
+    };
+    if (p.trace) |w| traceCall(w, p, nr, u.syscallNumber(), out);
+    return out;
+}
+
+fn traceCall(w: *std.Io.Writer, p: *Process, nr: Nr, raw: u64, out: Outcome) void {
+    var nb: [24]u8 = undefined;
+    const nm = std.enums.tagName(Nr, nr) orelse (std.fmt.bufPrint(&nb, "sys{d}", .{raw}) catch "sys?");
+    const args = p.targs[0..p.targs_len];
+    switch (out) {
+        .ret => |r| {
+            const v: i64 = @bitCast(r);
+            if (v == -1) {
+                w.print("{d} {s}{s} = -1 '{s}'\n", .{ p.pid, nm, args, kern.errstr() }) catch {};
+            } else {
+                w.print("{d} {s}{s} = {d}\n", .{ p.pid, nm, args, v }) catch {};
+            }
+        },
+        .exits => |m| w.print("{d} exits \"{s}\"\n", .{ p.pid, m }) catch {},
+        .killed => w.print("{d} {s}{s}\n", .{ p.pid, nm, args }) catch {},
+    }
+    w.flush() catch {};
+}
+
+fn serve(p: *Process, nr: Nr, a: Args) gm.Error!Outcome {
+    switch (nr) {
+        .exits => {
+            const ptr = try a.u(0);
+            const s = if (ptr == 0) "" else gm.string(p.as, ptr, p.msg[0..kern.ERRMAX]) catch
+                // 9front truncates over-long exit strings rather than failing.
+                truncated(p, ptr);
+            return .{ .exits = s };
+        },
+        .errstr => {
+            const buf = try a.u(0);
+            const len = @min(try a.uint(1), kern.ERRMAX);
+            if (len == 0) return fail;
+            var tmp: [kern.ERRMAX]u8 = @splat(0);
+            const s = gm.string(p.as, buf, tmp[0..len]) catch "";
+            tmp[s.len] = 0;
+            kern.swapErrstr(&tmp);
+            const n = std.mem.indexOfScalar(u8, &tmp, 0) orelse len - 1;
+            const m = @min(n, len - 1);
+            try gm.write(p.as, buf, tmp[0..m]);
+            try gm.write(p.as, buf + m, "\x00");
+            return ok(0);
+        },
+        .open => {
+            const path = try gm.string(p.as, try a.u(0), &p.name_buf);
+            p.note("\"{s}\" {d}", .{ path, try a.int(1) });
+            return result(kern.open(path, try a.int(1)));
+        },
+        .create => {
+            const path = try gm.string(p.as, try a.u(0), &p.name_buf);
+            p.note("\"{s}\" {d} {o}", .{ path, try a.int(1), try a.uint(2) });
+            return result(kern.create(path, try a.int(1), try a.uint(2)));
+        },
+        .close => {
+            p.note("{d}", .{try a.int(0)});
+            return result0(kern.close(fdArg(try a.int(0)) orelse return badFd()));
+        },
+        .dup => {
+            const fd0 = fdArg(try a.int(0)) orelse return badFd();
+            return result(kern.dup(fd0, try a.int(1)));
+        },
+        .pread => {
+            p.note("{d} {d}", .{ try a.int(0), @as(u32, @truncate(try a.u(2))) });
+            const fd = fdArg(try a.int(0)) orelse return badFd();
+            return io(p, fd, try a.u(1), @as(u32, @truncate(try a.u(2))), try a.vlong(3), .read);
+        },
+        .pwrite => {
+            p.note("{d} {d}", .{ try a.int(0), @as(u32, @truncate(try a.u(2))) });
+            const fd = fdArg(try a.int(0)) orelse return badFd();
+            return io(p, fd, try a.u(1), @as(u32, @truncate(try a.u(2))), try a.vlong(3), .write);
+        },
+        .seek => {
+            // seek(vlong *ret, int fd, vlong off, int whence)
+            const retp = try a.u(0);
+            const fd = fdArg(try a.int(1)) orelse return badFd();
+            const r = kern.seek(fd, try a.vlong(2), try a.int(3)) catch return fail;
+            var b: [8]u8 = undefined;
+            std.mem.writeInt(i64, &b, r, .little);
+            try gm.write(p.as, retp, &b);
+            return ok(0);
+        },
+        .fd2path => {
+            const fd = fdArg(try a.int(0)) orelse return badFd();
+            const buf = try a.u(1);
+            const len = @min(try a.uint(2), p.name_buf.len);
+            kern.fd2path(fd, p.name_buf[0..len]) catch return fail;
+            const s = std.mem.sliceTo(p.name_buf[0..len], 0);
+            try gm.write(p.as, buf, s);
+            if (s.len < len) try gm.write(p.as, buf + s.len, "\x00");
+            return ok(0);
+        },
+        .stat, .fstat => {
+            const buf = try a.u(1);
+            const len = try a.uint(2);
+            var tmp: [65536]u8 = undefined;
+            const want = @min(len, tmp.len);
+            const n = if (nr == .stat)
+                kern.stat(try gm.string(p.as, try a.u(0), &p.name_buf), tmp[0..want]) catch return fail
+            else
+                kern.fstat(fdArg(try a.int(0)) orelse return badFd(), tmp[0..want]) catch return fail;
+            try gm.write(p.as, buf, tmp[0..@min(n, want)]);
+            return ok(n);
+        },
+        .chdir => return result0(kern.chdir(try gm.string(p.as, try a.u(0), &p.name_buf))),
+        .bind => {
+            const old = try gm.string(p.as, try a.u(0), &p.name_buf);
+            const new = try gm.string(p.as, try a.u(1), &p.name2_buf);
+            return result0(kern.bind(old, new, try a.int(2)));
+        },
+        .remove => return result0(kern.remove(try gm.string(p.as, try a.u(0), &p.name_buf))),
+        .wstat, .fwstat => {
+            const len = try a.uint(2);
+            var tmp: [65536]u8 = undefined;
+            if (len > tmp.len) return fail;
+            const Ctx = struct {
+                dst: []u8,
+                fn f(cx: *@This(), src: []u8) gm.Error!usize {
+                    @memcpy(cx.dst[0..src.len], src);
+                    cx.dst = cx.dst[src.len..];
+                    return src.len;
+                }
+            };
+            var cx: Ctx = .{ .dst = tmp[0..len] };
+            _ = try gm.each(p.as, try a.u(1), len, &cx, Ctx.f);
+            const n = if (nr == .wstat)
+                kern.wstat(try gm.string(p.as, try a.u(0), &p.name_buf), tmp[0..len]) catch return fail
+            else
+                kern.fwstat(fdArg(try a.int(0)) orelse return badFd(), tmp[0..len]) catch return fail;
+            return ok(n);
+        },
+        .notify => {
+            p.notify = try a.u(0);
+            return ok(0);
+        },
+        // There are no notes to return from until M4.
+        .noted => return .{ .killed = "sys: noted with no note pending" },
+        .brk_ => {
+            p.note("0x{x}", .{try a.u(0)});
+            return brk(p, try a.u(0));
+        },
+        _ => return .{ .killed = "sys: bad sys call" },
+    }
+}
+
+fn truncated(p: *Process, ptr: u64) []const u8 {
+    var i: usize = 0;
+    while (i < kern.ERRMAX - 1) : (i += 1) {
+        const b = p.as.translate(ptr + i, 1) orelse break;
+        if (b[0] == 0) break;
+        p.msg[i] = b[0];
+    }
+    return p.msg[0..i];
+}
+
+fn fdArg(fd: i32) ?u31 {
+    return if (fd < 0) null else @intCast(fd);
+}
+
+fn badFd() Outcome {
+    kern.setErrstr("fd out of range or not open");
+    return fail;
+}
+
+fn result(r: kern.Error!u31) Outcome {
+    return if (r) |v| ok(v) else |_| fail;
+}
+
+fn result0(r: kern.Error!void) Outcome {
+    return if (r) |_| ok(0) else |_| fail;
+}
+
+const Dir = enum { read, write };
+
+fn io(p: *Process, fd: u31, buf: u64, len: u32, off: i64, comptime dir: Dir) gm.Error!Outcome {
+    const Ctx = struct {
+        fd: u31,
+        off: i64,
+        failed: bool = false,
+        fn f(c: *@This(), chunk: []u8) gm.Error!usize {
+            const n = switch (dir) {
+                .read => kern.pread(c.fd, chunk, c.off),
+                .write => kern.pwrite(c.fd, chunk, c.off),
+            } catch {
+                c.failed = true;
+                return 0;
+            };
+            if (c.off != -1) c.off += @intCast(n);
+            return n;
+        }
+    };
+    var ctx: Ctx = .{ .fd = fd, .off = off };
+    const n = try gm.each(p.as, buf, len, &ctx, Ctx.f);
+    if (ctx.failed and n == 0) return fail;
+    return ok(n);
+}
+
+fn brk(p: *Process, addr: u64) gm.Error!Outcome {
+    if (addr == 0) return ok(p.brk);
+    if (addr < p.brk_floor or addr > p.brk_limit) {
+        kern.setErrstr("virtual memory allocation failed");
+        return fail;
+    }
+    const want = std.mem.alignForward(u64, addr, vmm.page_size);
+    if (want > p.brk) {
+        const mem = p.backend.allocPages((want - p.brk) / vmm.page_size) catch {
+            kern.setErrstr("virtual memory allocation failed");
+            return fail;
+        };
+        p.as.map(p.brk, mem, .{ .write = true }) catch {
+            kern.setErrstr("virtual memory allocation failed");
+            return fail;
+        };
+        p.brk = want;
+    }
+    // Shrinking keeps the pages mapped; 9front frees them, but nothing
+    // observable depends on that.
+    return ok(0);
+}

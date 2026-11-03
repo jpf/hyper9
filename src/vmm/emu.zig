@@ -70,10 +70,13 @@ pub const Backend = struct {
         return 64;
     }
 
-    /// Returns zeroed pages. They're fresh from the OS, so already zero.
+    /// Returns zeroed pages.
     pub fn allocPages(b: *Backend, n: usize) vmm.Error![]align(vmm.page_size) u8 {
         const mem = std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(vmm.page_size), n * vmm.page_size) catch
             return error.OutOfGuestMemory;
+        // Fresh pages from the OS are zero, but Zig's allocators fill new
+        // memory with 0xaa in safe builds, so zero them explicitly.
+        @memset(mem, 0);
         b.lock.lockUncancelable(b.io);
         defer b.lock.unlock(b.io);
         b.allocs.append(b.gpa, mem) catch {

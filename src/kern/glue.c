@@ -56,15 +56,19 @@ hostuser(void)
 }
 
 /*
- * Boots the kernel. The calling thread becomes the first Proc, with the
- * host directory root as its / and the host directory cwd (if not nil) at
- * /mnt/term as its dot. Returns 0, or -1 with the error string set.
+ * Boots the kernel. The calling thread becomes the kernel's first Proc for
+ * good, so callers use a private thread (src/kern.zig). Machines' processes
+ * are made later with hp9_kern_spawn. Returns 0, or -1 with the error
+ * string set.
  */
-int
-hp9_kern_boot(char *root, char *cwd)
-{
-	char buf[1024];
+static Proc *bootproc;
+void hp9_kern_exit(void);
+extern int hp9_newegrp(void);
+extern void hp9_closeegrp(void);
 
+int
+hp9_kern_boot(void)
+{
 	kerndate = seconds();
 	eve = hostuser();
 
@@ -76,24 +80,96 @@ hp9_kern_boot(char *root, char *cwd)
 	/* After chandevinit: devip sets sysname to the host name. */
 	kstrdup(&sysname, "hp9");
 	quotefmtinstall();
-
-	snprint(buf, sizeof buf, "#U%s", root);
-	if(bind(buf, "/", MREPL) < 0)
-		return -1;
-	if(bind("#c", "/dev", MREPL) < 0)
-		return -1;
-	if(bind("#e", "/env", MREPL|MCREATE) < 0)
-		return -1;
-	if(bind("#I", "/net", MREPL) < 0)
-		return -1;
-	if(cwd != nil){
-		snprint(buf, sizeof buf, "#U%s", cwd);
-		if(bind(buf, "/mnt/term", MREPL) < 0)
-			return -1;
-		if(chdir("/mnt/term") < 0)
-			return -1;
-	}
+	bootproc = up;
 	return 0;
+}
+
+/* Parks the boot thread for good once the kernel is up. */
+void
+hp9_kern_park(void)
+{
+	for(;;)
+		procsleep();
+}
+
+typedef struct Spawn Spawn;
+struct Spawn {
+	void	(*fn)(void*);
+	void	*arg;
+};
+
+static void
+spawntramp(void *v)
+{
+	Spawn s;
+
+	s = *(Spawn*)v;
+	free(v);
+	/* Now that up is set, kernel calls (and their errors) are allowed. */
+	up->slash = cclone(bootproc->slash);
+	up->dot = cclone(bootproc->slash);
+	up->pgrp = newpgrp();
+	up->fgrp = dupfgrp(nil);
+	up->rgrp = newrgrp();
+	if(hp9_newegrp() < 0)
+		panic("hp9_newegrp");
+	s.fn(s.arg);
+	hp9_kern_exit();
+}
+
+/*
+ * Runs fn(arg) on a new kernel process with its own thread, a fresh
+ * namespace (just #/, as the boot Proc has), no fds and its own rendezvous
+ * group. Unlike drawterm's kproc it can be called from a thread that isn't
+ * a Proc: it only allocates here, and the new thread sets up its groups
+ * once up is set. Returns 0, or -1 if allocation fails.
+ */
+int
+hp9_kern_spawn(char *name, void (*fn)(void*), void *arg)
+{
+	Proc *p;
+	Spawn *s;
+
+	s = malloc(sizeof *s);
+	if(s == nil)
+		return -1;
+	s->fn = fn;
+	s->arg = arg;
+	p = newproc();
+	p->fn = spawntramp;
+	p->arg = s;
+	strecpy(p->text, p->text+sizeof p->text, name);
+	osproc(p);
+	return 0;
+}
+
+/* Ends the calling kernel process; it doesn't return. */
+void
+hp9_kern_exit(void)
+{
+	hp9_closeegrp();
+	pexit("", 1);
+}
+
+/* The host user, which is hostowner. */
+char*
+hp9_kern_user(void)
+{
+	return eve;
+}
+
+/* The calling Proc's pid. */
+ulong
+hp9_kern_pid(void)
+{
+	return up->pid;
+}
+
+/* Masks the devices whose letters are in devs from future attaches. */
+void
+hp9_kern_devmask(char *devs)
+{
+	devmask(up->pgrp, 0, devs);
 }
 
 /* The current Proc's error string, for the Zig side. */
@@ -101,4 +177,26 @@ char*
 hp9_kern_errstr(void)
 {
 	return up->nerrlab ? up->errstr : up->syserrstr;
+}
+
+/*
+ * fd2path: drawterm's _sysfd2path passes an uninitialised
+ * length and has no sys* wrapper.
+ */
+int
+hp9_fd2path(int fd, char *buf, uint nbuf)
+{
+	Chan *c;
+
+	if(waserror()){
+		char *p = up->syserrstr;
+		up->syserrstr = up->errstr;
+		up->errstr = p;
+		return -1;
+	}
+	c = fdtochan(fd, -1, 0, 1);
+	snprint(buf, nbuf, "%s", chanpath(c));
+	cclose(c);
+	poperror();
+	return 0;
 }

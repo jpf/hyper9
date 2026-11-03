@@ -31,7 +31,7 @@ LOCAL = os.path.join(REPO, ".local")
 # Top-level directories the 9front kernel supplies through #/ rather than the
 # disk. hp9 binds devices onto them, so they must exist in the host tree.
 MOUNT_POINTS = [
-    "bin", "boot", "dev", "env", "fd", "mnt", "mnt/term", "mnt/wsys", "n",
+    "bin", "boot", "dev", "env", "fd", "mnt", "mnt/term", "mnt/term/cwd", "mnt/wsys", "n",
     "net", "net.alt", "proc", "root", "shr", "srv", "tmp",
 ]
 # On-disk directories left out of the export: dist holds installer payloads.

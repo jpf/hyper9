@@ -10,7 +10,7 @@ installed for building: cross-compile hp9 on the host and copy it in.
 | `linux` | `zig build -Demu=unicorn -Dtarget=aarch64-linux-musl` |
 | `linux-amd64` | `zig build -Demu=unicorn -Dtarget=x86_64-linux-musl` |
 | `macos` | `zig build -Demu=unicorn` |
-| `windows` | `zig build -Dtarget=aarch64-windows` (no emulator until M2) |
+| `windows` | `zig build -Demu=unicorn -Dtarget=aarch64-windows` (Unicorn from source; needs kern for Windows to run programs) |
 
 Use `--prefix zig-out/<os>` to keep the builds apart.
 

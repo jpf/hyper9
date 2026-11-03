@@ -3,38 +3,180 @@
 //! which catch kernel errors with waserror and return -1; `errstr` then
 //! holds the message. No Zig frame sits between a waserror and an error.
 //!
-//! kern is a process-wide singleton: one booted kernel per host process.
+//! The kernel boots once per host process, on a private thread. Each guest
+//! process runs on a thread made by `spawn`, and only that thread may make
+//! kernel calls for it.
 
 const std = @import("std");
 const build_options = @import("build_options");
 
-/// False where kern isn't built (Windows until M2).
+/// False where kern isn't built (Windows until M2's Windows work).
 pub const available = build_options.kern;
 
-pub const Error = error{ KernUnavailable, AlreadyBooted, Kern };
+pub const Error = error{ KernUnavailable, Kern, OutOfMemory };
 
 pub const OREAD = 0;
 pub const OWRITE = 1;
 pub const ORDWR = 2;
+pub const OEXEC = 3;
+pub const MREPL = 0;
+pub const MBEFORE = 1;
+pub const MAFTER = 2;
+pub const MCREATE = 4;
+pub const ERRMAX = 128;
 
-const c = struct {
-    extern fn hp9_kern_boot(root: [*:0]const u8, cwd: ?[*:0]const u8) c_int;
-    extern fn hp9_kern_errstr() [*:0]const u8;
+/// The C side, or stubs where kern isn't built so hp9 still links.
+const c = if (available) c_real else c_stub;
+
+const c_stub = struct {
+    fn hp9_kern_boot() c_int {
+        return -1;
+    }
+    fn hp9_kern_park() noreturn {
+        unreachable;
+    }
+    fn hp9_kern_spawn(_: [*:0]const u8, _: *const fn (?*anyopaque) callconv(.c) void, _: ?*anyopaque) c_int {
+        return -1;
+    }
+    fn hp9_kern_pid() c_ulong {
+        return 0;
+    }
+    fn hp9_kern_user() [*:0]const u8 {
+        return "none";
+    }
+    fn hp9_kern_devmask(_: [*:0]const u8) void {}
+    var no_err: [ERRMAX:0]u8 = @splat(0);
+    fn hp9_kern_errstr() [*:0]u8 {
+        return &no_err;
+    }
+    fn hp9_fd2path(_: c_int, _: [*]u8, _: c_uint) c_int {
+        return -1;
+    }
+    fn sysopen(_: [*:0]const u8, _: c_int) c_int {
+        return -1;
+    }
+    fn syscreate(_: [*:0]const u8, _: c_int, _: c_uint) c_int {
+        return -1;
+    }
+    fn sysclose(_: c_int) c_int {
+        return -1;
+    }
+    fn syspread(_: c_int, _: [*]u8, _: c_int, _: i64) c_int {
+        return -1;
+    }
+    fn syspwrite(_: c_int, _: [*]const u8, _: c_int, _: i64) c_int {
+        return -1;
+    }
+    fn sysseek(_: c_int, _: i64, _: c_int) i64 {
+        return -1;
+    }
+    fn sysbind(_: [*:0]const u8, _: [*:0]const u8, _: c_int) c_int {
+        return -1;
+    }
+    fn syschdir(_: [*:0]const u8) c_int {
+        return -1;
+    }
+    fn sysdup(_: c_int, _: c_int) c_int {
+        return -1;
+    }
+    fn sysstat(_: [*:0]const u8, _: [*]u8, _: c_int) c_int {
+        return -1;
+    }
+    fn sysfstat(_: c_int, _: [*]u8, _: c_int) c_int {
+        return -1;
+    }
+    fn sysremove(_: [*:0]const u8) c_int {
+        return -1;
+    }
+    fn syswstat(_: [*:0]const u8, _: [*]u8, _: c_int) c_int {
+        return -1;
+    }
+    fn sysfwstat(_: c_int, _: [*]u8, _: c_int) c_int {
+        return -1;
+    }
+};
+
+const c_real = struct {
+    extern fn hp9_kern_boot() c_int;
+    extern fn hp9_kern_park() noreturn;
+    extern fn hp9_kern_spawn(name: [*:0]const u8, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
+    extern fn hp9_kern_pid() c_ulong;
+    extern fn hp9_kern_user() [*:0]const u8;
+    extern fn hp9_kern_devmask(devs: [*:0]const u8) void;
+    extern fn hp9_kern_errstr() [*:0]u8;
+    extern fn hp9_fd2path(fd: c_int, buf: [*]u8, n: c_uint) c_int;
     extern fn sysopen(name: [*:0]const u8, mode: c_int) c_int;
+    extern fn syscreate(name: [*:0]const u8, mode: c_int, perm: c_uint) c_int;
     extern fn sysclose(fd: c_int) c_int;
     extern fn syspread(fd: c_int, buf: [*]u8, n: c_int, off: i64) c_int;
     extern fn syspwrite(fd: c_int, buf: [*]const u8, n: c_int, off: i64) c_int;
+    extern fn sysseek(fd: c_int, off: i64, whence: c_int) i64;
+    extern fn sysbind(old: [*:0]const u8, new: [*:0]const u8, flag: c_int) c_int;
+    extern fn syschdir(name: [*:0]const u8) c_int;
+    extern fn sysdup(fd0: c_int, fd1: c_int) c_int;
+    extern fn sysstat(name: [*:0]const u8, buf: [*]u8, n: c_int) c_int;
+    extern fn sysfstat(fd: c_int, buf: [*]u8, n: c_int) c_int;
+    extern fn sysremove(name: [*:0]const u8) c_int;
+    extern fn syswstat(name: [*:0]const u8, buf: [*]u8, n: c_int) c_int;
+    extern fn sysfwstat(fd: c_int, buf: [*]u8, n: c_int) c_int;
 };
 
-var booted: std.atomic.Value(bool) = .init(false);
+const BootState = enum(u8) { idle, booting, up, failed };
+var boot_state: std.atomic.Value(BootState) = .init(.idle);
 
-/// Boots the kernel on the calling thread, which becomes its first Proc,
-/// with the host directory `root` as / and `cwd` (if given) at /mnt/term.
-/// The kernel can be booted only once per host process.
-pub fn boot(root: [*:0]const u8, cwd: ?[*:0]const u8) Error!void {
+/// Boots the kernel if it isn't already. Safe to call from any thread.
+/// The boot runs on a private thread, which becomes the kernel's first
+/// Proc for good and then parks.
+pub fn boot() Error!void {
     if (!available) return error.KernUnavailable;
-    if (booted.swap(true, .acq_rel)) return error.AlreadyBooted;
-    if (c.hp9_kern_boot(root, cwd) < 0) return error.Kern;
+    while (true) switch (boot_state.load(.acquire)) {
+        .up => return,
+        .failed => return error.Kern,
+        .booting => std.atomic.spinLoopHint(),
+        .idle => if (boot_state.cmpxchgStrong(.idle, .booting, .acq_rel, .acquire) == null) {
+            const t = std.Thread.spawn(.{}, bootThread, .{}) catch {
+                boot_state.store(.idle, .release);
+                return error.OutOfMemory;
+            };
+            t.detach();
+        },
+    };
+}
+
+fn bootThread() void {
+    const ok = c.hp9_kern_boot() >= 0;
+    boot_state.store(if (ok) .up else .failed, .release);
+    // The thread is the boot Proc now, which hp9_kern_spawn clones from.
+    if (ok) c.hp9_kern_park();
+}
+
+/// Runs `func(arg)` on a new kernel process with its own host thread, a
+/// fresh namespace containing only #/, and no fds. The process ends when
+/// `func` returns.
+pub fn spawn(name: [*:0]const u8, comptime T: type, comptime func: fn (*T) void, arg: *T) Error!void {
+    try boot();
+    const Tramp = struct {
+        fn run(p: ?*anyopaque) callconv(.c) void {
+            func(@ptrCast(@alignCast(p.?)));
+        }
+    };
+    if (c.hp9_kern_spawn(name, Tramp.run, arg) < 0) return error.OutOfMemory;
+}
+
+/// The host user, which is the kernel's hostowner (eve).
+pub fn user() []const u8 {
+    return std.mem.span(c.hp9_kern_user());
+}
+
+/// The calling Proc's kernel pid.
+pub fn pid() u32 {
+    return @intCast(c.hp9_kern_pid());
+}
+
+/// Blocks future attaches of the devices named by `devs` (letters, as in
+/// `#U`) in the calling Proc's namespace. Existing binds keep working.
+pub fn devmask(devs: [*:0]const u8) void {
+    c.hp9_kern_devmask(devs);
 }
 
 /// The calling Proc's error string after a failed call.
@@ -42,51 +184,207 @@ pub fn errstr() []const u8 {
     return std.mem.span(c.hp9_kern_errstr());
 }
 
+/// Swaps `buf` (NUL-terminated, at most ERRMAX) with the error string, as
+/// the errstr syscall does.
+pub fn swapErrstr(buf: *[ERRMAX]u8) void {
+    const k = c.hp9_kern_errstr();
+    var tmp: [ERRMAX]u8 = undefined;
+    const kl = std.mem.len(k);
+    @memcpy(tmp[0..kl], k[0..kl]);
+    tmp[kl] = 0;
+    const bl = std.mem.indexOfScalar(u8, buf, 0) orelse ERRMAX - 1;
+    @memcpy(k[0..bl], buf[0..bl]);
+    k[bl] = 0;
+    @memcpy(buf[0 .. kl + 1], tmp[0 .. kl + 1]);
+}
+
+/// Sets the error string, for errors hp9 raises itself.
+pub fn setErrstr(msg: []const u8) void {
+    const k = c.hp9_kern_errstr();
+    const n = @min(msg.len, ERRMAX - 1);
+    @memcpy(k[0..n], msg[0..n]);
+    k[n] = 0;
+}
+
 fn check(r: c_int) Error!u31 {
     if (r < 0) return error.Kern;
     return @intCast(r);
+}
+
+fn clampLen(n: usize) c_int {
+    return @intCast(@min(n, std.math.maxInt(c_int)));
 }
 
 pub fn open(name: [*:0]const u8, mode: c_int) Error!u31 {
     return check(c.sysopen(name, mode));
 }
 
+pub fn create(name: [*:0]const u8, mode: c_int, perm: u32) Error!u31 {
+    return check(c.syscreate(name, mode, perm));
+}
+
 pub fn close(fd: u31) Error!void {
     _ = try check(c.sysclose(fd));
 }
 
+/// One read of at most 2 GiB - 1; `off` -1 uses and advances the fd offset.
 pub fn pread(fd: u31, buf: []u8, off: i64) Error!usize {
-    return try check(c.syspread(fd, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int))), off));
+    return try check(c.syspread(fd, buf.ptr, clampLen(buf.len), off));
 }
 
+/// One write of at most 2 GiB - 1; `off` -1 uses and advances the fd offset.
 pub fn pwrite(fd: u31, buf: []const u8, off: i64) Error!usize {
-    return try check(c.syspwrite(fd, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int))), off));
+    return try check(c.syspwrite(fd, buf.ptr, clampLen(buf.len), off));
 }
 
-test "boot a host tree and read a file through kern" {
+pub fn seek(fd: u31, off: i64, whence: c_int) Error!i64 {
+    const r = c.sysseek(fd, off, whence);
+    if (r < 0) return error.Kern;
+    return r;
+}
+
+pub fn bind(old: [*:0]const u8, new: [*:0]const u8, flag: c_int) Error!void {
+    _ = try check(c.sysbind(old, new, flag));
+}
+
+pub fn chdir(name: [*:0]const u8) Error!void {
+    _ = try check(c.syschdir(name));
+}
+
+pub fn dup(fd0: u31, fd1: i32) Error!u31 {
+    return check(c.sysdup(fd0, fd1));
+}
+
+/// Returns the length of the stat message written to `buf`, or, if `buf`
+/// is too small, the BIT16SZ size prefix that tells the caller how big.
+pub fn stat(name: [*:0]const u8, buf: []u8) Error!usize {
+    return try check(c.sysstat(name, buf.ptr, clampLen(buf.len)));
+}
+
+pub fn fstat(fd: u31, buf: []u8) Error!usize {
+    return try check(c.sysfstat(fd, buf.ptr, clampLen(buf.len)));
+}
+
+pub fn wstat(name: [*:0]const u8, buf: []u8) Error!usize {
+    return try check(c.syswstat(name, buf.ptr, clampLen(buf.len)));
+}
+
+pub fn fwstat(fd: u31, buf: []u8) Error!usize {
+    return try check(c.sysfwstat(fd, buf.ptr, clampLen(buf.len)));
+}
+
+pub fn remove(name: [*:0]const u8) Error!void {
+    _ = try check(c.sysremove(name));
+}
+
+pub fn fd2path(fd: u31, buf: []u8) Error!void {
+    _ = try check(c.hp9_fd2path(fd, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_uint)))));
+}
+
+/// One machine's console, behind `#y<id>` (src/kern/devhcons.c).
+pub const Console = struct {
+    in: ?*std.Io.Reader,
+    out: *std.Io.Writer,
+    err: *std.Io.Writer,
+    mutex: std.atomic.Mutex = .unlocked,
+};
+
+const max_consoles = 64;
+var consoles: [max_consoles]std.atomic.Value(?*Console) = @splat(.init(null));
+
+/// Registers a console and returns its id for `#y<id>`.
+pub fn addConsole(con: *Console) error{TooManyMachines}!u32 {
+    for (&consoles, 0..) |*slot, i| {
+        if (slot.cmpxchgStrong(null, con, .acq_rel, .acquire) == null) return @intCast(i);
+    }
+    return error.TooManyMachines;
+}
+
+pub fn removeConsole(id: u32) void {
+    consoles[id].store(null, .release);
+}
+
+fn console(id: c_ulong) ?*Console {
+    if (id >= max_consoles) return null;
+    return consoles[id].load(.acquire);
+}
+
+// Leaves called from devhcons.c. They never raise kernel errors.
+
+comptime {
+    if (available) {
+        @export(&hp9_cons_read, .{ .name = "hp9_cons_read" });
+        @export(&hp9_cons_write, .{ .name = "hp9_cons_write" });
+    }
+}
+
+fn hp9_cons_read(id: c_ulong, buf: [*]u8, n: c_long) callconv(.c) c_long {
+    const con = console(id) orelse return -1;
+    const r = con.in orelse return 0;
+    const got = r.readSliceShort(buf[0..@intCast(n)]) catch return -1;
+    return @intCast(got);
+}
+
+fn hp9_cons_write(id: c_ulong, fd: c_int, buf: [*]const u8, n: c_long) callconv(.c) c_long {
+    const con = console(id) orelse return -1;
+    const w = if (fd == 2) con.err else con.out;
+    while (!con.mutex.tryLock()) std.atomic.spinLoopHint();
+    defer con.mutex.unlock();
+    w.writeAll(buf[0..@intCast(n)]) catch return -1;
+    w.flush() catch return -1;
+    return n;
+}
+
+test "spawn a process and read a host file through kern" {
     if (!available) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const io = std.testing.io;
     try tmp.dir.createDirPath(io, "lib");
     try tmp.dir.writeFile(io, .{ .sub_path = "lib/namespace", .data = "mount -a #s/boot /\n" });
-    for ([_][]const u8{ "dev", "env", "net", "mnt/term" }) |d| try tmp.dir.createDirPath(io, d);
+    try tmp.dir.createDirPath(io, "dev");
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = try tmp.dir.realPath(io, &buf);
+
+    const T = struct {
+        root: [:0]u8,
+        err: ?anyerror = null,
+        data: [64]u8 = undefined,
+        len: usize = 0,
+        sysname: [16]u8 = undefined,
+        sysname_len: usize = 0,
+        missing: []const u8 = "",
+        missing_buf: [ERRMAX]u8 = undefined,
+        done: std.atomic.Value(bool) = .init(false),
+
+        fn run(t: *@This()) void {
+            defer t.done.store(true, .release);
+            t.body() catch |e| {
+                t.err = e;
+            };
+        }
+        fn body(t: *@This()) !void {
+            var spec: [std.fs.max_path_bytes + 3]u8 = undefined;
+            try bind(try std.fmt.bufPrintZ(&spec, "#U{s}", .{t.root}), "/", MREPL);
+            try bind("#c", "/dev", MREPL);
+            const fd = try open("/lib/namespace", OREAD);
+            defer close(fd) catch {};
+            t.len = try pread(fd, &t.data, 0);
+            if (open("/lib/nonexistent", OREAD)) |_| return error.Unexpected else |_| {}
+            const e = errstr();
+            @memcpy(t.missing_buf[0..e.len], e);
+            t.missing = t.missing_buf[0..e.len];
+            const s = try open("/dev/sysname", OREAD);
+            defer close(s) catch {};
+            t.sysname_len = try pread(s, &t.sysname, 0);
+        }
+    };
     buf[n] = 0;
-    const root: [*:0]const u8 = buf[0..n :0];
-
-    try boot(root, root);
-
-    const fd = try open("/lib/namespace", OREAD);
-    defer close(fd) catch {};
-    var data: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("mount -a #s/boot /\n", data[0..try pread(fd, &data, 0)]);
-
-    try std.testing.expectError(error.Kern, open("namespace", OREAD));
-    try std.testing.expect(std.mem.indexOf(u8, errstr(), "does not exist") != null);
-
-    const sys = try open("/dev/sysname", OREAD);
-    defer close(sys) catch {};
-    try std.testing.expectEqualStrings("hp9", data[0..try pread(sys, &data, 0)]);
+    var t: T = .{ .root = buf[0..n :0] };
+    try spawn("test", T, T.run, &t);
+    while (!t.done.load(.acquire)) std.Thread.yield() catch {};
+    if (t.err) |e| return e;
+    try std.testing.expectEqualStrings("mount -a #s/boot /\n", t.data[0..t.len]);
+    try std.testing.expect(std.mem.indexOf(u8, t.missing, "does not exist") != null);
+    try std.testing.expectEqualStrings("hp9", t.sysname[0..t.sysname_len]);
 }

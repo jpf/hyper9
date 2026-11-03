@@ -1,17 +1,18 @@
 const std = @import("std");
+const unicorn_src = @import("build/unicorn.zig");
 
 const drawterm = "third_party/drawterm";
 
-// drawterm's kern/Makefile OFILES for OS=posix, AUDIO=none.
+// drawterm's kern/Makefile OFILES for OS=posix, AUDIO=none, without devtab.c
+// and devenv.c (src/kern/ has our own).
 const kern_sources = [_][]const u8{
-    "alloc.c",        "allocb.c",        "chan.c",     "data.c",        "dev.c",
-    "devaudio.c",     "devaudio-none.c", "devcmd.c",   "devcons.c",     "devdraw.c",
-    "devenv.c",       "devfs-posix.c",   "devip.c",    "devip-posix.c", "devkbd.c",
-    "devlfd-posix.c", "devmnt.c",        "devmouse.c", "devpipe.c",     "devroot.c",
-    "devssl.c",       "devtls.c",        "devtab.c",   "error.c",       "parse.c",
-    "pgrp.c",         "procinit.c",      "rwlock.c",   "sleep.c",       "stub.c",
-    "sysfile.c",      "qio.c",           "qlock.c",    "term.c",        "waserror.c",
-    "posix.c",
+    "alloc.c",       "allocb.c",        "chan.c",        "data.c",    "dev.c",
+    "devaudio.c",    "devaudio-none.c", "devcmd.c",      "devcons.c", "devdraw.c",
+    "devfs-posix.c", "devip.c",         "devip-posix.c", "devkbd.c",  "devlfd-posix.c",
+    "devmnt.c",      "devmouse.c",      "devpipe.c",     "devroot.c", "devssl.c",
+    "devtls.c",      "error.c",         "parse.c",       "pgrp.c",    "procinit.c",
+    "rwlock.c",      "sleep.c",         "stub.c",        "sysfile.c", "qio.c",
+    "qlock.c",       "term.c",          "waserror.c",    "posix.c",
 };
 
 /// The drawterm libraries kern needs, with each Makefile's OFILES. The GUI,
@@ -100,6 +101,10 @@ fn addSdkPaths(b: *std.Build, m: *std.Build.Module) void {
 
 pub const Emu = enum { none, unicorn };
 
+/// Where -Demu=unicorn gets Unicorn: the PyPI wheels' libunicorn.a, or a
+/// build from the patched source (build/unicorn.zig).
+pub const UnicornFrom = enum { prebuilt, source };
+
 /// Directory under .local/unicorn (see UNICORN_WHEELS in scripts/pins.sh)
 /// with the prebuilt libunicorn.a for this target, if one exists.
 fn unicornDir(t: std.Target) ?[]const u8 {
@@ -114,11 +119,12 @@ fn unicornDir(t: std.Target) ?[]const u8 {
     };
 }
 
-/// Adds the prebuilt Unicorn: returns its translated header as a module and
-/// records the static library for `linkUnicorn`.
-fn addUnicorn(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) ?*std.Build.Module {
+/// Adds Unicorn: returns its translated header as a module and records the
+/// libraries for `linkUnicorn`.
+fn addUnicorn(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, from: UnicornFrom) ?*std.Build.Module {
+    if (from == .source) return addUnicornSource(b, target, optimize);
     const name = unicornDir(target.result) orelse {
-        b.getInstallStep().dependOn(&b.addFail("-Demu=unicorn: no prebuilt Unicorn for this target (macOS arm64 and linux-musl arm64/x86_64 only)").step);
+        b.getInstallStep().dependOn(&b.addFail("-Demu=unicorn: no prebuilt Unicorn for this target (macOS arm64 and linux-musl arm64/x86_64 only; try -Dunicorn=source)").step);
         return null;
     };
     const dir = b.pathJoin(&.{ ".local/unicorn", name });
@@ -146,13 +152,38 @@ fn addUnicorn(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     return tc.createModule();
 }
 
+/// Unicorn from the source that scripts/fetch.sh unpacks and patches.
+fn addUnicornSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) ?*std.Build.Module {
+    if (unicorn_src.configName(target.result) == null) {
+        b.getInstallStep().dependOn(&b.addFail("-Dunicorn=source: no config for this target in third_party/unicorn/config").step);
+        return null;
+    }
+    if (b.build_root.handle.access(b.graph.io, unicorn_src.src_dir ++ "/.hp9-stamp", .{})) {} else |_| {
+        b.getInstallStep().dependOn(&b.addFail(unicorn_src.src_dir ++ " is missing; run scripts/fetch.sh").step);
+        return null;
+    }
+    const uc = unicorn_src.build(b, target, optimize).?;
+    unicorn_libs = uc.libs;
+    const wf = b.addWriteFiles();
+    const h = wf.add("unicorn.h", "#include <unicorn/unicorn.h>\n");
+    const tc = b.addTranslateC(.{ .root_source_file = h, .target = target, .optimize = optimize });
+    tc.addIncludePath(uc.include);
+    return tc.createModule();
+}
+
 var unicorn_lib: ?std.Build.LazyPath = null;
 var unicorn_compat: ?*std.Build.Step.Compile = null;
+var unicorn_libs: ?[3]*std.Build.Step.Compile = null;
 
-/// Links the prebuilt Unicorn into the compile step's root module.
+/// Links Unicorn into the compile step's root module.
 fn linkUnicorn(c: *std.Build.Step.Compile) void {
-    const lib = unicorn_lib orelse return;
     const m = c.root_module;
+    if (unicorn_libs) |libs| {
+        m.link_libc = true;
+        for (libs) |l| m.linkLibrary(l);
+        return;
+    }
+    const lib = unicorn_lib orelse return;
     m.link_libc = true;
     m.addObjectFile(lib);
     if (unicorn_compat) |compat| m.linkLibrary(compat);
@@ -163,6 +194,9 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const os = target.result.os.tag;
     var emu = b.option(Emu, "emu", "Emulator backend to build in (GPLv2 Unicorn: dev and CI builds only)") orelse .none;
+    // No wheel exists for Windows, so it always builds from source.
+    const unicorn_from = b.option(UnicornFrom, "unicorn", "With -Demu=unicorn: the prebuilt wheel library or a source build (default: prebuilt, source on Windows)") orelse
+        if (os == .windows) UnicornFrom.source else .prebuilt;
 
     const mod = b.addModule("hp9", .{
         .root_source_file = b.path("src/root.zig"),
@@ -170,7 +204,7 @@ pub fn build(b: *std.Build) void {
     });
     if (emu == .unicorn) {
         // On failure addUnicorn has already made the install step fail.
-        if (addUnicorn(b, target, optimize)) |uc| mod.addImport("unicorn", uc) else emu = .none;
+        if (addUnicorn(b, target, optimize, unicorn_from)) |uc| mod.addImport("unicorn", uc) else emu = .none;
     }
     // The arm64 guest shim, assembled freestanding and embedded as raw bytes.
     const shim_obj = b.addObject(.{
@@ -197,7 +231,11 @@ pub fn build(b: *std.Build) void {
         .files = &kern_sources,
         .flags = &kern_flags,
     });
-    kern.root_module.addCSourceFile(.{ .file = b.path("src/kern/glue.c"), .flags = &kern_flags });
+    kern.root_module.addCSourceFiles(.{
+        .root = b.path("src/kern"),
+        .files = &.{ "glue.c", "devtab.c", "devhcons.c", "devenv.c" },
+        .flags = &kern_flags,
+    });
     for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
         .root = b.path(b.pathJoin(&.{ drawterm, l.dir })),
         .files = l.files,
@@ -308,7 +346,6 @@ pub fn build(b: *std.Build) void {
     b.step("m2", "Run the M2 demo: hp9 /bin/cat /lib/namespace (needs a root tree)").dependOn(&m2.step);
 
     // Runs real binaries through the hp9 CLI; skipped without a root tree.
-    // Not part of `test` until M2 makes them pass.
     const integration_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/integration.zig"),
         .target = b.graph.host,
@@ -317,6 +354,11 @@ pub fn build(b: *std.Build) void {
     const run_integration = b.addRunArtifact(integration_tests);
     run_integration.setEnvironmentVariable("HP9_TEST_BIN", hp9_bin);
     run_integration.setEnvironmentVariable("HP9_TEST_ROOT", root);
+    // Each case runs on every backend built in that runs arm64 here.
+    var backends: std.ArrayList(u8) = .empty;
+    if (os == .macos and target.result.cpu.arch == .aarch64) backends.appendSlice(b.allocator, "hvf,") catch @panic("OOM");
+    if (emu == .unicorn) backends.appendSlice(b.allocator, "emu,") catch @panic("OOM");
+    run_integration.setEnvironmentVariable("HP9_TEST_BACKENDS", if (backends.items.len > 0) backends.items else "auto");
     run_integration.has_side_effects = true;
     run_integration.step.dependOn(signed_step);
     b.step("integration", "Run real 9front binaries from the root tree through hp9").dependOn(&run_integration.step);
@@ -351,6 +393,7 @@ pub fn build(b: *std.Build) void {
         run_backend_tests.step.dependOn(&sign.step);
     }
     test_step.dependOn(&run_backend_tests.step);
+    test_step.dependOn(&run_integration.step);
 
     // For running the backend tests in a VM: zig-out/bin/backend-tests.
     const install_tests = b.addInstallArtifact(backend_tests, .{ .dest_sub_path = "backend-tests" });

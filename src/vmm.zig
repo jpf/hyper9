@@ -181,24 +181,43 @@ pub const Backend = union(Kind) {
 };
 
 /// One address space per Plan 9 process.
-pub const AddressSpace = union(Kind) {
+pub const AddressSpace = union(enum) {
     hvf: *hvf.AddressSpace,
     emu: *emu.AddressSpace,
+    /// A translate-only stand-in for unit tests of guest-memory code.
+    fake: Fake,
+
+    pub const Fake = struct {
+        ctx: *anyopaque,
+        translate: *const fn (*anyopaque, u64, u64) ?[]u8,
+    };
+
+    pub fn initFake(ctx: anytype, comptime f: fn (@TypeOf(ctx), u64, u64) ?[]u8) AddressSpace {
+        const T = @TypeOf(ctx);
+        return .{ .fake = .{ .ctx = ctx, .translate = struct {
+            fn t(p: *anyopaque, va: u64, len: u64) ?[]u8 {
+                return f(@as(T, @ptrCast(@alignCast(p))), va, len);
+            }
+        }.t } };
+    }
 
     pub fn destroy(as: AddressSpace) void {
         switch (as) {
+            .fake => {},
             inline else => |p| p.destroy(),
         }
     }
     /// Maps memory from `Backend.allocPages` at a page-aligned user address.
     pub fn map(as: AddressSpace, va: u64, mem: []align(page_size) u8, perms: Perms) CreateError!void {
         return switch (as) {
+            .fake => error.NotImplemented,
             inline else => |p| p.map(va, mem, perms),
         };
     }
     /// Host view of [va, va+len) if it lies within one mapping.
     pub fn translate(as: AddressSpace, va: u64, len: u64) ?[]u8 {
         return switch (as) {
+            .fake => |f| f.translate(f.ctx, va, len),
             inline else => |p| p.translate(va, len),
         };
     }
