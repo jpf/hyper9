@@ -14,6 +14,18 @@ pub const Policy = policy.Policy;
 pub const guestmem = @import("guestmem.zig");
 pub const syscall = @import("syscall.zig");
 pub const newns = @import("newns.zig");
+pub const consin = @import("consin.zig");
+
+/// What this hp9 was built from, for `--version`.
+pub const build_info = struct {
+    const o = @import("build_options");
+    /// `git describe`, or -Dversion.
+    pub const version: []const u8 = o.version;
+    /// The pinned 9front release and source revision, and drawterm's.
+    pub const ninefront_release: []const u8 = o.ninefront_release;
+    pub const ninefront_rev: []const u8 = o.ninefront_rev;
+    pub const drawterm_rev: []const u8 = o.drawterm_rev;
+};
 
 test {
     _ = aout;
@@ -25,5 +37,6 @@ test {
     _ = syscall;
     _ = policy;
     _ = newns;
+    _ = consin;
     _ = @import("cpupool.zig");
 }

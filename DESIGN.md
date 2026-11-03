@@ -1,6 +1,6 @@
 # Design: Plan 9 executables on host hypervisors
 
-Nov 2, 2026 · @Jeff Lindsay
+Nov 2, 2026 · Jeff Lindsay, <abbr title="Human-directed">h.d.</abbr>
 
 ## Overview
 
@@ -230,7 +230,7 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 
 The host's working directory is bound at the guest's `/mnt/term/cwd` and set as the guest's cwd, so that `hp9 ls` lists what the user expects.
 
-**Terminal (default):** `/dev/cons` is the machine's console device, which maps to the `Stdio` in `Machine.Options`: the host stdin and stdout for the CLI. A read returns after one host read, as on a terminal, so a typed line reaches the guest when Enter is pressed. Writing `rawon` to `/dev/consctl` switches the host TTY to raw mode (console mode on Windows). Ctrl-C posts an `interrupt` note to the foreground note group (see the CLI section's Signals and TTY for each host). Exit status: an empty `exits` string gives 0; any other string gives 1, and the string is printed to stderr.
+**Terminal (default):** `/dev/cons` is the machine's console device, which maps to the `Stdio` in `Machine.Options`: the host stdin and stdout for the CLI. A read returns after one host read, as on a terminal, so a typed line reaches the guest when Enter is pressed. That host read happens on a reader thread for the machine run (`src/consin.zig`), never on the guest's thread: the guest sleeps in the kernel (`src/kern/devhcons.c`) until the thread has input, so a note or a teardown interrupts a console read as it does any other blocking call. Nothing is read ahead of a guest's request. At the end of a run the thread is stopped through `Stdio.in_cancel` (the CLI's stdin polls with a wake pipe on POSIX and uses `CancelSynchronousIo` on Windows). Writing `rawon` to `/dev/consctl` switches the host TTY to raw mode (console mode on Windows). Ctrl-C posts an `interrupt` note to the foreground note group (see the CLI section's Signals and TTY for each host). Exit status: an empty `exits` string gives 0; any other string gives 1, and the string is printed to stderr.
 
 **Graphics (`--gfx`):** opens one host window through drawterm's GUI backend (Cocoa/Metal, X11 or Wayland, Win32) and serves `/dev/draw`, `/dev/mouse` and `/dev/kbd`, plus snarf mapped to the host clipboard. One screen per machine: running rio gives the full desktop. A seamless mode, where each rio window becomes a host window, is a later project.
 
@@ -397,13 +397,14 @@ The CLI is a thin wrapper: it parses argv into `Machine.Options`, runs one machi
 hp9 [hp9-flags] [--] program [args...]
 hp9 [hp9-flags] --rc 'command line'
 hp9 [hp9-flags]                       # interactive rc if stdin is a TTY, otherwise a usage error
+hp9 --version | --check | --help      # tool functions; -h alone is --help
 ```
 
 **Parsing rules**
 
 - No subcommands. `hp9 ls` must run 9front's `ls`, so tool functions such as `--version` and `--check` are flags instead.
 - Flag parsing stops at the first non-flag, as with `env` and `nice`, so `hp9 ls -l` passes `-l` to `ls`. `--` ends hp9's flags explicitly.
-- Long flags only, so hp9's flags are never confused with Plan 9-style short flags. Short aliases come later, and only for the most-used flags.
+- Long flags only, so hp9's flags are never confused with Plan 9-style short flags. Short aliases come later, and only for the most-used flags. The exception is `-h` as the only argument, which is `--help`: alone it can't be a program's flag, and anywhere else it's a program name or argument.
 
 **Program resolution**
 
@@ -443,8 +444,9 @@ hp9 [hp9-flags]                       # interactive rc if stdin is a TTY, otherw
 | `--sandbox DIR` | M2 | The tight profile with only DIR bound, read-write, as the cwd. Can't be combined with `--host-fs` or `--host-cmd` |
 | `--trace[=FILE]` | M2 | ratrace-style syscall log, to stderr by default |
 | `--dump-on-fault` | M2 | Prints the Ureg and a symbolized PC when the guest faults |
-| `--check` | M0 | Probes the backend, the entitlement or `/dev/kvm` access, the vCPU limit and the root tree, then exits |
-| `--version` | M0 | Prints the hp9 version, the pinned 9front release and the available backends |
+| `--check` | M4 | Runs a test program on each backend built in, or just `--backend`'s (this also checks the entitlement or `/dev/kvm` access), reports the vCPU limit, and runs `/bin/echo` from the root tree. Exits 0, or 125 if hp9 can't run programs from the root |
+| `--version` | M4 | Prints the hp9 version (`git describe`, or `-Dversion` in releases), the pinned 9front release and drawterm revision, and the backends built in |
+| `--help`, `-h` | M4 | Prints the usage to stdout and exits 0 (`-h` only as the only argument) |
 
 **Default guest environment:** `user` is the host user name, `home=/usr/$user`, `path=(. /bin)`, `cputype` and `objtype` come from the backend's architecture, `sysname=hp9` and `service=terminal`. Everything else has to be passed with `--env`, which keeps host secrets out of the guest by default.
 
@@ -588,7 +590,10 @@ Record design changes as they are made using `- YYYY-MM-DD: <design change> (rea
 - 2026-11-03: The emulator no longer loses a kick that lands just before `uc_emu_start`, which clears Unicorn's stop request: `kick` repeats `uc_emu_stop` until the run has taken the kick or ended. (Notes kick a running process, so a lost kick would leave a spinning process deaf to Ctrl-C on the emulator.)
 - 2026-11-03: The integration cases need the root tree's architecture, so they skip on x86\_64 hosts until there's an amd64 tree; `linux-amd64` runs only the backend tests. (`scripts/mkroot.py` builds an arm64 tree, and hp9 runs the host's architecture.)
 - 2026-11-03: M4 order: first a note queue and note group on hp9's process record in `src/kern/proc.c`, with drawterm's `postnote` reaching it through a `-Dpostnote=hp9_postnote` define on the drawterm files that post notes (only `devpipe.c`), so the vendor tree is untouched and `notepending` stays the "interrupt this call" flag. `RFNOTEG` then gives a process a new group. Next, delivery: at a syscall exit or kick, push a Ureg and the note string on the user stack (growing it as for arguments) and enter the `notify` handler, with `noted` restoring or killing the process as 9front's `noted` does; an unhandled note kills the process with the note as its status. The closed-pipe special case in `syscall.zig` and the `takeNote` path go away. Then devproc `#p` ported from 9front, serving through Zig leaves as devdup does: `args`, `ctl` (kill, hang, close), `fd`, `note`, `noteid`, `notepg`, `ns`, `ppid`, `status` and `wait`. `mem`, `regs`, `fpregs`, `segment` and `text` (acid) wait for M6, where self-hosted debugging needs them, and `proc`, `kregs`, `profile`, `syscall` and `watchpt` have no meaning here. Then the host side: Ctrl-C, hangup and raw mode as the Signals and TTY table says, a console read that can be interrupted (poll with a wake pipe on POSIX, `CancelIoEx` on Windows), and `--timeout` posting `hangup` with a grace period before the M2 teardown. The cases named "M4: ..." in `tests/integration.zig` cover each step, and `zig build m4` runs them. (Delivery needs the queue, devproc's `note` and `notepg` need delivery, and Ctrl-C needs both plus a console read it can interrupt.)
+- 2026-11-03: Notes are delivered at the top of the exit loop, before each run, which covers a syscall's return, a kick, a fault and noted, as 9front's trap and syscall exits do. A note posted to a process sets a flag and kicks its vCPU through a hook (`hp9_notekick`) the kernel calls with the target's note lock held. The note handler's frame is 9front's notify for each architecture, written through the host's mapping of guest memory, so hp9 checks first that it lies in the data or stack segment (the host mapping ignores page permissions, and 9front's okaddr checks the same). noted restores the guest's saved Ureg only after sanitizing it as 9front's setregisters does: arm64 keeps only NZCV from the guest's PSR, and amd64 forces the selectors, the system flags and a canonical PC, because the HVF shim loads the Ureg's PSR straight into SPSR_EL1, so a forged one would otherwise return to EL1. The FP/SIMD state is saved when the handler is entered and restored by noted. Faults, bad syscalls and bad addresses now post their `sys:` note instead of killing the process, so a handler can catch them; the closed-pipe special case and `takeNote` are gone. After noted, any note held while in the handler is delivered at once, where 9front would wait for the next clock tick. (Delivery needs the queue from step one; a forged Ureg is the one way a guest could reach EL1.)
+- 2026-11-03: `--check` and `--version`, planned for M0 but never built, land in M4, with `--help`, and `-h` alone as an alias for it. `--check` runs a test program on each backend rather than only probing it, since a VM that can be created can still fail to run a guest, and it exits 125 when hp9 can't run programs from the root. `-h` is the one short flag before short aliases arrive, accepted only as the sole argument, where it can't belong to a program. (The manual's install chapter needs a way to check an install, and before this `hp9 -h` looked for a program named `-h`.)
 - 2026-11-03: Unicorn ships in releases as a separate GPLv2 asset, `hp9-emu` (hp9 built with `-Demu=unicorn -Dunicorn=source`), next to the MIT `hp9` and a source tarball holding the hp9 tree and Unicorn's patched source; `LICENSE` notes which files and builds aren't MIT, and `third_party/unicorn` carries the GPLv2 as `COPYING`. Previously Unicorn was for development and CI only (so the emulator is usable without building from source, while `hp9` itself stays MIT).
+- 2026-11-03: A console read no longer blocks a guest's thread in a host read. Each machine run has a console reader thread (`src/consin.zig`) that does one host read per guest request, and the guest sleeps in drawterm's `sleep` in `devhcons.c` until the thread has input, so `procinterrupt` (a note, a timeout, the end of the run) interrupts the read with "interrupted". Readers in a process tree take turns; a reader waiting for its turn sleeps in 5 ms slices and checks `notepending`, since drawterm's QLock can't be interrupted and its Rendez holds one sleeper. `Machine.Stdio` gains `in_cancel`, which ends the thread's pending host read when the run ends: the CLI's stdin polls with a wake pipe on POSIX (reading without poll where poll can't wait on stdin, as for macOS devices) and uses `CancelSynchronousIo` on Windows. A run is left `stuck` only if a host read can't be cancelled within the grace period. (Ctrl-C, hangup and `--timeout`'s hangup all need to interrupt a process waiting for typed input; the M2 design left such a read uninterruptible and leaked the machine.)
 
 #### M5
 

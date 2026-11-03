@@ -18,6 +18,8 @@ const policy = @import("policy.zig");
 const segment = @import("segment.zig");
 const newns = @import("newns.zig");
 const cpupool = @import("cpupool.zig");
+const gm = @import("guestmem.zig");
+const consin = @import("consin.zig");
 
 pub const Status = union(enum) {
     /// The `exits` string; empty means success.
@@ -88,6 +90,9 @@ pub const Machine = struct {
     /// EOF), writes to fd 1 go to `out` and to fd 2 to `err`.
     pub const Stdio = struct {
         in: ?*std.Io.Reader = null,
+        /// Makes a blocked read of `in` return, so a run can end while a
+        /// console read is pending. Without it such a run ends `stuck`.
+        in_cancel: ?consin.Cancel = null,
         out: *std.Io.Writer,
         err: *std.Io.Writer,
     };
@@ -156,9 +161,12 @@ pub const Machine = struct {
     ///
     /// With a timeout in the policy, the process is stopped at the deadline:
     /// its vCPU is kicked and any blocking kernel call is interrupted, and
-    /// it's killed with "hp9: timeout". If it's stuck in a host call that
-    /// can't be interrupted (a console read, say), `run` returns after a
-    /// short grace period anyway and the machine is left `stuck`: the
+    /// it's killed with "hp9: timeout". A console read waits in the kernel,
+    /// so it's interrupted too, and the console's reader thread is stopped
+    /// with `Stdio.in_cancel`. If a process is stuck in a host call that
+    /// can't be interrupted, or `in` has no cancel and is blocked in a read,
+    /// `run` returns after a short grace period anyway and the machine is
+    /// left `stuck`: the
     /// backend, plan and run state are leaked rather than freed under the
     /// process, and the Machine itself may be dropped. The process can
     /// still touch `argv`, the program bytes, `Stdio` and the trace writer
@@ -173,14 +181,19 @@ pub const Machine = struct {
             m.gpa.destroy(job);
             return e;
         };
-        job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = m.opts.stdio.in, .out = m.opts.stdio.out, .err = m.opts.stdio.err }, .pool = pool };
+        job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = null, .out = m.opts.stdio.out, .err = m.opts.stdio.err }, .pool = pool };
         job.pool.gpa = m.gpa;
+        kern.setNoteKick(Proc.noteKick);
         job.m = &job.mc;
         job.mc.err_msg = "";
         job.con_id = kern.addConsole(&job.con) catch |e| {
             m.gpa.destroy(job);
             return e;
         };
+        if (m.opts.stdio.in) |src| {
+            job.con_in = .{ .io = m.io, .src = src, .cancel = m.opts.stdio.in_cancel, .id = job.con_id, .wake = kern.wakeConsole };
+            job.con.in = &job.con_in.?;
+        }
         const first = job.newProc() catch |e| {
             kern.removeConsole(job.con_id);
             job.pool.deinit();
@@ -217,11 +230,15 @@ pub const Machine = struct {
             return .{ .killed = timeout_note };
         }
         kern.removeConsole(job.con_id);
-        defer {
+        // No process reads the console now. A reader thread still in a
+        // host read that can't be cancelled keeps the Job, leaked.
+        const freed = if (job.con_in) |*in| in.stop(grace_ms) else true;
+        if (!freed) m.stuck = true;
+        defer if (freed) {
             job.procs.deinit(m.gpa);
             job.pool.deinit();
             m.gpa.destroy(job);
-        }
+        };
         if (timed_out) return .{ .killed = timeout_note };
         m.err_msg = m.copyOut(job.mc.err_msg);
         const st = job.result catch |e| return e;
@@ -250,6 +267,8 @@ pub const Machine = struct {
         argv: []const []const u8,
         con: kern.Console,
         con_id: u32 = 0,
+        /// The console's input, when Stdio has one.
+        con_in: ?consin.ConsoleInput = null,
         /// The first process's outcome, set before `first_done`.
         result: RunError!Status = error.Kern,
         first_done: std.Io.Event = .unset,
@@ -344,11 +363,39 @@ pub const Machine = struct {
         /// The a.out, for symbolizing faults with dump_on_fault.
         image: ?[]u8 = null,
         msg_buf: [256]u8 = undefined,
+        /// Set when a note may be waiting: by the kernel's kick hook when a
+        /// note is posted to the process, and after noted. The exit loop
+        /// checks it before each run.
+        note_flag: std.atomic.Value(bool) = .init(false),
+        /// The guest address of the Ureg saved for the note handler, or 0
+        /// (9front's noteureg); the word under each saved Ureg holds the
+        /// one before it.
+        noteureg: u64 = 0,
+        /// The FP/SIMD state when the handler was entered, which noted
+        /// restores (9front's fpunotify and fpunoted).
+        note_extra: ?vmm.Extra = null,
 
         fn setKproc(p: *Proc) void {
+            {
+                p.job.lockSpin();
+                defer p.job.lock.unlock();
+                p.kproc = kern.self();
+            }
+            // From now on a note posted to the process kicks it; one posted
+            // before (to a child just forked, say) is caught here.
+            kern.setAux(p);
+            if (kern.notePending()) p.note_flag.store(true, .release);
+        }
+
+        /// The kernel's hook for a note posted to process `aux`: flags it,
+        /// and kicks its vCPU if it's running guest code, so the exit loop
+        /// delivers the note. Runs on the posting thread.
+        fn noteKick(aux: ?*anyopaque) callconv(.c) void {
+            const p: *Proc = @ptrCast(@alignCast(aux orelse return));
+            p.note_flag.store(true, .release);
             p.job.lockSpin();
             defer p.job.lock.unlock();
-            p.kproc = kern.self();
+            if (p.lease) |l| l.kick();
         }
 
         fn setLease(p: *Proc, l: ?*cpupool.Lease) void {
@@ -370,6 +417,13 @@ pub const Machine = struct {
             };
         }
 
+        /// Copies a note into the process's message buffer, for its status.
+        fn keepNote(p: *Proc, msg: *const [kern.ERRMAX]u8) []const u8 {
+            const t = std.mem.sliceTo(msg, 0);
+            @memcpy(p.msg_buf[0..t.len], t);
+            return p.msg_buf[0..t.len];
+        }
+
         fn keepImage(p: *Proc, bytes: []const u8) void {
             if (p.image) |old| p.job.m.gpa.free(old);
             p.image = if (p.job.m.opts.dump_on_fault) p.job.m.gpa.dupe(u8, bytes) catch null else null;
@@ -381,6 +435,8 @@ pub const Machine = struct {
             const j = p.job;
             const gpa = j.m.gpa;
             const io = j.m.io;
+            // No kick hook may run on the Proc once it's freed.
+            kern.setAux(null);
             if (p.lease) |l| {
                 p.setLease(null);
                 l.release();
@@ -492,7 +548,10 @@ pub const Machine = struct {
     }
 
     /// The exit loop: runs the process on its vCPU and serves its exits
-    /// until it exits or dies. Runs on the process's thread.
+    /// until it exits or dies. Notes are delivered before each run, so at
+    /// the end of a syscall, after a kick or fault, and after noted, as
+    /// 9front delivers them on the way back to user mode. Runs on the
+    /// process's thread.
     fn loop(m: *Machine, p: *Proc) RunError!Status {
         const j = p.job;
         try j.pool.acquire(&p.lease_store);
@@ -504,6 +563,9 @@ pub const Machine = struct {
         vcpu.setUreg(&u);
         while (true) {
             if (j.stopping.load(.acquire)) return .{ .killed = if (j.timed_out.load(.acquire)) timeout_note else stopped_note };
+            if (p.note_flag.swap(false, .acq_rel)) {
+                if (try deliver(p, vcpu, &u)) |msg| return .{ .killed = msg };
+            }
             const exit = try vcpu.run();
             vcpu.getUreg(&u);
             switch (exit) {
@@ -516,7 +578,6 @@ pub const Machine = struct {
                         setExits(s);
                         return .{ .exited = s };
                     },
-                    .killed => |s| return .{ .killed = s },
                     .rfork => |flags| {
                         try vcpu.getExtra(&p.extra);
                         const r: i64 = if (m.fork(p, flags, &u)) |pid| pid else |_| -1;
@@ -536,12 +597,21 @@ pub const Machine = struct {
                         }
                         vcpu.setUreg(&u);
                     },
+                    .noted => |arg| {
+                        if (try noted(p, vcpu, &u, arg)) |msg| return .{ .killed = msg };
+                    },
                 },
                 .fault => |f| {
                     // The stack grows down on demand, as 9front's does.
                     if (f.access != .exec and p.segs.growStack(f.addr)) continue;
                     if (m.opts.dump_on_fault) dumpFault(m.opts.stdio.err, &u, f, p.image orelse "");
-                    return .{ .killed = try std.fmt.bufPrint(&p.msg_buf, "sys: trap: fault {t} addr=0x{x} pc=0x{x}", .{ f.access, f.addr, u.pc() }) };
+                    // 9front's faultnote; popnote adds the pc. If the note
+                    // can't be queued, the fault would only repeat.
+                    var buf: [kern.ERRMAX]u8 = undefined;
+                    const note = std.fmt.bufPrintZ(&buf, "sys: trap: fault {t} addr=0x{x}", .{ f.access, f.addr }) catch unreachable;
+                    if (!(kern.postNote(p.pid, note, .debug) catch false)) {
+                        return .{ .killed = try std.fmt.bufPrint(&p.msg_buf, "{s} pc=0x{x}", .{ note, u.pc() }) };
+                    }
                 },
                 .interrupted => {},
                 .halted => return .{ .killed = "halted" },
@@ -549,6 +619,99 @@ pub const Machine = struct {
             }
         }
     }
+
+    /// Delivers the process's next note, as 9front's donotify does: with a
+    /// handler, pushes the Ureg and the note on the user stack (growing it)
+    /// and enters the handler; without one, or for a note that arrives in
+    /// the handler, or if the frame doesn't fit, returns the note the
+    /// process dies with. `u` holds the current registers.
+    fn deliver(p: *Proc, vcpu: *cpupool.Lease, u: *vmm.Ureg) vmm.Error!?[]const u8 {
+        var msg: [kern.ERRMAX]u8 = undefined;
+        switch (kern.popNote(&msg, u.pc())) {
+            .none => return null,
+            .kill, .kill_debug => return p.keepNote(&msg),
+            .handle => {},
+        }
+        const f = u.notifyFrame(p.sys.notify, kern.ERRMAX) orelse return p.keepNote(&msg);
+        const end = f.nureg + u.size();
+        _ = p.segs.growStack(f.sp);
+        if (!p.segs.writable(f.sp, end -% f.sp)) return p.keepNote(&msg);
+        const as = p.as.?;
+        var words: [3]u64 = .{ 0, f.nureg, f.msg };
+        var prev: u64 = p.noteureg;
+        const zmsg = std.mem.sliceTo(&msg, 0);
+        @memset(msg[zmsg.len..], 0);
+        gm.write(as, f.nureg, u.bytes()) catch return p.keepNote(&msg);
+        gm.write(as, f.msg, &msg) catch return p.keepNote(&msg);
+        // The word under the Ureg is the previous saved Ureg.
+        gm.write(as, f.nureg - 8, std.mem.asBytes(&prev)) catch return p.keepNote(&msg);
+        gm.write(as, f.sp, std.mem.sliceAsBytes(&words)) catch return p.keepNote(&msg);
+        var x: vmm.Extra = undefined;
+        try vcpu.getExtra(&x);
+        p.note_extra = x;
+        p.noteureg = f.nureg;
+        u.* = f.regs;
+        vcpu.setUreg(u);
+        return null;
+    }
+
+    /// noted(arg), as 9front's sysnoted and noted: restores the registers
+    /// the handler was entered with (keeping the privileged state), or
+    /// for NSAVE re-enters the handler's frame, or kills the process with
+    /// the note for NDFLT. Outside a handler, anything but NRSTR fails
+    /// with "bad arg in system call". Returns the note the process dies
+    /// with, if it does.
+    fn noted(p: *Proc, vcpu: *cpupool.Lease, u: *vmm.Ureg, arg: i32) vmm.Error!?[]const u8 {
+        var msg: [kern.ERRMAX]u8 = undefined;
+        const how: kern.Noted = @enumFromInt(arg);
+        switch (kern.noted(how, &msg) catch {
+            p.sys.traceRet("noted", -1);
+            u.setReturn(@bitCast(@as(i64, -1)));
+            vcpu.setUreg(u);
+            return null;
+        }) {
+            .kill, .kill_debug => return p.keepNote(&msg),
+            .none, .handle => {},
+        }
+        if (p.note_extra) |x| {
+            vcpu.setExtra(&x);
+            p.note_extra = null;
+        }
+        const as = p.as.?;
+        const nureg = p.noteureg;
+        var saved: [@sizeOf(vmm.arm64.Ureg) + @sizeOf(vmm.amd64.Ureg)]u8 = undefined;
+        var prev: u64 = 0;
+        const n = u.size();
+        if (nureg < 8 or nureg % 8 != 0) return suicide;
+        gm.read(as, nureg - 8, std.mem.asBytes(&prev)) catch return suicide;
+        gm.read(as, nureg, saved[0..n]) catch return suicide;
+        var r = u.restored(saved[0..n]);
+        switch (how) {
+            .cont, .rstr => {
+                p.noteureg = prev;
+                if (!r.aligned() or as.translate(r.pc(), 1) == null or as.translate(r.stackPointer(), 8) == null) return suicide;
+            },
+            .save => {
+                const sp = nureg - 4 * 8 - kern.ERRMAX;
+                var words: [2]u64 = .{ 0, nureg };
+                if (as.translate(r.pc(), 1) == null or sp % 8 != 0 or !p.segs.writable(sp, 4 * 8)) return suicide;
+                gm.write(as, sp, std.mem.sliceAsBytes(&words)) catch return suicide;
+                r.setNoteSave(sp, nureg);
+            },
+            // kern.noted kills for every other argument.
+            else => unreachable,
+        }
+        p.sys.traceRet("noted", 0);
+        u.* = r;
+        vcpu.setUreg(u);
+        // A note held while in the handler is delivered now, not at some
+        // later exit (9front would take it at the next clock tick).
+        p.note_flag.store(true, .release);
+        return null;
+    }
+
+    /// 9front's exit status for a broken noted.
+    const suicide = "Suicide";
 
     /// rfork. With RF.PROC, starts a child that resumes from `u` with 0
     /// returned, and returns its pid; without, changes the caller's groups.
@@ -579,6 +742,7 @@ pub const Machine = struct {
         c.extra = p.extra;
         if (p.image) |b| c.image = m.gpa.dupe(u8, b) catch null;
         c.initSys();
+        // The handler is inherited; queued notes and handler state aren't.
         c.sys.notify = p.sys.notify;
         // The child may run, exit and free itself before kern.fork returns.
         const pid = c.pid;
@@ -667,6 +831,9 @@ pub const Machine = struct {
         p.tos = img.tos;
         p.sys.as = nas;
         p.sys.notify = 0;
+        p.noteureg = 0;
+        p.note_extra = null;
+        kern.execNotes();
         p.ureg = .initExec(img.arch, img.entry, img.sp, img.tos);
         p.extra = .initExec(img.arch);
         p.keepImage(bytes);

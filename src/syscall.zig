@@ -47,13 +47,13 @@ pub const Outcome = union(enum) {
     ret: u64,
     /// The process exits with this status (copied into Process.msg).
     exits: []const u8,
-    /// The process dies with this note.
-    killed: []const u8,
     /// rfork with these flags; the process model does it, and traces it.
     rfork: u32,
     /// exec; the process model does it, and traces it. The strings are
     /// allocated with the process's allocator, and the receiver frees them.
     exec: Exec,
+    /// noted with this argument; the process model restores the registers.
+    noted: i32,
 };
 
 pub const Exec = struct {
@@ -79,7 +79,7 @@ pub const Process = struct {
     as: vmm.AddressSpace,
     /// Text, data and stack; brk_ moves the end of data.
     segs: *segment.Segs,
-    /// The note handler from notify; notes are delivered from M4.
+    /// The note handler from notify, or 0.
     notify: u64 = 0,
     trace: ?*std.Io.Writer = null,
     /// Serializes trace lines from the processes sharing `trace`.
@@ -120,8 +120,16 @@ pub const Process = struct {
     }
 };
 
-const bad_addr: Outcome = .{ .killed = "sys: bad address in syscall" };
 const fail: Outcome = .{ .ret = @bitCast(@as(i64, -1)) };
+
+/// A call the kernel refuses with a note, as 9front's do: the note is
+/// posted to the caller (delivered when the call returns, so a handler can
+/// catch it), and the call fails with "bad arg in system call".
+fn sysNote(p: *Process, msg: [*:0]const u8) Outcome {
+    _ = kern.postNote(p.pid, msg, .debug) catch {};
+    kern.setErrstr("bad arg in system call");
+    return fail;
+}
 
 fn ok(v: anytype) Outcome {
     return .{ .ret = @bitCast(@as(i64, @intCast(v))) };
@@ -153,7 +161,7 @@ pub fn dispatch(p: *Process, u: *const vmm.Ureg) Outcome {
     p.targs_len = 0;
     const nr: Nr = @enumFromInt(u.syscallNumber());
     const out = serve(p, nr, a) catch |e| switch (e) {
-        error.BadAddress => bad_addr,
+        error.BadAddress => sysNote(p, "sys: bad address in syscall"),
         error.OutOfMemory => blk: {
             kern.setErrstr("no memory");
             break :blk fail;
@@ -167,7 +175,7 @@ fn traceCall(w: *std.Io.Writer, p: *Process, nr: Nr, raw: u64, out: Outcome) voi
     var nb: [24]u8 = undefined;
     const nm = std.enums.tagName(Nr, nr) orelse (std.fmt.bufPrint(&nb, "sys{d}", .{raw}) catch "sys?");
     const args = p.targs[0..p.targs_len];
-    if (out == .rfork or out == .exec) return;
+    if (out == .rfork or out == .exec or out == .noted) return;
     p.lockTrace();
     defer p.unlockTrace();
     switch (out) {
@@ -180,8 +188,7 @@ fn traceCall(w: *std.Io.Writer, p: *Process, nr: Nr, raw: u64, out: Outcome) voi
             }
         },
         .exits => |m| w.print("{d} exits \"{s}\"\n", .{ p.pid, m }) catch {},
-        .killed => w.print("{d} {s}{s}\n", .{ p.pid, nm, args }) catch {},
-        .rfork, .exec => return,
+        .rfork, .exec, .noted => return,
     }
     w.flush() catch {};
 }
@@ -267,11 +274,7 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
         .pwrite => {
             p.note("{d} {d}", .{ try a.int(0), @as(u32, @truncate(try a.u(2))) });
             const fd = fdArg(try a.int(0)) orelse return badFd();
-            const out = try io(p, fd, try a.u(1), @as(u32, @truncate(try a.u(2))), try a.vlong(3), .write);
-            // devpipe posts a note on a write to a closed pipe; with no
-            // notes until M4, it kills the process as an unhandled one would.
-            if (out == .ret and out.ret == fail.ret and kern.takeNote()) return .{ .killed = "sys: write on closed pipe" };
-            return out;
+            return io(p, fd, try a.u(1), @as(u32, @truncate(try a.u(2))), try a.vlong(3), .write);
         },
         .seek => {
             // seek(vlong *ret, int fd, vlong off, int whence)
@@ -338,15 +341,18 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
         },
         .notify => {
             p.notify = try a.u(0);
+            kern.setNotify(p.notify != 0);
             return ok(0);
         },
-        // There are no notes to return from until M4.
-        .noted => return .{ .killed = "sys: noted with no note pending" },
+        .noted => {
+            p.note("{d}", .{try a.int(0)});
+            return .{ .noted = try a.int(0) };
+        },
         .brk_ => {
             p.note("0x{x}", .{try a.u(0)});
             return brk(p, try a.u(0));
         },
-        _ => return .{ .killed = "sys: bad sys call" },
+        _ => return sysNote(p, "sys: bad sys call"),
     }
 }
 

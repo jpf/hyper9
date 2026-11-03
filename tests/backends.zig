@@ -308,6 +308,279 @@ test "a timeout interrupts sleep arm64" {
     try runPolicy(.arm64, img, .{ .timeout_ns = 100 * std.time.ns_per_ms }, "hp9: timeout");
 }
 
+/// Runs `bytes` on every backend that can, with an owned and a pooled
+/// vCPU, and checks the status (prefix) and output.
+fn expectNotes(arch: aout.Arch, bytes: []const u8, want_status: []const u8, want_out: []const u8) !void {
+    const gpa = std.testing.allocator;
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| for ([_]?u32{ null, 0 }) |own| {
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        var err: std.Io.Writer.Allocating = .init(gpa);
+        defer err.deinit();
+        var m = hp9.Machine.init(gpa, std.testing.io, .{
+            .backend = kind,
+            .arch = arch,
+            .policy = .{ .timeout_ns = 10 * std.time.ns_per_s },
+            .owned_vcpus = own,
+            .stdio = .{ .out = &out.writer, .err = &err.writer },
+        }) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
+            else => return e,
+        };
+        defer m.deinit();
+        const status = try m.run(.{ .bytes = bytes }, &.{"t"});
+        errdefer std.debug.print("backend {t}, {t} binary, owned_vcpus {?d}\n", .{ kind, arch, own });
+        var sb: [300]u8 = undefined;
+        const got = switch (status) {
+            .exited => |t| try std.fmt.bufPrint(&sb, "exited {s}", .{t}),
+            .killed => |t| try std.fmt.bufPrint(&sb, "killed {s}", .{t}),
+        };
+        if (!std.mem.startsWith(u8, got, want_status)) {
+            std.debug.print("status: want prefix \"{s}\", got \"{s}\"\n", .{ want_status, got });
+            return error.TestUnexpectedResult;
+        }
+        try std.testing.expectEqualStrings(want_out, out.written());
+        ran += 1;
+    };
+    if (ran == 0) return error.SkipZigTest;
+}
+
+/// notify(handler); a bad syscall, whose note the handler catches: it
+/// writes the note's first 17 bytes to fd 1 and calls noted(NCONT), and
+/// the program carries on after the syscall to exits(nil). With
+/// `with_handler` false, the notify is skipped (its svc becomes a nop).
+fn noteProgramArm64(comptime with_handler: bool) [26 * 4]u8 {
+    return words(&.{
+        0xd100c3ff, // sub  sp, sp, #48
+        0x10000141, // adr  x1, handler
+        0xf90007e1, // str  x1, [sp, #8]
+        0xd2800380, // mov  x0, #28           NOTIFY
+        if (with_handler) 0xd4000001 else 0xd503201f, // svc #0 (or nop)
+        0xd2800c60, // mov  x0, #99           no such call
+        0xd4000001, // svc  #0
+        0xf90007ff, // str  xzr, [sp, #8]     exits(nil)
+        0xd2800100, // mov  x0, #8            EXITS
+        0xd4000001, // svc  #0
+        0x14000000, // b    .
+        // handler(ureg, msg): msg is at sp+16.
+        0xf9400be2, // ldr  x2, [sp, #16]
+        0xd100c3ff, // sub  sp, sp, #48
+        0xd2800021, // mov  x1, #1
+        0xf90007e1, // str  x1, [sp, #8]      fd 1
+        0xf9000be2, // str  x2, [sp, #16]     buf = msg
+        0xd2800223, // mov  x3, #17
+        0xf9000fe3, // str  x3, [sp, #24]     len
+        0x92800004, // mov  x4, #-1
+        0xf90013e4, // str  x4, [sp, #32]     offset
+        0xd2800660, // mov  x0, #51           PWRITE
+        0xd4000001, // svc  #0
+        0xf90007ff, // str  xzr, [sp, #8]     NCONT
+        0xd28003a0, // mov  x0, #29           NOTED
+        0xd4000001, // svc  #0
+        0x14000000, // b    .
+    });
+}
+
+test "a note handler catches a note and noted(NCONT) resumes arm64" {
+    const img = try image(std.testing.allocator, .arm64, &noteProgramArm64(true));
+    defer std.testing.allocator.free(img);
+    try expectNotes(.arm64, img, "exited ", "sys: bad sys call");
+}
+
+test "an unhandled note kills the process with the note and pc arm64" {
+    const img = try image(std.testing.allocator, .arm64, &noteProgramArm64(false));
+    defer std.testing.allocator.free(img);
+    try expectNotes(.arm64, img, "killed sys: bad sys call pc=0x", "");
+}
+
+test "a note handler catches a note and noted(NCONT) resumes amd64" {
+    // As noteProgramArm64; the handler's msg is at sp+16, its Ureg in BP.
+    const code = [_]u8{
+        0x48, 0x83, 0xec, 0x30, // subq  $0x30, %rsp
+        0x48, 0x8d, 0x05, 0x25, 0x00, 0x00, 0x00, // leaq  handler(%rip), %rax
+        0x48, 0x89, 0x44, 0x24, 0x08, // movq  %rax, 8(%rsp)
+        0xbd, 0x1c, 0x00, 0x00, 0x00, // movl  $28, %ebp          NOTIFY
+        0x0f, 0x05, // syscall
+        0xbd, 0x63, 0x00, 0x00, 0x00, // movl  $99, %ebp          no such call
+        0x0f, 0x05, // syscall
+        0x48, 0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, // movq  $0, 8(%rsp)
+        0xbd, 0x08, 0x00, 0x00, 0x00, // movl  $8, %ebp           EXITS
+        0x0f, 0x05, // syscall
+        0xeb, 0xfe, // jmp   .
+        // handler:
+        0x48, 0x8b, 0x54, 0x24, 0x10, // movq  16(%rsp), %rdx     msg
+        0x48, 0x83, 0xec, 0x30, // subq  $0x30, %rsp
+        0x48, 0xc7, 0x44, 0x24, 0x08, 0x01, 0x00, 0x00, 0x00, // movq  $1, 8(%rsp)
+        0x48, 0x89, 0x54, 0x24, 0x10, // movq  %rdx, 16(%rsp)
+        0x48, 0xc7, 0x44, 0x24, 0x18, 0x11, 0x00, 0x00, 0x00, // movq  $17, 24(%rsp)
+        0x48, 0xc7, 0x44, 0x24, 0x20, 0xff, 0xff, 0xff, 0xff, // movq  $-1, 32(%rsp)
+        0xbd, 0x33, 0x00, 0x00, 0x00, // movl  $51, %ebp          PWRITE
+        0x0f, 0x05, // syscall
+        0x48, 0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, // movq  $0, 8(%rsp)  NCONT
+        0xbd, 0x1d, 0x00, 0x00, 0x00, // movl  $29, %ebp          NOTED
+        0x0f, 0x05, // syscall
+        0xeb, 0xfe, // jmp   .
+    };
+    comptime std.debug.assert(code[48] == 0x48 and code[49] == 0x8b); // handler at 0x30
+    const img = try image(std.testing.allocator, .amd64, &code);
+    defer std.testing.allocator.free(img);
+    try expectNotes(.amd64, img, "exited ", "sys: bad sys call");
+}
+
+test "noted outside a handler fails, and a fault's note reaches the handler arm64" {
+    // noted(NCONT) with no note fails and returns -1; then a fault on
+    // address 0, which the handler from notify ends with noted(NDFLT).
+    const code = words(&.{
+        0xd100c3ff, // sub  sp, sp, #48
+        0xf90007ff, // str  xzr, [sp, #8]     NCONT
+        0xd28003a0, // mov  x0, #29           NOTED
+        0xd4000001, // svc  #0
+        0xb100041f, // cmn  x0, #1
+        0x54000040, // b.eq +8
+        0x14000000, // b    .                 (noted didn't fail)
+        0x100000c1, // adr  x1, handler (+24)
+        0xf90007e1, // str  x1, [sp, #8]
+        0xd2800380, // mov  x0, #28           NOTIFY
+        0xd4000001, // svc  #0
+        0xf940001f, // ldr  xzr, [x0]         fault (x0 = 0)
+        0x14000000, // b    .
+        // handler: noted(NDFLT)
+        0xd100c3ff, // sub  sp, sp, #48
+        0xd2800021, // mov  x1, #1
+        0xf90007e1, // str  x1, [sp, #8]      NDFLT
+        0xd28003a0, // mov  x0, #29           NOTED
+        0xd4000001, // svc  #0
+        0x14000000, // b    .
+    });
+    const img = try image(std.testing.allocator, .arm64, &code);
+    defer std.testing.allocator.free(img);
+    try expectNotes(.arm64, img, "killed sys: trap: fault read addr=0x0 pc=0x", "");
+}
+
+/// A console input that blocks until cancelled, then gives `after` once.
+const BlockingInput = struct {
+    io: std.Io,
+    after: []const u8,
+    cancelled: std.atomic.Value(u32) = .init(0),
+    served: bool = false,
+    reads: std.atomic.Value(u32) = .init(0),
+    interface: std.Io.Reader,
+
+    fn init(b: *BlockingInput, io: std.Io, after: []const u8, buf: []u8) void {
+        b.* = .{ .io = io, .after = after, .interface = .{ .vtable = &.{ .stream = stream }, .buffer = buf, .seek = 0, .end = 0 } };
+    }
+
+    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const b: *BlockingInput = @alignCast(@fieldParentPtr("interface", r));
+        _ = b.reads.fetchAdd(1, .release);
+        if (b.cancelled.load(.acquire) != 0) {
+            if (b.served) return error.EndOfStream;
+            b.served = true;
+            return w.write(limit.sliceConst(b.after)) catch error.WriteFailed;
+        }
+        b.io.futexWaitUncancelable(u32, &b.cancelled.raw, 0);
+        return error.ReadFailed;
+    }
+
+    fn cancel(ctx: *anyopaque, _: std.Thread) void {
+        const b: *BlockingInput = @ptrCast(@alignCast(ctx));
+        b.cancelled.store(1, .release);
+        b.io.futexWake(u32, &b.cancelled.raw, 1);
+    }
+
+    fn reset(_: *anyopaque) void {}
+};
+
+/// pread(0, buf, 16, -1), then write what it read to fd 1 and exit.
+const read_echo_arm64 = words(&.{
+    0xd10103ff, // sub  sp, sp, #64
+    0xf90007ff, // str  xzr, [sp, #8]     fd 0
+    0x9100c3e1, // add  x1, sp, #48
+    0xf9000be1, // str  x1, [sp, #16]     buf
+    0xd2800202, // mov  x2, #16
+    0xf9000fe2, // str  x2, [sp, #24]     len
+    0x92800003, // mov  x3, #-1
+    0xf90013e3, // str  x3, [sp, #32]     offset
+    0xd2800640, // mov  x0, #50           PREAD
+    0xd4000001, // svc  #0
+    0xf9000fe0, // str  x0, [sp, #24]     len = bytes read
+    0xd2800021, // mov  x1, #1
+    0xf90007e1, // str  x1, [sp, #8]      fd 1
+    0xd2800660, // mov  x0, #51           PWRITE
+    0xd4000001, // svc  #0
+    0xf90007ff, // str  xzr, [sp, #8]     exits(nil)
+    0xd2800100, // mov  x0, #8            EXITS
+    0xd4000001, // svc  #0
+    0x14000000, // b    .
+});
+
+test "a timeout interrupts a console read, and its reader thread is cancelled" {
+    const gpa = std.testing.allocator;
+    const img = try image(gpa, .arm64, &read_echo_arm64);
+    defer gpa.free(img);
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        var in_buf: [64]u8 = undefined;
+        var in: BlockingInput = undefined;
+        in.init(std.testing.io, "", &in_buf);
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        var m = hp9.Machine.init(gpa, std.testing.io, .{
+            .backend = kind,
+            .arch = .arm64,
+            .policy = .{ .timeout_ns = 100 * std.time.ns_per_ms },
+            .stdio = .{
+                .in = &in.interface,
+                .in_cancel = .{ .ctx = &in, .func = BlockingInput.cancel, .reset = BlockingInput.reset },
+                .out = &out.writer,
+                .err = &out.writer,
+            },
+        }) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
+            else => return e,
+        };
+        defer m.deinit();
+        errdefer std.debug.print("backend {t}\n", .{kind});
+        const status = try m.run(.{ .bytes = img }, &.{"t"});
+        try std.testing.expectEqualStrings("hp9: timeout", status.killed);
+        try std.testing.expect(!m.stuck);
+        try std.testing.expect(in.reads.load(.acquire) >= 1);
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+test "a console read returns input from the reader thread, and a later run sees EOF" {
+    const gpa = std.testing.allocator;
+    const img = try image(gpa, .arm64, &read_echo_arm64);
+    defer gpa.free(img);
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        var src: std.Io.Reader = .fixed("one\ntwo\n");
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        var m = hp9.Machine.init(gpa, std.testing.io, .{
+            .backend = kind,
+            .arch = .arm64,
+            .stdio = .{ .in = &src, .out = &out.writer, .err = &out.writer },
+        }) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
+            else => return e,
+        };
+        defer m.deinit();
+        errdefer std.debug.print("backend {t}\n", .{kind});
+        // A fixed reader gives everything in one read; the guest reads 16
+        // bytes, so a second run gets EOF and writes nothing.
+        _ = try m.run(.{ .bytes = img }, &.{"t"});
+        try std.testing.expectEqualStrings("one\ntwo\n", out.written());
+        _ = try m.run(.{ .bytes = img }, &.{"t"});
+        try std.testing.expectEqualStrings("one\ntwo\n", out.written());
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
 test "the memory cap is exact" {
     const bytes = try image(std.testing.allocator, .arm64, &hello.arm64_text);
     defer std.testing.allocator.free(bytes);

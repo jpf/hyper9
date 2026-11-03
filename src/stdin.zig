@@ -1,9 +1,15 @@
-//! The host's stdin as a `std.Io.Reader`, for the guest's console.
+//! The host's stdin as a `std.Io.Reader`, for the guest's console, with a
+//! `cancel` that makes a blocked read return (`hp9.consin.Cancel`), so a
+//! run can end while the console's reader thread is in a read.
 //!
-//! On POSIX this is std's streaming file reader. On Windows, std reads with
-//! NtReadFile and treats STATUS_PENDING as unreachable, which a console
-//! handle under a pseudoconsole (Windows Terminal, OpenSSH, ConPTY) can
-//! return, so there the reader calls ReadFile, which waits for the read.
+//! On POSIX the reader polls stdin together with a wake pipe, and `cancel`
+//! writes to the pipe. Where poll can't wait on stdin (macOS reports
+//! POLLNVAL for devices such as /dev/null) it reads without polling.
+//!
+//! On Windows, std reads with NtReadFile and treats STATUS_PENDING as
+//! unreachable, which a console handle under a pseudoconsole (Windows
+//! Terminal, OpenSSH, ConPTY) can return, so the reader calls ReadFile,
+//! which waits for the read, and `cancel` ends it with CancelSynchronousIo.
 //! A console in line mode ends each line with \r\n; the reader turns that
 //! into \n, as a POSIX terminal does, so rc doesn't see a stray \r.
 
@@ -13,14 +19,77 @@ const builtin = @import("builtin");
 pub const Stdin = if (builtin.os.tag == .windows) WindowsStdin else PosixStdin;
 
 const PosixStdin = struct {
-    r: std.Io.File.Reader,
+    const posix = std.posix;
 
-    pub fn init(s: *PosixStdin, io: std.Io, buf: []u8) void {
-        s.r = std.Io.File.stdin().readerStreaming(io, buf);
+    /// The wake pipe, or -1s if it couldn't be made (reads then can't be
+    /// cancelled).
+    wake: [2]posix.fd_t = .{ -1, -1 },
+    interface: std.Io.Reader,
+
+    pub fn init(s: *PosixStdin, _: std.Io, buf: []u8) void {
+        s.* = .{ .interface = .{
+            .vtable = &.{ .stream = stream },
+            .buffer = buf,
+            .seek = 0,
+            .end = 0,
+        } };
+        var fds: [2]posix.fd_t = undefined;
+        if (std.c.pipe(&fds) != 0) return;
+        for (fds) |fd| _ = std.c.fcntl(fd, posix.F.SETFD, @as(c_int, posix.FD_CLOEXEC));
+        const fl = std.c.fcntl(fds[0], posix.F.GETFL);
+        _ = std.c.fcntl(fds[0], posix.F.SETFL, fl | @as(c_int, @bitCast(posix.O{ .NONBLOCK = true })));
+        s.wake = fds;
     }
 
     pub fn reader(s: *PosixStdin) *std.Io.Reader {
-        return &s.r.interface;
+        return &s.interface;
+    }
+
+    /// For `hp9.consin.Cancel`: `ctx` is the PosixStdin.
+    pub fn cancel(ctx: *anyopaque, _: std.Thread) void {
+        const s: *PosixStdin = @ptrCast(@alignCast(ctx));
+        if (s.wake[1] >= 0) _ = std.c.write(s.wake[1], "x", 1);
+    }
+
+    /// For `hp9.consin.Cancel`.
+    pub fn reset(ctx: *anyopaque) void {
+        const s: *PosixStdin = @ptrCast(@alignCast(ctx));
+        if (s.wake[0] >= 0) s.drainWake();
+    }
+
+    fn drainWake(s: *PosixStdin) void {
+        var b: [64]u8 = undefined;
+        while (std.c.read(s.wake[0], &b, b.len) > 0) {}
+    }
+
+    fn stream(r: *std.Io.Reader, wr: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const s: *PosixStdin = @alignCast(@fieldParentPtr("interface", r));
+        const dest = limit.slice(try wr.writableSliceGreedy(1));
+        if (s.wake[0] >= 0) while (true) {
+            var fds = [2]posix.pollfd{
+                .{ .fd = posix.STDIN_FILENO, .events = posix.POLL.IN, .revents = 0 },
+                .{ .fd = s.wake[0], .events = posix.POLL.IN, .revents = 0 },
+            };
+            _ = posix.poll(&fds, -1) catch break;
+            if (fds[1].revents != 0) {
+                s.drainWake();
+                return error.ReadFailed;
+            }
+            if (fds[0].revents != 0) break;
+        };
+        while (true) {
+            const n = posix.read(posix.STDIN_FILENO, dest) catch |err| switch (err) {
+                // A non-blocking stdin with nothing to read yet.
+                error.WouldBlock => {
+                    std.Thread.yield() catch {};
+                    continue;
+                },
+                else => return error.ReadFailed,
+            };
+            if (n == 0) return error.EndOfStream;
+            wr.advance(n);
+            return n;
+        }
     }
 };
 
@@ -28,15 +97,18 @@ const WindowsStdin = struct {
     const w = std.os.windows;
     extern "kernel32" fn ReadFile(h: w.HANDLE, buf: [*]u8, n: w.DWORD, read: ?*w.DWORD, ov: ?*anyopaque) callconv(.winapi) w.BOOL;
     extern "kernel32" fn GetConsoleMode(h: w.HANDLE, mode: *w.DWORD) callconv(.winapi) w.BOOL;
+    extern "kernel32" fn CancelSynchronousIo(thread: w.HANDLE) callconv(.winapi) w.BOOL;
     const ERROR_BROKEN_PIPE: w.DWORD = 109;
     const ERROR_HANDLE_EOF: w.DWORD = 38;
     const ERROR_OPERATION_ABORTED: w.DWORD = 995;
 
     handle: ?w.HANDLE,
     console: bool,
+    cancelled: std.atomic.Value(bool) = .init(false),
     interface: std.Io.Reader,
 
     pub fn init(s: *WindowsStdin, _: std.Io, buf: []u8) void {
+        s.cancelled = .init(false);
         s.handle = w.peb().ProcessParameters.hStdInput;
         var mode: w.DWORD = 0;
         s.console = if (s.handle) |h| GetConsoleMode(h, &mode).toBool() else false;
@@ -52,13 +124,29 @@ const WindowsStdin = struct {
         return &s.interface;
     }
 
+    /// For `hp9.consin.Cancel`: `ctx` is the WindowsStdin, and `thread` is
+    /// the one reading.
+    pub fn cancel(ctx: *anyopaque, thread: std.Thread) void {
+        const s: *WindowsStdin = @ptrCast(@alignCast(ctx));
+        s.cancelled.store(true, .release);
+        _ = CancelSynchronousIo(thread.getHandle());
+    }
+
+    /// For `hp9.consin.Cancel`.
+    pub fn reset(ctx: *anyopaque) void {
+        const s: *WindowsStdin = @ptrCast(@alignCast(ctx));
+        s.cancelled.store(false, .release);
+    }
+
     fn stream(r: *std.Io.Reader, wr: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
         const s: *WindowsStdin = @alignCast(@fieldParentPtr("interface", r));
         const h = s.handle orelse return error.EndOfStream;
         const dest = limit.slice(try wr.writableSliceGreedy(1));
         var n: w.DWORD = 0;
         while (true) {
+            if (s.cancelled.swap(false, .acq_rel)) return error.ReadFailed;
             if (!ReadFile(h, dest.ptr, std.math.lossyCast(w.DWORD, dest.len), &n, null).toBool()) {
+                if (s.cancelled.swap(false, .acq_rel)) return error.ReadFailed;
                 return switch (@intFromEnum(w.GetLastError())) {
                     ERROR_BROKEN_PIPE, ERROR_HANDLE_EOF => error.EndOfStream,
                     else => error.ReadFailed,

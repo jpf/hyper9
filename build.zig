@@ -4,15 +4,19 @@ const unicorn_src = @import("build/unicorn.zig");
 const drawterm = "third_party/drawterm";
 
 // drawterm's kern/Makefile OFILES with AUDIO=none, without devtab.c and
-// devenv.c (src/kern/ has our own), plus the OS files below.
+// devenv.c (src/kern/ has our own) or devpipe.c (built with kern_notes
+// below), plus the OS files below.
 const kern_sources = [_][]const u8{
     "alloc.c",    "allocb.c",        "chan.c",   "data.c",     "dev.c",
     "devaudio.c", "devaudio-none.c", "devcmd.c", "devcons.c",  "devdraw.c",
-    "devip.c",    "devkbd.c",        "devmnt.c", "devmouse.c", "devpipe.c",
+    "devip.c",    "devkbd.c",        "devmnt.c", "devmouse.c",
     "devroot.c",  "devssl.c",        "devtls.c", "error.c",    "parse.c",
     "pgrp.c",     "procinit.c",      "rwlock.c", "sleep.c",    "stub.c",
     "sysfile.c",  "qio.c",           "qlock.c",  "term.c",     "waserror.c",
 };
+// drawterm files that post notes, built so their notes reach hp9's note
+// queue (src/kern/proc.c) instead of drawterm's postnote.
+const kern_notes = [_][]const u8{"devpipe.c"};
 // OS=posix (Make.unix), and OS=win32 with FS=fs-win32 (Make.win64).
 const kern_posix = [_][]const u8{ "devfs-posix.c", "devip-posix.c", "devlfd-posix.c", "posix.c" };
 const kern_win32 = [_][]const u8{ "devfs-win32.c", "devip-win32.c", "devlfd-win32.c", "win32.c" };
@@ -239,6 +243,37 @@ fn linkUnicorn(c: *std.Build.Step.Compile) void {
     if (unicorn_compat) |compat| m.linkLibrary(compat);
 }
 
+/// `git describe --tags --always --dirty` for the source tree, or
+/// build.zig.zon's version when that fails (a source tarball).
+fn gitVersion(b: *std.Build) []const u8 {
+    var code: u8 = 0;
+    const out = b.runAllowFail(&.{ "git", "-C", b.build_root.path orelse ".", "describe", "--tags", "--always", "--dirty" }, &code, .ignore) catch
+        return zonVersion(b);
+    const v = std.mem.trim(u8, out, " \r\n");
+    return if (v.len > 0) v else zonVersion(b);
+}
+
+/// build.zig.zon's `.version`, read as text so the manifest needs no type.
+fn zonVersion(b: *std.Build) []const u8 {
+    const zon = b.build_root.handle.readFileAlloc(b.graph.io, "build.zig.zon", b.allocator, .limited(1 << 16)) catch return "unknown";
+    const key = ".version = \"";
+    const i = std.mem.indexOf(u8, zon, key) orelse return "unknown";
+    const rest = zon[i + key.len ..];
+    return rest[0 .. std.mem.indexOfScalar(u8, rest, '"') orelse return "unknown"];
+}
+
+/// The value of `NAME=value` in scripts/pins.sh, without a trailing
+/// comment, or "unknown".
+fn pin(pins: []const u8, comptime name: []const u8) []const u8 {
+    var lines = std.mem.splitScalar(u8, pins, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, name ++ "=")) continue;
+        var toks = std.mem.tokenizeAny(u8, line[name.len + 1 ..], " \t#");
+        return toks.next() orelse "unknown";
+    }
+    return "unknown";
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -285,6 +320,11 @@ pub fn build(b: *std.Build) void {
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path(drawterm ++ "/kern"),
+        .files = &kern_notes,
+        .flags = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{"-Dpostnote=hp9_postnote"} }) catch @panic("OOM"),
+    });
+    kern.root_module.addCSourceFiles(.{
+        .root = b.path(drawterm ++ "/kern"),
         .files = if (os == .windows) &kern_win32 else &kern_posix,
         .flags = flags,
     });
@@ -322,6 +362,13 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption(Emu, "emu", emu);
     options.addOption(bool, "kern", build_kern);
+    // For --version: scripts/release.sh passes -Dversion; otherwise git
+    // describe, or build.zig.zon's version where there's no git checkout.
+    options.addOption([]const u8, "version", b.option([]const u8, "version", "Version hp9 --version reports (default: git describe, else build.zig.zon's)") orelse gitVersion(b));
+    const pins = b.build_root.handle.readFileAlloc(b.graph.io, "scripts/pins.sh", b.allocator, .limited(1 << 16)) catch "";
+    options.addOption([]const u8, "ninefront_release", pin(pins, "NINEFRONT_RELEASE"));
+    options.addOption([]const u8, "ninefront_rev", pin(pins, "NINEFRONT_REV"));
+    options.addOption([]const u8, "drawterm_rev", pin(pins, "DRAWTERM_REV"));
     mod.addOptions("build_options", options);
 
     const exe = b.addExecutable(.{
@@ -330,7 +377,11 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "hp9", .module = mod }},
+            .imports = &.{
+                .{ .name = "hp9", .module = mod },
+                // --check runs the hello fixture on each backend.
+                .{ .name = "hello", .module = b.createModule(.{ .root_source_file = b.path("tests/fixtures/hello.zig"), .target = target }) },
+            },
         }),
     });
     if (os == .macos) {

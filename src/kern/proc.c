@@ -5,8 +5,16 @@
  * found from its Proc through a table here. See DESIGN.md, "Process model".
  *
  * Also here, ported from 9front at the pinned release: the group handling
- * of sysrfork (port/sysproc.c), pgrpcpy (port/pgrp.c), and pexit's and
- * pwait's wait records (port/proc.c).
+ * of sysrfork (port/sysproc.c), pgrpcpy (port/pgrp.c), pexit's and
+ * pwait's wait records, and the note queue (mknote, pushnote, postnote,
+ * postnotepg and popnote, port/proc.c).
+ *
+ * Notes are queued on the record, not in drawterm's Proc: drawterm's
+ * postnote only sets notepending, which its sysfile.c clears after every
+ * successful call, so notepending stays the "interrupt this call" flag.
+ * devpipe.c is built with -Dpostnote=hp9_postnote, so its notes come here.
+ * Each record belongs to a machine (Hmach): note groups and postnotepg
+ * never reach another machine's processes.
  *
  * Records are reference counted: the table holds one for the process's
  * life, and each child holds one on its parent's record, so a child that
@@ -38,6 +46,16 @@ enum
 	Maxwait		= 128,	/* wait records a parent keeps, as 9front */
 	PROCHASH	= 64,
 	TEXTLEN		= 64,
+	NNOTE		= 5,	/* queued notes, as 9front */
+};
+
+/* hp9_kern_popnote's results. */
+enum
+{
+	Nnone,		/* no note to act on */
+	Nhandle,	/* enter the handler with the note */
+	Nkill,		/* die with the note as the exit status */
+	Nkilldebug,	/* the same, and print "suicide: note" first */
 };
 
 /* devenv.c */
@@ -48,6 +66,24 @@ extern void	hp9_egrpclose(void*);
 
 typedef struct Hwait Hwait;
 typedef struct Hproc Hproc;
+typedef struct Hmach Hmach;
+typedef struct Hnote Hnote;
+
+/* A machine: the processes descended from one hp9_kern_spawn. */
+struct Hmach
+{
+	Ref	ref;		/* one per record */
+	Lock	lk;
+	ulong	nextnoteid;
+};
+
+/* 9front's Note. One note posted to a group is shared by its queues. */
+struct Hnote
+{
+	Ref	ref;
+	int	flag;		/* NUser, NExit or NDebug */
+	char	msg[ERRMAX];
+};
 
 struct Hwait
 {
@@ -69,6 +105,15 @@ struct Hproc
 	char	exitstr[ERRMAX];
 	void	*egrp;		/* devenv.c's HEgrp */
 	void	*aux;		/* the Zig process */
+	Hmach	*mach;
+
+	Lock	nlk;		/* guards the note fields below */
+	ulong	noteid;
+	int	notify;		/* has a note handler */
+	int	notified;	/* in the handler */
+	int	nnote;
+	Hnote	*note[NNOTE];
+	Hnote	*lastnote;	/* the note being handled, or that killed it */
 
 	Hproc	*parent;	/* nil with RFNOWAIT or for a machine's first process */
 	Lock	exl;		/* guards the fields below */
@@ -129,6 +174,31 @@ leave(Hproc *h)
 }
 
 static void
+freenote(Hnote *n)
+{
+	if(n == nil || decref(&n->ref))
+		return;
+	free(n);
+}
+
+/* Called with h->nlk held. */
+static void
+freenotes(Hproc *h)
+{
+	while(h->nnote > 0){
+		freenote(h->note[--h->nnote]);
+		h->note[h->nnote] = nil;
+	}
+}
+
+static void
+putmach(Hmach *m)
+{
+	if(m != nil && decref(&m->ref) == 0)
+		free(m);
+}
+
+static void
 putproc(Hproc *h)
 {
 	Hwait *w;
@@ -139,6 +209,9 @@ putproc(Hproc *h)
 		h->waitq = w->next;
 		free(w);
 	}
+	freenotes(h);
+	freenote(h->lastnote);
+	putmach(h->mach);
 	free(h);
 }
 
@@ -166,6 +239,309 @@ uphproc(void)
 	if(h == nil)
 		error("not an hp9 process");
 	return h;
+}
+
+static ulong
+newnoteid(Hmach *m)
+{
+	ulong id;
+
+	lock(&m->lk);
+	id = ++m->nextnoteid;
+	unlock(&m->lk);
+	return id;
+}
+
+/*
+ * Set by the Zig side: makes a process running guest code take an exit,
+ * so a note posted to it is delivered. Called with the process's nlk held,
+ * and only while its aux is set.
+ */
+void	(*hp9_notekick)(void*);
+
+static Hnote*
+mknote(char *msg, int flag)
+{
+	Hnote *n;
+
+	n = mallocz(sizeof *n, 1);
+	if(n == nil)
+		return nil;
+	kstrcpy(n->msg, msg, ERRMAX);
+	n->flag = flag;
+	n->ref.ref = 1;
+	return n;
+}
+
+/*
+ * 9front's pushnote: queues n (taking the caller's reference) and
+ * interrupts the process. A note posted by the system to a process that
+ * can't handle it will kill it, so the notes before it are dropped.
+ */
+static int
+pushnote(Hproc *h, Hnote *n)
+{
+	lock(&h->nlk);
+	if(h->p == nil){
+		unlock(&h->nlk);
+		freenote(n);
+		return 0;
+	}
+	if(n->flag != NUser && (!h->notify || h->notified))
+		freenotes(h);
+	if(h->nnote >= NNOTE){
+		unlock(&h->nlk);
+		freenote(n);
+		return 0;
+	}
+	h->note[h->nnote++] = n;
+	procinterrupt(h->p);
+	if(h->aux != nil && hp9_notekick != nil)
+		hp9_notekick(h->aux);
+	unlock(&h->nlk);
+	return 1;
+}
+
+/*
+ * drawterm's postnote, which kern files built with -Dpostnote=hp9_postnote
+ * (devpipe.c) call. A Proc that isn't an hp9 process (a kproc) is only
+ * interrupted, as drawterm's postnote does.
+ */
+int
+hp9_postnote(Proc *p, int dolock, char *msg, int flag)
+{
+	Hproc *h;
+	Hnote *n;
+	int r;
+
+	USED(dolock);
+	if(p == nil)
+		return 0;
+	lock(&tablk);
+	for(h = table[prochash(p)]; h != nil; h = h->hash)
+		if(h->p == p)
+			break;
+	if(h != nil)
+		incref(&h->ref);
+	unlock(&tablk);
+	if(h == nil){
+		procinterrupt(p);
+		return 0;
+	}
+	r = 0;
+	if((n = mknote(msg, flag)) != nil)
+		r = pushnote(h, n);
+	putproc(h);
+	return r;
+}
+
+/* 9front's postnotepg, within machine m. */
+static void
+postnotepg(Hmach *m, ulong noteid, char *msg, int flag)
+{
+	Hnote *n;
+	Hproc *h;
+	int i;
+
+	if((n = mknote(msg, flag)) == nil)
+		return;
+	lock(&tablk);
+	for(i = 0; i < PROCHASH; i++)
+		for(h = table[i]; h != nil; h = h->hash){
+			if(h->mach != m || h->p == up || h->noteid != noteid)
+				continue;
+			incref(&n->ref);
+			pushnote(h, n);
+		}
+	unlock(&tablk);
+	freenote(n);
+}
+
+/*
+ * Posts a note to the process with machine-local pid in the caller's
+ * machine. Returns 1 if it was queued, 0 if the queue was full, or -1
+ * with the error string set if there's no such process.
+ */
+int
+hp9_kern_postnote(ulong pid, char *msg, int flag)
+{
+	Hproc *self, *h;
+	Hnote *n;
+	int i, r;
+
+	self = lookup(up);
+	h = nil;
+	lock(&tablk);
+	for(i = 0; h == nil && i < PROCHASH; i++)
+		for(h = table[i]; h != nil; h = h->hash)
+			if(self != nil && h->mach == self->mach && h->pid == pid)
+				break;
+	if(h != nil)
+		incref(&h->ref);
+	unlock(&tablk);
+	if(h == nil){
+		kstrcpy(up->syserrstr, "process exited", ERRMAX);
+		return -1;
+	}
+	r = 0;
+	if((n = mknote(msg, flag)) != nil)
+		r = pushnote(h, n);
+	putproc(h);
+	return r;
+}
+
+/* Posts a note to every process but the caller in its machine's note group noteid. */
+void
+hp9_kern_postnotepg(ulong noteid, char *msg, int flag)
+{
+	Hproc *h;
+
+	h = lookup(up);
+	if(h != nil)
+		postnotepg(h->mach, noteid, msg, flag);
+}
+
+/* The calling process's note group. */
+ulong
+hp9_kern_noteid(void)
+{
+	Hproc *h;
+
+	h = lookup(up);
+	return h != nil ? h->noteid : 0;
+}
+
+/* Whether the calling process has a note handler (notify with a non-nil function). */
+void
+hp9_kern_setnotify(int on)
+{
+	Hproc *h;
+
+	h = lookup(up);
+	if(h == nil)
+		return;
+	lock(&h->nlk);
+	h->notify = on != 0;
+	unlock(&h->nlk);
+}
+
+/* Whether the calling process has a note queued. */
+int
+hp9_kern_notepending(void)
+{
+	Hproc *h;
+
+	h = lookup(up);
+	return h != nil && h->nnote > 0;
+}
+
+/*
+ * 9front's popnote, for delivery at a syscall exit or kick. Takes the
+ * next note into msg (ERRMAX bytes), with " pc=" and pc appended to a
+ * "sys:" note posted to this process alone, and says what to do:
+ * Nhandle (the process is now in its handler until hp9_kern_noted),
+ * Nkill or Nkilldebug (it has no handler, or is in it already), or Nnone
+ * (no note, or only user notes while in the handler, which wait).
+ */
+int
+hp9_kern_popnote(char *msg, uvlong pc)
+{
+	Hproc *h;
+	Hnote *n;
+	int l, r;
+
+	h = lookup(up);
+	if(h == nil)
+		return Nnone;
+	up->notepending = 0;
+	lock(&h->nlk);
+	if(h->nnote == 0 || (h->notified && h->note[0]->flag == NUser)){
+		unlock(&h->nlk);
+		return Nnone;
+	}
+	freenote(h->lastnote);
+	n = h->lastnote = h->note[0];
+	if(--h->nnote > 0)
+		memmove(&h->note[0], &h->note[1], h->nnote*sizeof(Hnote*));
+	h->note[h->nnote] = nil;
+	if(n->ref.ref == 1 && strncmp(n->msg, "sys:", 4) == 0){
+		l = strlen(n->msg);
+		snprint(n->msg+l, ERRMAX-l, " pc=%#llux", pc);
+	}
+	if(!h->notify || h->notified)
+		r = n->flag == NDebug ? Nkilldebug : Nkill;
+	else {
+		h->notified = 1;
+		r = Nhandle;
+	}
+	kstrcpy(msg, n->msg, ERRMAX);
+	unlock(&h->nlk);
+	return r;
+}
+
+/*
+ * The bookkeeping of 9front's sysnoted. arg is noted's argument (NCONT 0,
+ * NDFLT 1, NSAVE 2, NRSTR 3). Returns -1 for noted outside a handler with
+ * anything but NRSTR (an error, Ebadarg); otherwise, for NDFLT or an
+ * unknown arg, Nkill or Nkilldebug with the last note in msg, and Nnone
+ * when the process carries on, out of the handler (NCONT, NSAVE, NRSTR).
+ */
+int
+hp9_kern_noted(int arg, char *msg)
+{
+	Hproc *h;
+	int r;
+
+	h = lookup(up);
+	if(h == nil)
+		return -1;
+	lock(&h->nlk);
+	if(!h->notified && arg != 3){
+		unlock(&h->nlk);
+		kstrcpy(up->syserrstr, Ebadarg, ERRMAX);
+		return -1;
+	}
+	r = Nnone;
+	switch(arg){
+	case 0:
+	case 2:
+	case 3:
+		h->notified = 0;
+		break;
+	default:
+		if(h->lastnote != nil)
+			h->lastnote->flag = NDebug;
+		/* fall through */
+	case 1:
+		if(h->lastnote == nil){
+			kstrcpy(msg, "Suicide", ERRMAX);
+			r = Nkill;
+		} else {
+			kstrcpy(msg, h->lastnote->msg, ERRMAX);
+			r = h->lastnote->flag == NDebug ? Nkilldebug : Nkill;
+		}
+		break;
+	}
+	unlock(&h->nlk);
+	return r;
+}
+
+/* exec's reset of the note state: no handler, nothing queued. */
+void
+hp9_kern_execnotes(void)
+{
+	Hproc *h;
+
+	h = lookup(up);
+	if(h == nil)
+		return;
+	lock(&h->nlk);
+	freenotes(h);
+	freenote(h->lastnote);
+	h->lastnote = nil;
+	h->notify = 0;
+	h->notified = 0;
+	unlock(&h->nlk);
 }
 
 /* The calling process's Egrp, for devenv; raises an error if it has none. */
@@ -352,11 +728,16 @@ hp9_kern_spawn(char *name, void (*fn)(void*), void *arg)
 	s->arg = arg;
 	p = newproc();
 	h = newhproc(p, name);
-	if(h == nil){
+	if(h != nil)
+		h->mach = mallocz(sizeof *h->mach, 1);
+	if(h == nil || h->mach == nil){
+		free(h);
 		free(s);
 		free(p);
 		return -1;
 	}
+	h->mach->ref.ref = 1;
+	h->noteid = newnoteid(h->mach);
 	p->fn = spawntramp;
 	p->arg = s;
 	strecpy(p->text, p->text+sizeof p->text, name);
@@ -380,8 +761,9 @@ forktramp(void *v)
  * rfork with RFPROC: runs fn(arg) on a new kernel process that is a child
  * of the caller, with groups shared or copied from the caller's as flag
  * says (9front's sysrfork). pid is the child's machine-local pid. RFMEM
- * is the caller's business, and note groups (RFNOTEG) come in M4. Returns
- * 0, or -1 with the error string set; on error, fn never runs.
+ * is the caller's business. The child inherits the note handler and,
+ * without RFNOTEG, the note group, but no queued notes. Returns 0, or -1
+ * with the error string set; on error, fn never runs.
  */
 int
 hp9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
@@ -410,6 +792,7 @@ hp9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 		if(h != nil){
 			if(h->egrp != nil)
 				hp9_egrpclose(h->egrp);
+			putmach(h->mach);
 			free(h);
 		}
 		free(s);
@@ -430,6 +813,10 @@ hp9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 	if(h == nil)
 		error(Enomem);
 	h->pid = pid;
+	h->mach = ph->mach;
+	incref(&h->mach->ref);
+	h->notify = ph->notify;
+	h->noteid = (flag & RFNOTEG) ? newnoteid(h->mach) : ph->noteid;
 	strecpy(p->text, p->text+sizeof p->text, up->text);
 
 	p->slash = up->slash;
@@ -580,6 +967,14 @@ hp9_kern_rfork(int flag)
 
 	if(flag & RFNOMNT)
 		devmask(up->pgrp, 1, nomntdevs);
+	if(flag & RFNOTEG){
+		ulong id;
+
+		id = newnoteid(h->mach);
+		lock(&tablk);	/* postnotepg reads noteid under tablk */
+		h->noteid = id;
+		unlock(&tablk);
+	}
 	return 0;
 }
 
@@ -600,6 +995,12 @@ hp9_kern_exit(void)
 		return;
 	}
 	leave(h);
+	/* Notes posted from now on are dropped; the Proc goes with pexit. */
+	lock(&h->nlk);
+	h->p = nil;
+	h->aux = nil;
+	freenotes(h);
+	unlock(&h->nlk);
 
 	ph = h->parent;
 	if(ph != nil){
@@ -760,8 +1161,12 @@ hp9_kern_setaux(void *aux)
 	Hproc *h;
 
 	h = lookup(up);
-	if(h != nil)
-		h->aux = aux;
+	if(h == nil)
+		return;
+	/* hp9_notekick reads aux under nlk. */
+	lock(&h->nlk);
+	h->aux = aux;
+	unlock(&h->nlk);
 }
 
 extern int sysclose(int);
@@ -785,20 +1190,4 @@ hp9_kern_closeexec(void)
 		if(cexec)
 			sysclose(i);
 	}
-}
-
-/*
- * Returns and clears the calling process's pending note flag. devpipe
- * posts a note (which drawterm reduces to this flag) on a write to a
- * closed pipe; hp9 turns that into the process's death, as 9front does
- * for a process with no note handler.
- */
-int
-hp9_kern_takenote(void)
-{
-	int n;
-
-	n = up->notepending;
-	up->notepending = 0;
-	return n;
 }

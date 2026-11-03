@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const hp9 = @import("hp9");
 const cli = @import("cli.zig");
 const Stdin = @import("stdin.zig").Stdin;
+const tools = @import("tools.zig");
 
 /// Exit codes for hp9's own failures (DESIGN.md, "Exit codes").
 const exit_failed = 125;
@@ -18,6 +19,30 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print(cli.usage, .{});
         return 2;
     };
+    switch (cfg.mode) {
+        .run => {},
+        .help, .version => {
+            var buf: [1024]u8 = undefined;
+            var w = std.Io.File.stdout().writerStreaming(io, &buf);
+            if (cfg.mode == .help) w.interface.writeAll(cli.usage) catch {} else tools.version(&w.interface) catch {};
+            w.interface.flush() catch {};
+            return 0;
+        },
+        .check => {
+            const root_arg = cfg.root orelse init.environ_map.get("HP9ROOT") orelse defaultRoot(arena, io);
+            const root = if (root_arg) |r| if (std.Io.Dir.cwd().realPathFileAlloc(io, r, arena)) |p| kernPath(arena, p) else |_| null else null;
+            var buf: [1024]u8 = undefined;
+            var w = std.Io.File.stdout().writerStreaming(io, &buf);
+            const code = tools.check(init.gpa, io, &w.interface, .{
+                .backend = cfg.backend,
+                .memory = cfg.memory,
+                .root_arg = root_arg,
+                .root = root,
+            }) catch exit_failed;
+            w.interface.flush() catch {};
+            return code;
+        },
+    }
     // --rc runs /bin/rc -c; the remaining arguments become $*.
     const argv: []const []const u8 = if (cfg.rc) |cmd| blk: {
         const v = try arena.alloc([]const u8, 3 + cfg.argv.len);
@@ -134,10 +159,15 @@ pub fn main(init: std.process.Init) !u8 {
     opts.trace = if (cfg.trace) |t| (if (t.len > 0) &trace_w.interface else &err_w.interface) else null;
     opts.dump_on_fault = cfg.dump_on_fault;
     opts.ns = cfg.ns;
-    opts.stdio = .{ .in = in.reader(), .out = &out.interface, .err = &err_w.interface };
+    opts.stdio = .{
+        .in = in.reader(),
+        .in_cancel = .{ .ctx = &in, .func = Stdin.cancel, .reset = Stdin.reset },
+        .out = &out.interface,
+        .err = &err_w.interface,
+    };
     var machine = hp9.Machine.init(init.gpa, io, opts) catch |err| {
         const a: hp9.vmm.Arch = arch orelse hp9.vmm.host_arch orelse .arm64;
-        std.debug.print("hp9: cannot create {t} machine for {t}: {s}\n", .{ cfg.backend, a, explain(cfg.backend, err) });
+        std.debug.print("hp9: cannot create {t} machine for {t}: {s}\n", .{ cfg.backend, a, tools.explain(cfg.backend, err) });
         return exit_failed;
     };
     defer machine.deinit();
@@ -229,20 +259,7 @@ fn kernPath(arena: std.mem.Allocator, p: []const u8) []const u8 {
     return if (out.len == 4 and out[3] == '/') out[0..3] else out;
 }
 
-fn explain(want: hp9.vmm.BackendKind, err: hp9.Machine.InitError) []const u8 {
-    return switch (err) {
-        error.HypervisorUnavailable => "no usable hypervisor (on macOS, is hp9 signed with hp9.entitlements?)",
-        error.BackendNotBuilt => switch (want) {
-            .emu, .auto => "the emulator isn't built into this hp9 (use hp9-emu from the releases, or build with -Demu=unicorn)",
-            else => "backend not built into this hp9",
-        },
-        error.WrongArch => "backend can't run this architecture",
-        error.NotImplemented => "backend not implemented yet",
-        error.OutOfGuestMemory => "can't reserve guest memory (is --memory too large?)",
-        else => @errorName(err),
-    };
-}
-
 test {
     _ = cli;
+    _ = tools;
 }

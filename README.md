@@ -110,6 +110,9 @@ cross-compiles the other targets.
 ```sh
 zig-out/bin/hp9 [hp9-flags] [--] program [args...]
 zig-out/bin/hp9 [hp9-flags] --rc 'command' [args...]
+zig-out/bin/hp9 --version                  # version, pinned 9front and drawterm, backends built in
+zig-out/bin/hp9 [--backend B] [--root DIR] --check
+zig-out/bin/hp9 --help                     # or -h alone
 
 zig-out/bin/hp9 /bin/cat /lib/namespace    # M2 demo
 zig-out/bin/hp9 ls -l /bin/cat             # bare names search $path: . and /bin
@@ -127,6 +130,13 @@ imported: the guest gets `user`, `home`, `cputype`, `objtype`, `sysname`,
 when hp9 itself fails, 126 when the program isn't a runnable a.out and 127
 when it isn't found.
 
+`--check` creates a VM on each backend built in (or just `--backend`'s) and
+runs a test program on it, which on macOS also checks the hypervisor
+entitlement. It reports HVF's vCPU limit, then runs `/bin/echo` from the root
+tree. It exits 0 if hp9 can run programs from the root, and 125 otherwise.
+Release builds report the release's version; development builds report `git
+describe` (`-Dversion=V` overrides it).
+
 Flags: `--backend auto|hvf|kvm|whp|emu`, `--root DIR`, `--cwd DIR`, `--env
 name=value` (repeatable), `--rc 'cmd'`, `--ns FILE`, `--trace[=FILE]`,
 `--dump-on-fault`, and the sandbox flags below. `--rc` runs `/bin/rc -c`.
@@ -141,8 +151,12 @@ arm64 hosts, for testing; HVF runs arm64 only.
 
 Syscalls go through drawterm's kern: open, create, close, dup, pread, pwrite,
 seek, stat, fstat, wstat, fwstat, fd2path, bind, chdir, remove, errstr, brk_,
-sleep, notify, exits, and for process trees rfork, exec (including `#!`
-scripts), await and pipe; `/fd` is devdup. Each process has its own kernel
+sleep, notify, noted, exits, and for process trees rfork, exec (including `#!`
+scripts), await and pipe; `/fd` is devdup. Notes are delivered as on 9front:
+a handler set with notify gets the note and a saved Ureg on its stack, and a
+process without one dies with the note as its status, so a write to a closed
+pipe ends the writer with `sys: write on closed pipe pc=...`, and a fault or
+bad syscall can be caught. Each process has its own kernel
 thread and normally its own vCPU. HVF allows 64 vCPUs, so past 56 processes
 the rest share a pool of 8 vCPUs, which costs a thread handoff per syscall.
 `--trace` prints one line per syscall
@@ -216,9 +230,10 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 
 | Path | Contents |
 | --- | --- |
-| `src/main.zig`, `src/cli.zig`, `src/stdin.zig` | CLI: entry point, flag parsing with no I/O, and the host stdin reader |
+| `src/main.zig`, `src/cli.zig`, `src/stdin.zig`, `src/tools.zig` | CLI: entry point, flag parsing with no I/O, the host stdin reader (cancellable, for the console's reader thread), and `--check`/`--version` |
 | `src/root.zig` | library root |
 | `src/machine.zig` | one machine: builds its namespace, runs a process and serves its syscalls |
+| `src/consin.zig` | a machine run's console input: the reader thread a guest's console read waits on, so notes can interrupt it |
 | `src/policy.zig` | the sandbox policy: profiles, the compiled plan, `--print` and the access rules devfs checks |
 | `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; boot and spawn (`glue.c`), our device table, the machine console `#y`, devenv ported from 9front, and the devfs policy hooks (`fscheck.c`) |
 | `src/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |

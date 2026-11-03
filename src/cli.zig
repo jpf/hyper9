@@ -15,10 +15,25 @@ pub const usage =
     \\           [--strict] [--print] [--trace[=FILE]] [--dump-on-fault]
     \\           [--] program [args...]
     \\       hp9 [flags] --rc 'command' [args...]
+    \\       hp9 [--backend B] [--root DIR] [--memory SIZE] --check
+    \\       hp9 --version
+    \\       hp9 --help
     \\
 ;
 
+/// What hp9 does: run a program, or one of the tool functions.
+pub const Mode = enum {
+    run,
+    /// --check: probe the backends and the root tree, and run a program.
+    check,
+    /// --version: print the version, the pins and the backends.
+    version,
+    /// --help, or -h as the only argument: print the usage to stdout.
+    help,
+};
+
 pub const Config = struct {
+    mode: Mode = .run,
     backend: vmm.BackendKind = .auto,
     /// --trace: null for none, "" for stderr, else a file.
     trace: ?[]const u8 = null,
@@ -78,6 +93,9 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     var readable: std.ArrayList([]const u8) = .empty;
     var writable: std.ArrayList([]const u8) = .empty;
     var read_deny: std.ArrayList([]const u8) = .empty;
+    // Long flags only (DESIGN.md, "Parsing rules"); -h is accepted alone,
+    // where it can't be a program's flag.
+    if (args.len == 2 and std.mem.eql(u8, args[1], "-h")) return .{ .mode = .help, .argv = &.{} };
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const a = args[i];
@@ -100,6 +118,15 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             c.strict = true;
         } else if (flag(a, "--print")) {
             c.print = true;
+        } else if (flag(a, "--check")) {
+            if (c.mode != .run) return error.Usage;
+            c.mode = .check;
+        } else if (flag(a, "--version")) {
+            if (c.mode != .run) return error.Usage;
+            c.mode = .version;
+        } else if (flag(a, "--help")) {
+            if (c.mode != .run) return error.Usage;
+            c.mode = .help;
         } else if (value(args, &i, "--backend")) |v| {
             c.backend = try enumValue(vmm.BackendKind, v);
         } else if (value(args, &i, "--root")) |v| {
@@ -146,7 +173,10 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
         if (c.host_fs or c.host_cmd or c.cwd != null) return error.Usage;
         c.profile = .tight;
     }
-    if (c.rc == null and i >= args.len) return error.Usage;
+    // The tool functions take no program, so `hp9 --check ls` is a mistake.
+    if (c.mode != .run) {
+        if (c.rc != null or i < args.len) return error.Usage;
+    } else if (c.rc == null and i >= args.len) return error.Usage;
     c.env = try env.toOwnedSlice(gpa);
     c.readable = try readable.toOwnedSlice(gpa);
     c.writable = try writable.toOwnedSlice(gpa);
@@ -264,6 +294,37 @@ test "--pids, --cpus and --ns" {
     try t.expectError(error.Usage, parse(a, &.{ "hp9", "--pids", "0", "rc" }));
     try t.expectError(error.Usage, parse(a, &.{ "hp9", "--cpus", "x", "rc" }));
     try t.expectError(error.Usage, parse(a, &.{ "hp9", "--ns" }));
+}
+
+test "--check and --version" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try t.expectEqual(Mode.version, (try parse(a, &.{ "hp9", "--version" })).mode);
+    const c = try parse(a, &.{ "hp9", "--backend", "emu", "--root=/r", "--check" });
+    try t.expectEqual(Mode.check, c.mode);
+    try t.expectEqual(vmm.BackendKind.emu, c.backend);
+    try t.expectEqualStrings("/r", c.root.?);
+    try t.expectEqual(Mode.run, (try parse(a, &.{ "hp9", "ls" })).mode);
+    // A flag after the program is the program's.
+    try t.expectEqual(Mode.run, (try parse(a, &.{ "hp9", "ls", "--version" })).mode);
+    try t.expectError(error.Usage, parse(a, &.{ "hp9", "--check", "ls" }));
+    try t.expectError(error.Usage, parse(a, &.{ "hp9", "--version", "--rc", "ls" }));
+    try t.expectError(error.Usage, parse(a, &.{ "hp9", "--check", "--version" }));
+}
+
+test "--help and -h" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try t.expectEqual(Mode.help, (try parse(a, &.{ "hp9", "--help" })).mode);
+    try t.expectEqual(Mode.help, (try parse(a, &.{ "hp9", "-h" })).mode);
+    // -h counts only alone; anywhere else it's a program name or argument.
+    try t.expectEqualStrings("-h", (try parse(a, &.{ "hp9", "--backend", "emu", "-h" })).argv[0]);
+    const c = try parse(a, &.{ "hp9", "ls", "-h" });
+    try t.expectEqual(Mode.run, c.mode);
+    try t.expectEqualStrings("-h", c.argv[1]);
+    try t.expectError(error.Usage, parse(a, &.{ "hp9", "--help", "ls" }));
 }
 
 test "program kinds" {

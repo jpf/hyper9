@@ -181,6 +181,34 @@ test "echo" {
     try std.testing.expectEqual(0, r.code);
 }
 
+test "--check passes with the root tree, and --version and -h print to stdout" {
+    const e = try env();
+    var it = std.mem.tokenizeScalar(u8, e.backends, ',');
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        const r = try runOn(e, backend, &.{"--check"}, null);
+        defer r.deinit();
+        try std.testing.expectEqual(0, r.code);
+        try std.testing.expect(std.mem.indexOf(u8, r.out, "/bin/echo runs") != null);
+    }
+    const missing = try runProcess(&.{ e.hp9, "--root", "/nonexistent-hp9-root", "--check" }, null);
+    defer gpa.free(missing.stdout);
+    defer gpa.free(missing.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 125 }, missing.term);
+    try std.testing.expect(std.mem.indexOf(u8, missing.stdout, "not found") != null);
+
+    const v = try runProcess(&.{ e.hp9, "--version" }, null);
+    defer gpa.free(v.stdout);
+    defer gpa.free(v.stderr);
+    try std.testing.expect(std.mem.startsWith(u8, v.stdout, "hp9 "));
+    try std.testing.expect(std.mem.indexOf(u8, v.stdout, "\nbackends: ") != null);
+    const h = try runProcess(&.{ e.hp9, "-h" }, null);
+    defer gpa.free(h.stdout);
+    defer gpa.free(h.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, h.term);
+    try std.testing.expect(std.mem.startsWith(u8, h.stdout, "usage: hp9"));
+}
+
 test "exits string gives status 1 and is printed" {
     const e = try env();
     const r = try run(e, &.{ "/bin/cat", "/does/not/exist" });
@@ -577,6 +605,34 @@ test "an interactive rc reads typed lines" {
 }
 
 // Notes and /proc (M4).
+
+test "a write to a closed pipe kills the writer with the note and its pc (M4)" {
+    const e = try env();
+    // whatis is an rc builtin, so the writer is rc itself; before notes
+    // were delivered it ignored the failed write and looped forever.
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", "{ while() whatis path } | sed 1q; echo $status" });
+    defer r.deinit();
+    var lines = std.mem.splitScalar(u8, r.out, '\n');
+    try std.testing.expectEqualStrings("path=(. /bin)", lines.next().?);
+    try std.testing.expect(std.mem.indexOf(u8, lines.next().?, ": sys: write on closed pipe pc=0x") != null);
+    try std.testing.expectEqual(0, r.code);
+}
+
+
+test "--timeout stops a console read on a terminal at once (M4)" {
+    const e = try env();
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        var t = try spawnTerm(e, backend, &.{ "--timeout", "500ms", "--rc", "echo ready; read" });
+        defer t.deinit();
+        try t.expect("ready", slow(10_000));
+        // Before the reader thread, the read held the machine until a
+        // 500 ms grace period ran out, and hp9 exited without freeing it.
+        try std.testing.expectEqual(1, try t.wait(slow(1_500)));
+        try t.expect("hp9: timeout", slow(1_000));
+    }
+}
 
 test "M4: kill and ps work in an interactive rc (M4 demo)" {
     try pending();

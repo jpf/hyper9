@@ -7,6 +7,13 @@
  *
  * The attach spec names the machine: #y<id>. The leaves never raise kernel
  * errors; they return -1 and this file raises the error.
+ *
+ * A read never blocks in a host call: a reader thread in Zig
+ * (src/consin.zig) reads the host stream, and the guest sleeps here until
+ * it has input, so a note or a teardown interrupts the read with Eintr.
+ * Processes in a tree share the console, so readers take turns. A QLock
+ * can't be interrupted and a Rendez holds only one sleeper, so a reader
+ * waiting for its turn sleeps in short slices and checks for a note.
  */
 
 #include "u.h"
@@ -17,7 +24,87 @@
 
 /* Implemented in Zig (src/kern.zig). */
 extern long hp9_cons_read(ulong machine, void *buf, long n);
+extern int hp9_cons_ready(ulong machine);
 extern long hp9_cons_write(ulong machine, int fd, void *buf, long n);
+
+enum {
+	Maxcons	= 64,	/* src/kern.zig's max_consoles */
+	Wouldblock = -2,
+};
+
+typedef struct Hcons Hcons;
+struct Hcons
+{
+	Lock	lk;
+	int	busy;	/* a reader has its turn */
+	Rendez	r;	/* the reader with the turn, waiting for input */
+};
+
+static Hcons hcons[Maxcons];
+
+static int
+ready(void *a)
+{
+	return hp9_cons_ready((ulong)((Hcons*)a - hcons));
+}
+
+/* Called by the reader thread (not a Proc) when input arrives. */
+void
+hp9_cons_wake(ulong id)
+{
+	if(id < Maxcons)
+		wakeup(&hcons[id].r);
+}
+
+static void
+taketurn(Hcons *h)
+{
+	for(;;){
+		lock(&h->lk);
+		if(!h->busy){
+			h->busy = 1;
+			unlock(&h->lk);
+			return;
+		}
+		unlock(&h->lk);
+		if(up->notepending){
+			up->notepending = 0;
+			error(Eintr);
+		}
+		osmsleep(5);
+	}
+}
+
+static void
+giveturn(Hcons *h)
+{
+	lock(&h->lk);
+	h->busy = 0;
+	unlock(&h->lk);
+}
+
+static long
+consread(ulong id, void *va, long n)
+{
+	Hcons *h;
+	long r;
+
+	if(id >= Maxcons)
+		error(Eio);
+	h = &hcons[id];
+	taketurn(h);
+	if(waserror()){
+		giveturn(h);
+		nexterror();
+	}
+	while((r = hp9_cons_read(id, va, n)) == Wouldblock)
+		sleep(&h->r, ready, h);
+	poperror();
+	giveturn(h);
+	if(r < 0)
+		error(Eio);
+	return r;
+}
 
 enum {
 	Qdir,
@@ -75,17 +162,12 @@ hconsclose(Chan *c)
 static long
 hconsread(Chan *c, void *va, long n, vlong off)
 {
-	long r;
-
 	USED(off);
 	switch((ulong)c->qid.path){
 	case Qdir:
 		return devdirread(c, va, n, hconsdir, nelem(hconsdir), devgen);
 	case Qcons:
-		r = hp9_cons_read(c->dev, va, n);
-		if(r < 0)
-			error(Eio);
-		return r;
+		return consread(c->dev, va, n);
 	}
 	error(Egreg);
 	return -1;

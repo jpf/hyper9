@@ -10,6 +10,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const policy = @import("policy.zig");
+const consin = @import("consin.zig");
 
 /// False where kern isn't built (a checkout without drawterm).
 pub const available = build_options.kern;
@@ -63,9 +64,24 @@ const c_stub = struct {
     }
     fn hp9_kern_setaux(_: ?*anyopaque) void {}
     fn hp9_kern_closeexec() void {}
-    fn hp9_kern_takenote() c_int {
+    fn hp9_kern_postnote(_: c_ulong, _: [*:0]const u8, _: c_int) c_int {
+        return -1;
+    }
+    fn hp9_kern_postnotepg(_: c_ulong, _: [*:0]const u8, _: c_int) void {}
+    fn hp9_kern_noteid() c_ulong {
         return 0;
     }
+    fn hp9_kern_setnotify(_: c_int) void {}
+    fn hp9_kern_notepending() c_int {
+        return 0;
+    }
+    fn hp9_kern_popnote(_: [*]u8, _: u64) c_int {
+        return 0;
+    }
+    fn hp9_kern_noted(_: c_int, _: [*]u8) c_int {
+        return -1;
+    }
+    fn hp9_kern_execnotes() void {}
     fn syspipe(_: *[2]c_int) c_int {
         return -1;
     }
@@ -80,6 +96,7 @@ const c_stub = struct {
     fn hp9_kern_sleep(_: c_long) c_int {
         return -1;
     }
+    fn hp9_cons_wake(_: c_ulong) void {}
     var no_err: [ERRMAX:0]u8 = @splat(0);
     fn hp9_kern_errstr() [*:0]u8 {
         return &no_err;
@@ -152,13 +169,22 @@ const c_real = struct {
     extern fn hp9_kern_aux() ?*anyopaque;
     extern fn hp9_kern_setaux(aux: ?*anyopaque) void;
     extern fn hp9_kern_closeexec() void;
-    extern fn hp9_kern_takenote() c_int;
+    extern var hp9_notekick: ?*const fn (?*anyopaque) callconv(.c) void;
+    extern fn hp9_kern_postnote(pid: c_ulong, msg: [*:0]const u8, flag: c_int) c_int;
+    extern fn hp9_kern_postnotepg(noteid: c_ulong, msg: [*:0]const u8, flag: c_int) void;
+    extern fn hp9_kern_noteid() c_ulong;
+    extern fn hp9_kern_setnotify(on: c_int) void;
+    extern fn hp9_kern_notepending() c_int;
+    extern fn hp9_kern_popnote(msg: [*]u8, pc: u64) c_int;
+    extern fn hp9_kern_noted(arg: c_int, msg: [*]u8) c_int;
+    extern fn hp9_kern_execnotes() void;
     extern fn syspipe(fd: *[2]c_int) c_int;
     extern fn hp9_kern_user() [*:0]const u8;
     extern fn hp9_kern_devmask(devs: [*:0]const u8) void;
     extern fn hp9_kern_self() ?*anyopaque;
     extern fn hp9_kern_interrupt(p: ?*anyopaque) void;
     extern fn hp9_kern_sleep(ms: c_long) c_int;
+    extern fn hp9_cons_wake(id: c_ulong) void;
     extern fn hp9_kern_errstr() [*:0]u8;
     extern fn hp9_fd2path(fd: c_int, buf: [*]u8, n: c_uint) c_int;
     extern fn sysopen(name: [*:0]const u8, mode: c_int) c_int;
@@ -297,10 +323,86 @@ pub fn closeExec() void {
     c.hp9_kern_closeexec();
 }
 
-/// Returns and clears the process's pending-note flag, which devpipe sets
-/// on a write to a closed pipe.
-pub fn takeNote() bool {
-    return c.hp9_kern_takenote() != 0;
+/// Sets the hook a note posted to a process calls, with the process's
+/// `aux`, so a process running guest code takes an exit and sees it. It
+/// runs on the posting thread with the target's note lock held, and only
+/// while `aux` is set; it must not post notes or block.
+pub fn setNoteKick(f: *const fn (?*anyopaque) callconv(.c) void) void {
+    if (available) c.hp9_notekick = f;
+}
+
+/// Who posted a note (9front's NUser, NExit, NDebug). A note that isn't
+/// NUser drops the notes queued before it when the process can't handle
+/// it; NDebug makes a death from it print "suicide: note".
+pub const NoteFlag = enum(c_int) { user = 0, exit = 1, debug = 2 };
+
+/// Posts a note to the process with machine-local `pid` in the caller's
+/// machine. Returns false if its queue was full. Fails, with "process
+/// exited" as the error string, if there's no such process.
+pub fn postNote(to: u32, msg: [*:0]const u8, flag: NoteFlag) Error!bool {
+    return try check(c.hp9_kern_postnote(to, msg, @intFromEnum(flag))) != 0;
+}
+
+/// Posts a note to every process but the caller in note group `noteid` of
+/// the caller's machine.
+pub fn postNoteGroup(noteid: u32, msg: [*:0]const u8, flag: NoteFlag) void {
+    c.hp9_kern_postnotepg(noteid, msg, @intFromEnum(flag));
+}
+
+/// The calling process's note group: machine-local, inherited by children
+/// and replaced by RF.NOTEG.
+pub fn noteId() u32 {
+    return @intCast(c.hp9_kern_noteid());
+}
+
+/// Records whether the calling process has a note handler (`notify`).
+pub fn setNotify(on: bool) void {
+    c.hp9_kern_setnotify(@intFromBool(on));
+}
+
+/// Whether the calling process has a note queued.
+pub fn notePending() bool {
+    return c.hp9_kern_notepending() != 0;
+}
+
+/// What to do with a popped note.
+pub const NoteAction = enum(c_int) {
+    /// Nothing to deliver now.
+    none = 0,
+    /// Enter the handler; the process is in it until `noted`.
+    handle = 1,
+    /// The process dies with the note as its status.
+    kill = 2,
+    /// The same, after printing "suicide: note".
+    kill_debug = 3,
+};
+
+/// Takes the calling process's next note into `msg`, as 9front's popnote
+/// does: a "sys:" note posted to this process alone gets " pc=0x..." with
+/// `pc` appended. User notes wait while the process is in its handler.
+/// Also clears the "interrupt this call" flag.
+pub fn popNote(msg: *[ERRMAX]u8, pc: u64) NoteAction {
+    msg[0] = 0;
+    return @enumFromInt(c.hp9_kern_popnote(msg, pc));
+}
+
+/// noted's arguments (9front's libc.h).
+pub const Noted = enum(c_int) { cont = 0, dflt = 1, save = 2, rstr = 3, _ };
+
+/// The note bookkeeping of noted: `cont`, `save` and `rstr` leave the
+/// handler, and `dflt` (or an unknown argument) kills the
+/// process with the last note, which is put in `msg`. Fails, with the
+/// error string set, for noted outside a handler with anything but `rstr`.
+pub fn noted(arg: Noted, msg: *[ERRMAX]u8) Error!NoteAction {
+    msg[0] = 0;
+    const r = c.hp9_kern_noted(@intFromEnum(arg), msg);
+    if (r < 0) return error.Kern;
+    return @enumFromInt(r);
+}
+
+/// exec's reset of the calling process's notes: no handler, none queued.
+pub fn execNotes() void {
+    c.hp9_kern_execnotes();
 }
 
 /// Makes a pipe and returns its two fds.
@@ -467,14 +569,19 @@ pub fn fd2path(fd: u31, buf: []u8) Error!void {
 
 /// One machine's console, behind `#y<id>` (src/kern/devhcons.c).
 pub const Console = struct {
-    in: ?*std.Io.Reader,
+    /// Input from the run's reader thread; none means EOF.
+    in: ?*consin.ConsoleInput,
     out: *std.Io.Writer,
     err: *std.Io.Writer,
     mutex: std.atomic.Mutex = .unlocked,
-    /// Serializes reads, since processes in a tree share the console. A
-    /// reader blocked on the host waits with the lock held, so others yield.
-    rmutex: std.atomic.Mutex = .unlocked,
 };
+
+/// Wakes a guest read on console `id` sleeping for input. Called from the
+/// console's reader thread, which isn't a kernel process: drawterm's
+/// wakeup only takes locks and signals the sleeper's thread.
+pub fn wakeConsole(id: u32) void {
+    c.hp9_cons_wake(id);
+}
 
 const max_consoles = 64;
 var consoles: [max_consoles]std.atomic.Value(?*Console) = @splat(.init(null));
@@ -501,6 +608,7 @@ fn console(id: c_ulong) ?*Console {
 comptime {
     if (available) {
         @export(&hp9_cons_read, .{ .name = "hp9_cons_read" });
+        @export(&hp9_cons_ready, .{ .name = "hp9_cons_ready" });
         @export(&hp9_cons_write, .{ .name = "hp9_cons_write" });
         @export(&hp9_policy_active, .{ .name = "hp9_policy_active" });
         @export(&hp9_policy_check, .{ .name = "hp9_policy_check" });
@@ -517,22 +625,18 @@ fn hp9_policy_check(path: [*]const u8, len: c_long, op: c_int) callconv(.c) c_in
     return @intFromEnum(p.check(path[0..@intCast(len)], o));
 }
 
+/// Returns the bytes read, 0 at EOF, -1 on error, or -2 when the caller
+/// has to sleep until `hp9_cons_ready` and try again.
 fn hp9_cons_read(id: c_ulong, buf: [*]u8, n: c_long) callconv(.c) c_long {
     const con = console(id) orelse return -1;
-    const r = con.in orelse return 0;
-    if (n == 0) return 0;
-    while (!con.rmutex.tryLock()) std.Thread.yield() catch {};
-    defer con.rmutex.unlock();
-    // One host read, as on a terminal: readSliceShort would wait for the
-    // whole buffer, so a typed line wouldn't arrive until EOF.
-    var data = [1][]u8{buf[0..@intCast(n)]};
-    while (true) {
-        const got = r.readVec(&data) catch |err| switch (err) {
-            error.EndOfStream => return 0,
-            error.ReadFailed => return -1,
-        };
-        if (got > 0) return @intCast(got);
-    }
+    const in = con.in orelse return 0;
+    return @intCast(in.read(buf[0..@intCast(n)]));
+}
+
+fn hp9_cons_ready(id: c_ulong) callconv(.c) c_int {
+    const con = console(id) orelse return 1;
+    const in = con.in orelse return 1;
+    return @intFromBool(in.ready());
 }
 
 fn hp9_cons_write(id: c_ulong, fd: c_int, buf: [*]const u8, n: c_long) callconv(.c) c_long {
@@ -727,4 +831,115 @@ test "fork shares or copies groups, and await returns wait records" {
     try std.testing.expect(std.mem.endsWith(u8, t.waits[1][0..t.wait_lens[1]], " ''"));
     try std.testing.expect(std.mem.startsWith(u8, t.waits[2][0..t.wait_lens[2]], "4 "));
     try std.testing.expectEqualStrings("no living children", t.no_child[0..t.no_child_len]);
+}
+
+test "notes queue per process, reach note groups and stay in their machine" {
+    if (!available) return error.SkipZigTest;
+
+    const T = struct {
+        err: ?anyerror = null,
+        where: []const u8 = "",
+        done: std.atomic.Value(bool) = .init(false),
+        /// Set by the first machine once its children are waiting; the
+        /// second machine posts then, and sets `other_done`.
+        ready: std.atomic.Value(bool) = .init(false),
+        other_done: std.atomic.Value(bool) = .init(false),
+        other_err: ?anyerror = null,
+        other_noteid: u32 = 0,
+        ids: [2]u32 = @splat(0),
+        got: [2][ERRMAX]u8 = undefined,
+        acts: [2]NoteAction = @splat(.none),
+
+        const Self = @This();
+        const Child = struct {
+            t: *Self,
+            i: usize,
+            fn run(ch: *Child) void {
+                ch.t.ids[ch.i] = noteId();
+                // A note interrupts the sleep.
+                while (!notePending()) sleep(5000) catch {};
+                ch.t.acts[ch.i] = popNote(&ch.t.got[ch.i], 0);
+            }
+        };
+
+        fn run(t: *Self) void {
+            defer t.done.store(true, .release);
+            t.body() catch |e| {
+                if (t.err == null) t.err = e;
+            };
+        }
+        fn body(t: *Self) !void {
+            setGuestPid(1);
+            var msg: [ERRMAX]u8 = undefined;
+
+            // With a handler: user notes wait while in it, sys: notes get a pc.
+            t.where = "handler";
+            setNotify(true);
+            if (!try postNote(1, "one", .user)) return error.NotQueued;
+            _ = try postNote(1, "two", .user);
+            if (popNote(&msg, 0) != .handle) return error.NotHandled;
+            try std.testing.expectEqualStrings("one", std.mem.sliceTo(&msg, 0));
+            if (popNote(&msg, 0) != .none) return error.NestedUserNote;
+            if (try noted(.cont, &msg) != .none) return error.NotedKilled;
+            if (popNote(&msg, 0) != .handle) return error.NotHandled;
+            try std.testing.expectEqualStrings("two", std.mem.sliceTo(&msg, 0));
+            _ = try noted(.cont, &msg);
+            if (noted(.cont, &msg)) |_| return error.NotedOutsideHandler else |_| {}
+            _ = try postNote(1, "sys: trap", .user);
+            _ = popNote(&msg, 0x1234);
+            try std.testing.expectEqualStrings("sys: trap pc=0x1234", std.mem.sliceTo(&msg, 0));
+            if (try noted(.dflt, &msg) != .kill) return error.NotedDfltLived;
+            try std.testing.expectEqualStrings("sys: trap pc=0x1234", std.mem.sliceTo(&msg, 0));
+            execNotes();
+            if (postNote(99, "x", .user)) |_| return error.NoSuchProcess else |_| {}
+
+            // Children: 2 shares the note group, 3 has its own.
+            t.where = "groups";
+            var c0: Child = .{ .t = t, .i = 0 };
+            var c1: Child = .{ .t = t, .i = 1 };
+            try fork(RF.PROC, 2, Child, Child.run, &c0);
+            try fork(RF.PROC | RF.NOTEG, 3, Child, Child.run, &c1);
+            while (t.ids[0] == 0 or t.ids[1] == 0) std.Thread.yield() catch {};
+            try std.testing.expectEqual(noteId(), t.ids[0]);
+            if (t.ids[1] == t.ids[0]) return error.SameNoteGroup;
+
+            // Another machine's group and pids don't reach these.
+            t.ready.store(true, .release);
+            while (!t.other_done.load(.acquire)) std.Thread.yield() catch {};
+            if (t.other_err) |e| return e;
+            try std.testing.expectEqual(noteId(), t.other_noteid);
+            if (notePending()) return error.NoteToPoster;
+
+            postNoteGroup(noteId(), "hangup", .user);
+            var buf: [64]u8 = undefined;
+            _ = try await(&buf);
+            _ = try postNote(3, "die", .user);
+            _ = try await(&buf);
+            if (notePending()) return error.NoteToPoster;
+        }
+
+        fn other(t: *Self) void {
+            defer t.other_done.store(true, .release);
+            setGuestPid(1);
+            while (!t.ready.load(.acquire)) std.Thread.yield() catch {};
+            t.other_noteid = noteId();
+            postNoteGroup(noteId(), "wrong machine", .user);
+            if (postNote(2, "wrong machine", .user)) |_| {
+                t.other_err = error.ReachedOtherMachine;
+            } else |_| {}
+        }
+    };
+    var t: T = .{};
+    try spawn("test", T, T.run, &t);
+    try spawn("other", T, T.other, &t);
+    while (!t.done.load(.acquire)) std.Thread.yield() catch {};
+    while (!t.other_done.load(.acquire)) std.Thread.yield() catch {};
+    if (t.err) |e| {
+        std.debug.print("failed in {s}\n", .{t.where});
+        return e;
+    }
+    try std.testing.expectEqualStrings("hangup", std.mem.sliceTo(&t.got[0], 0));
+    try std.testing.expectEqual(NoteAction.kill, t.acts[0]);
+    try std.testing.expectEqualStrings("die", std.mem.sliceTo(&t.got[1], 0));
+    try std.testing.expectEqual(NoteAction.kill, t.acts[1]);
 }

@@ -63,7 +63,7 @@ Complete corresponding source for hp9-emu $version
 
 Build with Zig $(zig version) (see README.md); for example:
 
-  zig build -Doptimize=ReleaseSafe -Demu=unicorn -Dunicorn=source -Dtarget=aarch64-linux-musl
+  zig build -Doptimize=ReleaseSafe -Demu=unicorn -Dunicorn=source -Dversion=$version -Dtarget=aarch64-linux-musl
 
 then rename zig-out/bin/hp9 to hp9-emu. Targets: $EMU_TARGETS.
 EOF
@@ -73,7 +73,7 @@ tar -czf "$out/$srcname.tar.gz" -C "$work" "$srcname"
 build() {
 	local prefix=$1 target=$2
 	shift 2
-	(cd "$src" && zig build -p "$prefix" -Doptimize=ReleaseSafe -Dtarget="$target" "$@")
+	(cd "$src" && zig build -p "$prefix" -Doptimize=ReleaseSafe -Dtarget="$target" -Dversion="$version" "$@")
 }
 
 # archive <dir> <name>: dist/<name>.zip for Windows, else .tar.gz.

@@ -215,6 +215,20 @@ pub const Segs = struct {
         return c;
     }
 
+    /// Whether guest [va, va+len) lies in the data or stack segment, which
+    /// the guest may write. Host access to guest memory ignores page
+    /// permissions, so the kernel checks this before writing where the
+    /// guest says, as 9front's okaddr does for a note handler's frame.
+    pub fn writable(s: *const Segs, va: u64, len: u64) bool {
+        if (va +% len < va) return false;
+        inline for (.{ "data", "stack" }) |f| if (@field(s, f)) |seg| {
+            seg.lockSpin();
+            defer seg.lock.unlock();
+            if (va >= seg.base and va + len <= seg.top) return true;
+        };
+        return false;
+    }
+
     /// The current break.
     pub fn brkTop(s: *const Segs) u64 {
         const d = s.data orelse return 0;

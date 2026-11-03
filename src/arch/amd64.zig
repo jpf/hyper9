@@ -44,6 +44,43 @@ pub const Ureg = extern struct {
     }
 };
 
+/// The Ureg a note handler's `noted` may restore: `saved` as the guest
+/// left it, with the segment selectors, the system flags (above the low
+/// byte) and a canonical PC enforced, as 9front's setregisters does.
+pub fn sanitize(saved: Ureg, cur: *const Ureg) Ureg {
+    var u = saved;
+    u.cs = UESEL;
+    u.ss = UDSEL;
+    u.flags = (saved.flags & 0x00ff) | (cur.flags & 0xff00);
+    u.pc &= UADDRMASK;
+    return u;
+}
+
+/// 9front's notify (pc64/trap.c); see arm64.notifyFrame. The handler's
+/// first argument, the Ureg, goes in BP (RARG), and the word at `sp` is a
+/// zero return PC.
+pub fn notifyFrame(u: *const Ureg, handler: u64, errmax: u64) ?NotifyFrame {
+    var sp = u.sp;
+    sp -%= 256;
+    sp -%= @sizeOf(Ureg);
+    const nureg = sp;
+    sp -%= 8 + errmax;
+    const msg = sp;
+    sp -%= 3 * 8;
+    var r = u.*;
+    r.sp = sp;
+    r.pc = handler;
+    r.bp = nureg;
+    r.cs = UESEL;
+    r.ss = UDSEL;
+    return .{ .nureg = nureg, .msg = msg, .sp = sp, .regs = r };
+}
+
+pub const NotifyFrame = struct { nureg: u64, msg: u64, sp: u64, regs: Ureg };
+
+/// pc64/mem.h: the canonical user address mask.
+pub const UADDRMASK: u64 = 0x00007fffffffffff;
+
 // pc64/mem.h: SELECTOR(UESEG, SELGDT, 3) and SELECTOR(UDSEG, SELGDT, 3).
 pub const UESEL = (5 << 3) | 3;
 pub const UDSEL = (4 << 3) | 3;

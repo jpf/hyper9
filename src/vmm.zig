@@ -118,6 +118,72 @@ pub const Ureg = union(Arch) {
             inline else => |*r| r.setReturn(v),
         }
     }
+    pub fn stackPointer(u: *const Ureg) u64 {
+        return switch (u.*) {
+            inline else => |r| r.sp,
+        };
+    }
+    /// The Ureg's size in the guest's layout, as notify copies it.
+    pub fn size(u: *const Ureg) usize {
+        return switch (u.*) {
+            inline else => |r| @sizeOf(@TypeOf(r)),
+        };
+    }
+    /// The Ureg's bytes in the guest's layout.
+    pub fn bytes(u: *const Ureg) []const u8 {
+        return switch (u.*) {
+            inline else => |*r| std.mem.asBytes(r),
+        };
+    }
+
+    /// A note handler's frame (9front's notify): see arm64.notifyFrame.
+    pub const NotifyFrame = struct { nureg: u64, msg: u64, sp: u64, regs: Ureg };
+
+    pub fn notifyFrame(u: *const Ureg, handler: u64, errmax: u64) ?NotifyFrame {
+        return switch (u.*) {
+            inline else => |*r, a| blk: {
+                const f = (if (a == .arm64) arm64 else amd64).notifyFrame(r, handler, errmax) orelse break :blk null;
+                break :blk .{ .nureg = f.nureg, .msg = f.msg, .sp = f.sp, .regs = @unionInit(Ureg, @tagName(a), f.regs) };
+            },
+        };
+    }
+
+    /// The Ureg noted restores from `saved` (the guest's copy, in this
+    /// Ureg's layout), with the privileged state taken from `u`.
+    pub fn restored(u: *const Ureg, saved: []const u8) Ureg {
+        return switch (u.*) {
+            inline else => |*r, a| blk: {
+                const T = @TypeOf(r.*);
+                var g: T = undefined;
+                @memcpy(std.mem.asBytes(&g), saved[0..@sizeOf(T)]);
+                break :blk @unionInit(Ureg, @tagName(a), (if (a == .arm64) arm64 else amd64).sanitize(g, r));
+            },
+        };
+    }
+
+    /// noted(NSAVE): the handler resumes with its Ureg argument again, in
+    /// R0 on arm64 and BP on amd64, and the stack at `new_sp`.
+    pub fn setNoteSave(u: *Ureg, new_sp: u64, nureg: u64) void {
+        switch (u.*) {
+            .arm64 => |*r| {
+                r.sp = new_sp;
+                r.r[0] = nureg;
+            },
+            .amd64 => |*r| {
+                r.sp = new_sp;
+                r.bp = nureg;
+            },
+        }
+    }
+
+    /// Whether noted may resume at this PC and SP (9front checks
+    /// alignment on arm64).
+    pub fn aligned(u: *const Ureg) bool {
+        return switch (u.*) {
+            .arm64 => |r| r.pc & 3 == 0 and r.sp & 7 == 0,
+            .amd64 => true,
+        };
+    }
 };
 
 /// User state beyond the Ureg that a process keeps across vCPUs: the
@@ -137,6 +203,11 @@ pub const Extra = struct {
         return .{ .fpcr = if (arch == .amd64) 0x1f80 else 0 };
     }
 };
+
+/// The emulator's version (Unicorn's, e.g. "2.1"), or null if it isn't built in.
+pub fn emuVersion(buf: []u8) ?[]const u8 {
+    return if (have_emu) emu.version(buf) else null;
+}
 
 /// The native hypervisor backend for this host, if there is one.
 fn native() ?Kind {
