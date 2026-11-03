@@ -2,7 +2,7 @@ const std = @import("std");
 
 const drawterm = "third_party/drawterm";
 
-// kern/Makefile OFILES for OS=posix, AUDIO=none.
+// drawterm's kern/Makefile OFILES for OS=posix, AUDIO=none.
 const kern_sources = [_][]const u8{
     "alloc.c",        "allocb.c",        "chan.c",     "data.c",        "dev.c",
     "devaudio.c",     "devaudio-none.c", "devcmd.c",   "devcons.c",     "devdraw.c",
@@ -12,6 +12,74 @@ const kern_sources = [_][]const u8{
     "pgrp.c",         "procinit.c",      "rwlock.c",   "sleep.c",       "stub.c",
     "sysfile.c",      "qio.c",           "qlock.c",    "term.c",        "waserror.c",
     "posix.c",
+};
+
+/// The drawterm libraries kern needs, with each Makefile's OFILES. The GUI,
+/// exportfs, libauth and drawterm's own main/cpu code are left out.
+const kern_libs = [_]struct { dir: []const u8, files: []const []const u8 }{
+    .{ .dir = "libc", .files = &.{
+        "atexit.c",      "charstod.c",    "cleanname.c",    "convD2M.c",      "convM2D.c",
+        "convM2S.c",     "convS2M.c",     "ctime.c",        "crypt.c",        "dial.c",
+        "dirfstat.c",    "dirfwstat.c",   "dirmodefmt.c",   "dirstat.c",      "dirwstat.c",
+        "dofmt.c",       "dorfmt.c",      "encodefmt.c",    "fcallfmt.c",     "fltfmt.c",
+        "fmt.c",         "fmtfd.c",       "fmtfdflush.c",   "fmtlock.c",      "fmtprint.c",
+        "fmtquote.c",    "fmtrune.c",     "fmtstr.c",       "fmtvprint.c",    "fprint.c",
+        "getenv.c",      "getfields.c",   "lock.c",         "mallocz.c",      "nan64.c",
+        "netmkaddr.c",   "nsec.c",        "pow10.c",        "pushssl.c",      "pushtls.c",
+        "read9pmsg.c",   "readn.c",       "rune.c",         "runefmtstr.c",   "runeseprint.c",
+        "runesmprint.c", "runesnprint.c", "runesprint.c",   "runestrchr.c",   "runestrlen.c",
+        "runestrstr.c",  "runetype.c",    "runevseprint.c", "runevsmprint.c", "runevsnprint.c",
+        "seprint.c",     "smprint.c",     "snprint.c",      "sprint.c",       "strecpy.c",
+        "strtod.c",      "strtoll.c",     "sysfatal.c",     "time.c",         "tokenize.c",
+        "truerand.c",    "u16.c",         "u32.c",          "u64.c",          "utfecpy.c",
+        "utflen.c",      "utfnlen.c",     "utfrrune.c",     "utfrune.c",      "utfutf.c",
+        "vfprint.c",     "vseprint.c",    "vsmprint.c",     "vsnprint.c",
+    } },
+    .{ .dir = "libsec", .files = &.{
+        "aes.c",       "aesni.c",        "aesCBC.c",        "aes_gcm.c",   "poly1305.c",
+        "chacha.c",    "chachablock.c",  "ccpoly.c",        "des.c",       "des3CBC.c",
+        "desmodes.c",  "ecc.c",          "jacobian.c",      "secp256k1.c", "secp256r1.c",
+        "secp384r1.c", "curve25519.c",   "curve25519_dh.c", "genrandom.c", "fastrand.c",
+        "nfastrand.c", "prng.c",         "hmac.c",          "hkdf.c",      "pbkdf2.c",
+        "rsaalloc.c",  "rsadecrypt.c",   "rsaencrypt.c",    "dh.c",        "rc4.c",
+        "md5.c",       "md5block.c",     "sha1.c",          "sha2_128.c",  "sha2_64.c",
+        "sha1block.c", "sha2block128.c", "sha2block64.c",   "tlshand.c",   "x509.c",
+        "tsmemcmp.c",
+    } },
+    .{ .dir = "libmp", .files = &.{
+        "betomp.c",   "cnfield.c",        "crt.c",         "gmfield.c",    "letomp.c",
+        "mpadd.c",    "mpaux.c",          "mpcmp.c",       "mpdigdiv.c",   "mpdiv.c",
+        "mpexp.c",    "mpextendedgcd.c",  "mpfactorial.c", "mpfield.c",    "mpfmt.c",
+        "mpinvert.c", "mpleft.c",         "mplogic.c",     "mpmod.c",      "mpmodop.c",
+        "mpmul.c",    "mpnrand.c",        "mprand.c",      "mpright.c",    "mpsel.c",
+        "mpsub.c",    "mptobe.c",         "mptober.c",     "mptoi.c",      "mptole.c",
+        "mptolel.c",  "mptoui.c",         "mptouv.c",      "mptov.c",      "mpvecadd.c",
+        "mpveccmp.c", "mpvecdigmuladd.c", "mpvecsub.c",    "mpvectscmp.c", "strtomp.c",
+    } },
+    .{ .dir = "libauthsrv", .files = &.{
+        "_asgetticket.c", "_asrdresp.c", "convA2M.c",  "convM2A.c",      "convM2PR.c",
+        "convM2T.c",      "convM2TR.c",  "convPR2M.c", "convT2M.c",      "convTR2M.c",
+        "nvcsum.c",       "passtokey.c", "readcons.c", "_asgetpakkey.c", "_asgetresp.c",
+        "_asrequest.c",   "authpak.c",   "form1.c",
+    } },
+    .{ .dir = "libip", .files = &.{ "eipfmt.c", "parseip.c", "classmask.c", "bo.c", "ipaux.c" } },
+    .{ .dir = "libmemdraw", .files = &.{
+        "alloc.c",  "arc.c",     "cload.c",          "cmap.c",     "cread.c",
+        "defont.c", "draw.c",    "ellipse.c",        "fillpoly.c", "hwdraw.c",
+        "line.c",   "load.c",    "openmemsubfont.c", "poly.c",     "read.c",
+        "string.c", "subfont.c", "unload.c",         "write.c",    "warp.c",
+    } },
+    .{ .dir = "libmemlayer", .files = &.{
+        "draw.c",     "warp.c",    "lalloc.c", "layerop.c", "ldelete.c",
+        "lhide.c",    "line.c",    "load.c",   "lorigin.c", "lsetrefresh.c",
+        "ltofront.c", "ltorear.c", "unload.c",
+    } },
+    .{ .dir = "libdraw", .files = &.{
+        "alloc.c",    "arith.c",    "badrect.c", "bytesperline.c", "chan.c",
+        "defont.c",   "drawrepl.c", "fmt.c",     "icossin.c",      "icossin2.c",
+        "rectclip.c", "rgb.c",      "warp.c",    "mkwarp.c",
+    } },
+    .{ .dir = "posix-port", .files = &.{ "getcallerpc.c", "tas.c" } },
 };
 
 const kern_flags = [_][]const u8{
@@ -104,10 +172,6 @@ pub fn build(b: *std.Build) void {
         // On failure addUnicorn has already made the install step fail.
         if (addUnicorn(b, target, optimize)) |uc| mod.addImport("unicorn", uc) else emu = .none;
     }
-    const options = b.addOptions();
-    options.addOption(Emu, "emu", emu);
-    mod.addOptions("build_options", options);
-
     // The arm64 guest shim, assembled freestanding and embedded as raw bytes.
     const shim_obj = b.addObject(.{
         .name = "shim_arm64",
@@ -133,6 +197,12 @@ pub fn build(b: *std.Build) void {
         .files = &kern_sources,
         .flags = &kern_flags,
     });
+    kern.root_module.addCSourceFile(.{ .file = b.path("src/kern/glue.c"), .flags = &kern_flags });
+    for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
+        .root = b.path(b.pathJoin(&.{ drawterm, l.dir })),
+        .files = l.files,
+        .flags = &kern_flags,
+    });
     const kern_step = b.step("kern", "Compile drawterm's kern");
     const have_drawterm = if (b.build_root.handle.access(b.graph.io, drawterm ++ "/kern/sysfile.c", .{})) true else |_| false;
     if (!have_drawterm) {
@@ -145,7 +215,14 @@ pub fn build(b: *std.Build) void {
         kern_step.dependOn(&b.addFail("kern doesn't build for Windows yet (M2)").step);
     } else {
         kern_step.dependOn(&kern.step);
+        // Everything that imports the hp9 module links kern.
+        mod.linkLibrary(kern);
     }
+
+    const options = b.addOptions();
+    options.addOption(Emu, "emu", emu);
+    options.addOption(bool, "kern", build_kern);
+    mod.addOptions("build_options", options);
 
     const exe = b.addExecutable(.{
         .name = "hp9",
@@ -162,8 +239,6 @@ pub fn build(b: *std.Build) void {
         exe.root_module.linkFramework("Hypervisor", .{});
     }
     linkUnicorn(exe);
-    // TODO(M2): link kern into hp9 once the syscall seam exists.
-    if (build_kern) exe.step.dependOn(&kern.step);
 
     const install_exe = b.addInstallArtifact(exe, .{});
     b.getInstallStep().dependOn(&install_exe.step);

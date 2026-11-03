@@ -157,7 +157,7 @@ Each guest architecture gets a few hundred lines of assembly that run in guest k
 
 ## Process model
 
-One machine is one host process with one VM. Each Plan 9 process is a drawterm Proc plus a host thread that owns a vCPU, and the host OS schedules them, so there is no guest scheduler. Because every process lives in one VM and one kernel, rfork never has to serialize state across host processes. hyper-linux has to, because it can only use one VM per host process.
+Each CLI invocation is one machine: one host process with one VM. Each Plan 9 process is a drawterm Proc plus a host thread that owns a vCPU, and the host OS schedules them, so there is no guest scheduler. Because every process lives in one VM and one kernel, rfork never has to serialize state across host processes. hyper-linux has to, because it can only use one VM per host process.
 
 | Plan 9 call | Implementation |
 | --- | --- |
@@ -171,6 +171,10 @@ One machine is one host process with one VM. Each Plan 9 process is a drawterm P
 | `rendezvous` / `semacquire` / `tsemacquire` / `semrelease` | Host kernel primitives built on drawterm's sleep/wakeup |
 | `notify` / `noted` | Push a Ureg and the note string onto the user stack and point the PC at the handler; `noted` restores or kills the process |
 
+**Threads.** The kernel boots once per host process, on a private thread, because booting turns the calling thread into a Proc for good. Every guest process then runs on a thread made by drawterm's `kproc` (through `hp9_kern_spawn` in `src/kern/glue.c`). That thread creates the process's vCPU, which HVF binds to its creating thread, and runs the exit loop. `Machine.run` starts the first process this way and waits for it to exit; `rfork` uses the same path from M3.
+
+**Several machines per host process.** An embedder, or the test suite, can run several machines in one host process. They share the one drawterm kernel, but each machine's first Proc starts with a fresh Pgrp, Fgrp and Egrp, so each has its own namespace, device mask, console and environment. The CLI always runs one.
+
 **Notes on blocked and running processes.** A note to a process blocked in a host syscall wakes it through drawterm's sleep/wakeup, and the syscall fails with "interrupted". A note to a process running guest code kicks its vCPU, and the note is delivered at the exit.
 
 **vCPU limits.** v1 is one vCPU per process. Measure each hypervisor's maximum early (`hv_vm_get_max_vcpu_count`, `KVM_CAP_MAX_VCPUS`, WHP's partition property). If a big tree hits the limit, release a process's vCPU while it is blocked in a long host syscall, keep its registers in the Proc, and reacquire a vCPU from a pool when it resumes. On HVF a vCPU is bound to its thread, so the pool has to be pool threads that run the guest on the process's behalf.
@@ -179,13 +183,16 @@ One machine is one host process with one VM. Each Plan 9 process is a drawterm P
 
 We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, libmemlayer, libsec, libmp, libip, libauthsrv) and its GUI backends. Its `sysfile.c` already implements the file syscalls with Plan 9 semantics, so most syscall handlers are a decode followed by one call. We keep the vendored tree close to upstream so 9front fixes keep merging cleanly.
 
-**Reused as-is:** chan/dev/mount machinery, devroot, devcons, devmnt (the 9P client), devfs-posix and devfs-win32 (the host filesystem), devpipe, devenv, devip, devtls, devssl, devdraw, devmouse, devaudio, devcmd, qio, and the auth code.
+**Reused as-is:** chan/dev/mount machinery, devroot, devcons (for everything but `cons` itself), devmnt (the 9P client), devfs-posix and devfs-win32 (the host filesystem), devpipe, devip, devtls, devssl, devdraw, devmouse, devaudio, devcmd, qio, and the auth code. We compile drawterm's `.c` files but not its `kern/devtab.c` or `kern/devenv.c`; our own copies live in `src/kern/`, so the vendored tree stays unmodified.
 
 **Added by us**
 
 | Piece | Why |
 | --- | --- |
 | Process model (Proc fields, segments, rfork/exec/await, notes) | drawterm only ever ran its own kprocs |
+| `src/kern/devtab.c` | The device table, listing drawterm's devices plus ours |
+| Per-machine console device | drawterm's `#c/cons` reads and writes the host's fds 0 and 1 directly. Ours serves each machine's `Stdio` through leaf calls into Zig, and is bound over `/dev/cons`; the guest's fds 0–2 are opened on it. |
+| devenv `#e`, from 9front | drawterm's has one machine-wide environment and imports the host process's environment on first attach, which breaks `env.scrub`. 9front's keeps one environment per Egrp, which `RFENVG` needs anyway. |
 | devproc `#p` | rc, kill, ps and acid need `/proc/n/{note,notepg,ctl,status,ns,fd,wait,mem,regs}` |
 | devsrv `#s` | Guest file servers post themselves; needed for factotum, exportfs and rio |
 | devdup `#d` | `/fd/N` |
@@ -196,10 +203,11 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 
 1. drawterm raises errors with `waserror()`/`error()`, built on setjmp/longjmp. A longjmp across a Zig frame skips its `defer` and `errdefer`. So Zig code never sits between a `waserror` and an `error`.
 2. drawterm already provides the seam. Each `sysX` wrapper in `kern/sysfile.c` (`sysopen`, `syspread`, `sysbind`, `sysmount`, `sysrendezvous` and so on) runs `waserror`; on error it stores the string for `errstr` and returns -1. Zig calls these directly and turns -1 into an error union. New process and segment calls get wrappers in the same style.
-3. C calls Zig only for leaf work that cannot fail into the kernel: the vmm layer, page allocation, the a.out parser.
-4. drawterm's `up` (`_getproc()`, per host thread) stays authoritative. Every guest thread is created through drawterm's kproc path, so `up` is set before any kernel call. Zig never uses bare `std.Thread` for anything that touches the kernel.
-5. drawterm's Proc has no parent, note group, segments or Egrp; the environment is machine-wide. We add these fields, plus a pointer to the Zig-side process record.
+3. C calls Zig only for leaf work that cannot fail into the kernel: the vmm layer, page allocation, the a.out parser, console I/O. A leaf returns a status, and the C side raises any kernel error.
+4. drawterm's `up` (`_getproc()`, per host thread) stays authoritative. Every guest thread is created through drawterm's kproc path (`hp9_kern_spawn`), so `up` is set before any kernel call. Zig never uses bare `std.Thread` for anything that touches the kernel, and never boots the kernel on a caller's thread.
+5. drawterm's Proc has no parent, note group, segments or Egrp. We add these fields, plus a pointer to the Zig-side process record.
 6. The build uses `zig build`: C sources go through `addCSourceFiles` with drawterm's flags, and one `build.zig` produces binaries for every host.
+7. Guest memory reaches the kernel through `GuestBuf`, because drawterm's `validaddr` is a no-op and hp9's translation is the only check. A data buffer (`pread`, `pwrite`, `stat`) is passed to the `sys*` wrapper in place when it lies in one mapping, split into one call per mapping when it spans several, and split into chunks below 2 GiB (drawterm's `long` is 32 bits). Any unmapped byte posts "sys: bad address in syscall". Strings (paths, `errstr`) are always copied into a bounded host buffer first, so no other guest thread can change one during the call.
 
 ## Filesystem, boot and I/O
 
@@ -211,33 +219,117 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 
 **Boot sequence**
 
-1. The host binds the root at `/`, and binds `#c`, `#p`, `#s`, `#d`, `#e`, `#|` and `#I` to their usual places.
-2. If the binary is given as a host path, it's loaded straight from the host. Otherwise it's looked up in the guest namespace (`/bin`).
-3. The CLI runs the binary directly with the given argv. `--rc` runs `/bin/rc -c` on the argument instead, and `--ns file` runs `newns` with that file first.
+1. The kernel boots once per host process, on its own thread (see Process model).
+2. For each machine, the namespace builder gives the first Proc a fresh Pgrp. It binds the root at `/`, the cwd and other allowed host paths from `#U`, and `#c`, `#p`, `#s`, `#d`, `#e`, `#|` and (unless the network is off) `#I` to their usual places. It binds the machine's console over `/dev/cons` and opens fds 0–2 on it. Then it sets the device mask: `#U` and `#C` always (unless `--host-fs` or `--host-cmd`), and `#I` when the network is off. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
+3. If the binary is given as a host path, it's loaded straight from the host. Otherwise it's looked up through the kernel along `$path`, so lookup works the same over 9P roots.
+4. The CLI runs the binary directly with the given argv. `--rc` runs `/bin/rc -c` on the argument instead, and `--ns file` runs `newns` with that file first.
 
 The host's working directory is bound at the guest's `/mnt/term/cwd` and set as the guest's cwd, so that `hp9 ls` lists what the user expects.
 
-**Terminal (default):** `#c/cons` maps to the host stdin and stdout. Writing `rawon` to `/dev/consctl` switches the host TTY to raw mode (console mode on Windows). Ctrl-C posts an `interrupt` note to the foreground note group. Exit status: an empty `exits` string gives 0; any other string gives 1, and the string is printed to stderr.
+**Terminal (default):** `/dev/cons` is the machine's console device, which maps to the `Stdio` in `Machine.Options`: the host stdin and stdout for the CLI. Writing `rawon` to `/dev/consctl` switches the host TTY to raw mode (console mode on Windows). Ctrl-C posts an `interrupt` note to the foreground note group. Exit status: an empty `exits` string gives 0; any other string gives 1, and the string is printed to stderr.
 
 **Graphics (`--gfx`):** opens one host window through drawterm's GUI backend (Cocoa/Metal, X11 or Wayland, Win32) and serves `/dev/draw`, `/dev/mouse` and `/dev/kbd`, plus snarf mapped to the host clipboard. One screen per machine: running rio gives the full desktop. A seamless mode, where each rio window becomes a host window, is a later project.
 
 ## Security, debugging and testing
 
-**Security stance.** The hypervisor isolates guest memory and the CPU, but the namespace decides what a guest can reach on the host.
+**Security stance.** The hypervisor isolates guest memory and the CPU, and every guest syscall is served by drawterm's kernel rather than the host's, so the guest never reaches host syscalls, ioctls or the host environment directly. The namespace decides what a guest can reach on the host. Identity: hostowner is the host user's name; devfs maps the host's file ownership onto Plan 9 user strings.
 
-- By default the guest sees the root tree, the host cwd, and host networking through `#I`.
-- `#U` beyond the root and cwd, and devcmd (running host commands), are off unless asked for with `--host-fs` or `--host-cmd`.
-- `--sandbox DIR` exposes only DIR, plus the root tree read-only, with no network.
-- Identity: hostowner is the host user's name; devfs maps the host's file ownership onto Plan 9 user strings.
+### Sandbox policy
 
-**Debugging**
+Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths, network rules and limits. The capability model follows [isobox](https://github.com/can1357/isobox): named capabilities, profiles that set defaults, explicit flags that override them, a printable plan with caveats, and `--strict` to refuse anything the build can't enforce. Unlike isobox, enforcement lives in the shared kernel, so the capability set is the same on every vmm backend; there's no per-host intersection to compute.
+
+| Capability | Mechanism | From |
+| --- | --- | --- |
+| `env.scrub` | The host environment is never imported | M2 |
+| `kernel.isolation` | Guest syscalls are served by drawterm's kernel | M2 |
+| `ipc.restrict` | Host sockets are reachable only through `#U`, `#I` or `#C`, which the policy controls | M2 |
+| `fs.read.scope`, `fs.write.scope` | The namespace is an allowlist: only listed host paths are bound from `#U`, each read-only or read-write | M2 |
+| `fs.read.deny` | Unbound paths don't exist; denied paths inside a bound tree are filtered in devfs | M2 |
+| `net.disable` | `#I` is masked in the init Pgrp (drawterm's `devmasked`), so the guest can't re-attach it | M2 |
+| `res.memory` | A cap on the guest-physical page allocator; exact, not a watchdog | M2 |
+| `proc.timeout` | A machine deadline; hard teardown in M2, a `hangup` note and grace period from M4 | M2, M4 |
+| `res.pids`, `res.cpu` | A Proc cap in `rfork`; a limit on concurrently running vCPUs | M3 |
+| `net.outbound` | devip refuses `announce` | M5 |
+| `net.allow` | devip checks each `connect` against dial-string patterns (`tcp!10.0.0.0/8!564`); an egress allowlist isobox can't offer | M5 |
+| `fs.write.ephemeral` | A ramfs union-bound with `bind -c` over writable paths; new files go to the ramfs and vanish on exit | M5 |
+| `fs.write.overlay` | A copy-on-write overlay device, shared with image-backed roots | M10 |
+
+**Vendor hooks.** The policy lives in Zig. drawterm calls it through two leaf functions, following seam rule 3: `hp9_fs_check(root, path, op)` in devfs (read-only attaches, read-deny) and `hp9_net_check(op, addr, port)` in devip. Both return an int and never raise kernel errors themselves.
+
+**Path resolution.** devfs-posix follows symlinks with `stat`, so a symlink inside a bound tree can point anywhere on the host. M2 resolves every devfs path beneath its bound root (`openat2` with `RESOLVE_BENEATH` on Linux, a resolved-path prefix check elsewhere) before policy checks apply. Hardlinks under writable paths still alias host files outside them; the plan reports that as a caveat.
+
+**Default profile.** With no sandbox flags the guest can work in the host cwd and nothing else:
+
+| Area | Default |
+| --- | --- |
+| Root tree (`/`) | Read-only. Installing into the root needs `--writable "$HP9ROOT"`; from M10 the root gets an ephemeral overlay, so writes succeed and vanish. |
+| Host cwd (`/mnt/term/cwd`) | Read-write |
+| Rest of the host filesystem | Not visible |
+| `/tmp` | The host temp dir until M5, then a private ramfs |
+| Network | Full until M5, then outbound only (`--net=enable` for servers) |
+| Host commands (`#C`) | Masked |
+| Environment | Only the default guest variables plus `--env` |
+| Memory | The guest-physical region size (a few GiB) |
+| Processes, CPU, timeout | Unlimited, so interactive sessions and long builds aren't cut off |
+| Terminal | `cons` and `consctl` only; no host ioctls such as `TIOCSTI` |
+
+`--profile=tight` differs in four ways: the cwd is read-only, `#I` is masked, `/tmp` isn't writable until M5 and is then a private ramfs, and a default timeout applies. `--sandbox DIR` is the tight profile with only DIR bound, read-write, as the cwd; the host cwd isn't bound.
+
+**Plan output.** `--print` compiles the policy and exits without running. The namespace is printed in `newns` format, so from M3 it can be saved and replayed with `--ns`:
+
+```text
+$ hp9 --print --profile=tight --writable ./out --memory 512m --timeout 1m mk
+profile:  tight
+enforces: env.scrub fs.read.scope fs.write.scope ipc.restrict kernel.isolation net.disable proc.timeout res.memory
+limits:   memory=512M timeout=1m
+devmask:  #C #I
+namespace:
+  bind '#U/Users/me/hp9root' /                       ro
+  bind '#U/Users/me/src/proj' /mnt/term/cwd          ro
+  bind '#U/Users/me/src/proj/out' /mnt/term/cwd/out  rw
+  bind '#c' /dev; bind '#p' /proc; bind '#s' /srv; bind '#d' /fd
+caveats:
+  - hardlinks under writable paths can modify host files outside them
+  - writes to writable paths are not capped (no res.disk)
+  - the hp9 process itself is not host-sandboxed
+```
+
+**Examples**
+
+```sh
+hp9 --profile=tight ls -l                                  # read-only, no network
+hp9 --net=disable --writable ./out --rc 'mk install'        # writes only to ./out
+hp9 --write=ephemeral --rc 'mk clean && mk && ./6.out'      # writes vanish (M5)
+hp9 --net=outbound hget https://9front.org/ > index.html    # clients work, listening fails (M5)
+hp9 --net-allow 'tcp!10.0.0.0/8!564' --net-allow 'tcp!*!443' \
+    --rc 'srv tcp!10.0.0.5!564 fs && mount /srv/fs /n/fs'   # egress allowlist (M5)
+hp9 --memory 256m --pids 32 --cpus 2 --timeout 30s rc       # resource caps
+hp9 --readable ~/src/proj --read-deny ~/src/proj/.env \
+    --rc 'grep -n TODO /mnt/term/$home/src/proj/*.c'       # read a tree, hide secrets
+hp9 --strict --write=overlay mk                             # before M10: usage error, exit 2
+```
+
+Host paths given to `--readable` and `--writable` appear in the guest under `/mnt/term/<host path>`, as in drawterm; the cwd stays at `/mnt/term/cwd`.
+
+### Host self-sandboxing (future)
+
+The guest is contained, but the hp9 process runs drawterm's C kernel with the host user's full rights, and drawterm's `validaddr` is a no-op, so hp9's own guest-address translation is the memory-safety boundary. Defence in depth is to compile the same policy into a host sandbox and apply it to hp9 after VM creation and root setup, in a `src/hostjail.zig` with one implementation per OS, following the vmm pattern. Running hp9 under gVisor doesn't work, because gVisor can't pass `/dev/kvm` through.
+
+This is future work. Each backend milestone records research notes so it can be built later:
+
+- **M2 (macOS):** whether `sandbox_init` with a generated SBPL profile can be applied after `hv_vm_create` and still allow HVF calls, and which profile rules that needs.
+- **M7 (macOS):** which Mach and WindowServer lookups `--gfx` needs under Seatbelt.
+- **M8 (Linux):** Landlock for paths and TCP ports plus seccomp, with `/dev/kvm` already open; the syscalls `KVM_RUN` and vCPU threads need; the Landlock ABI each target distro ships.
+- **M9 (Windows):** whether an AppContainer or restricted token can still use WHP.
+
+### Debugging
 
 - `--trace` logs each syscall with its arguments, result and error string, prefixed by pid, like 9front's ratrace.
 - devproc's `mem`, `regs` and `ctl` give acid (Plan 9's debugger) inside the guest for free.
 - `--dump-on-fault` prints the Ureg, the faulting address and a symbolized PC from the a.out symbol table.
 - A gdb stub is optional and comes later.
 
-**Testing and CI**
+### Testing and CI
 
 - Unit tests in Zig for the a.out loader, the page allocator and the syscall decoders.
 - Integration tests run real 9front binaries from a pinned root tree: rc scripts, the 9front regression tests where they exist, and a self-build of a few `/sys/src/cmd` programs.
@@ -273,15 +365,27 @@ hp9 [hp9-flags]                       # interactive rc if stdin is a TTY, otherw
 | Flag | From | Meaning |
 | --- | --- | --- |
 | `--backend auto\|hvf\|kvm\|whp\|emu` | M1 | `auto` (the default) uses the host hypervisor, and otherwise falls back to the emulator with a warning |
-| `--root DIR\|tcp!host!port\|/path.sock` | M2, M10 | The root tree. If omitted, use `$HP9ROOT`, then the default install location |
+| `--root DIR\|tcp!host!port\|/path.sock` | M2, M10 | The root tree. If omitted, use `$HP9ROOT`, then the default install location (`.local/9front/root` in development builds until there's an installer) |
 | `--env name=value` (repeatable) | M2 | Sets a guest environment variable. The host environment isn't imported. |
 | `--cwd PATH` | M2 | The guest cwd. Defaults to `/mnt/term/cwd`, the host cwd bound into the guest |
 | `--rc 'cmd'` | M3 | See program resolution |
 | `--ns file` | M3 | See program resolution |
 | `--gfx` | M7 | Opens a host window and serves `/dev/draw`, `/dev/mouse` and `/dev/kbd` |
+| `--profile default\|tight` | M2 | Sets the sandbox defaults (see Sandbox policy). Explicit flags override it. |
+| `--readable PATH` (repeatable) | M2 | Binds a host path read-only at `/mnt/term/PATH` |
+| `--writable PATH` (repeatable) | M2 | Binds a host path read-write; under the cwd it overrides a read-only cwd |
+| `--read-deny PATH` (repeatable) | M2 | Hides a host path inside a bound tree |
+| `--write none\|scope\|ephemeral\|overlay` | M2, M5, M10 | Deny writes, persist only writable paths, discard all writes (M5), or copy-on-write over the root (M10) |
+| `--net disable\|outbound\|enable` | M2, M5 | Network policy; `outbound` refuses `announce` (M5) |
+| `--net-allow DIALSTRING` (repeatable) | M5 | Allows `connect` only to matching addresses, such as `tcp!10.0.0.0/8!564` |
+| `--memory SIZE` | M2 | Caps guest memory (`512m`, `2g`) |
+| `--pids N`, `--cpus N` | M3 | Caps processes and concurrently running vCPUs |
+| `--timeout DURATION` | M2, M4 | Tears down the machine after a deadline; from M4, posts `hangup` first |
+| `--strict` | M2 | Refuses any requested capability this build can't enforce (exit 2) |
+| `--print` | M2 | Prints the compiled policy and namespace, then exits |
 | `--host-fs` | M2 | Exposes all of `#U`, not just the root and cwd |
 | `--host-cmd` | M2 | Enables devcmd |
-| `--sandbox DIR` | M2 | Exposes only DIR plus a read-only root, with no network. Can't be combined with `--host-fs` or `--host-cmd` |
+| `--sandbox DIR` | M2 | The tight profile with only DIR bound, read-write, as the cwd. Can't be combined with `--host-fs` or `--host-cmd` |
 | `--trace[=FILE]` | M2 | ratrace-style syscall log, to stderr by default |
 | `--dump-on-fault` | M2 | Prints the Ureg and a symbolized PC when the guest faults |
 | `--check` | M0 | Probes the backend, the entitlement or `/dev/kvm` access, the vCPU limit and the root tree, then exits |
@@ -322,8 +426,7 @@ pub const Options = struct {
     root: Root,                         // union { host_dir: []const u8, dial: []const u8 }
     cwd: ?[]const u8 = null,
     env: []const EnvVar = &.{},
-    exposure: Exposure = .default,      // .default, .host_fs or .sandbox(dir)
-    host_cmd: bool = false,
+    policy: Policy = .default,          // profile, binds, read-deny, net rules, limits, host_fs, host_cmd
     gfx: bool = false,
     ns_file: ?[]const u8 = null,
     trace: ?*std.Io.Writer = null,
@@ -341,15 +444,17 @@ Each milestone ends with a demo command that must pass. M0 targets macOS arm64. 
 
 1. **M0, hello:** `zig build` compiles drawterm's kern. The HVF backend, the arm64 shim and the a.out loader run a static binary that calls `pwrite` on fd 1 and `exits`. Demo: `hp9 ./hello`.
 2. **M1, emulator:** the AddressSpace interface, plus the Unicorn backend for arm64 and amd64. Demo: `hp9 --backend emu ./hello` on macOS and Linux arm64, including inside VMs, and the amd64 hello on Linux x86\_64.
-3. **M2, one process:** syscalls go through drawterm's `sys*` wrappers; the host-tree root and the terminal work. Unicorn built from source for Windows, and kern for Windows. Demo: `hp9 /bin/cat /lib/namespace`, plus the M1 demo on Windows.
-4. **M3, trees:** rfork, exec, await, devdup and pipes. Demo: `hp9 --rc 'ls /bin | wc -l'`.
-5. **M4, notes and /proc:** notify/noted, interrupt on Ctrl-C, devproc. Demo: an interactive rc session where `kill` and `ps` work.
-6. **M5, servers:** devsrv, rendezvous and semaphores, segattach. Demo: ramfs posts to /srv and is mounted; factotum runs.
-7. **M6, self-host:** the compilers, linkers and mk run. Demo: rebuild `/sys/src/cmd/ls` inside, and the rebuilt binary runs.
-8. **M7, graphics:** `--gfx` with devdraw. Demo: rio and acme run in a host window.
-9. **M8, Linux:** KVM backend; arm64 first, then the amd64 shim on x86\_64. Demo: M0 to M7 pass in CI on KVM.
-10. **M9, Windows:** WHP backend on x86\_64, then Windows on ARM. Demo: the same suite.
-11. **M10, 9P roots:** `--root` over 9P, then cwfs or gefs over an image.
+3. **M2, one process:** syscalls go through drawterm's `sys*` wrappers; the host-tree root and the terminal work. Unicorn built from source for Windows, and kern for Windows. Sandbox policy core: profiles, the namespace builder and device mask, devfs read-only, read-deny and beneath-root path resolution, the memory cap, a hard timeout, `--print` and `--strict`. Research note on Seatbelt with HVF. Demo: `hp9 /bin/cat /lib/namespace`, `hp9 --profile=tight --rc 'echo x > /mnt/term/cwd/f'` fails, plus the M1 demo on Windows.
+4. **M3, trees:** rfork, exec, await, devdup and pipes. Process and CPU caps; `--print` namespaces replay with `--ns`. Demo: `hp9 --rc 'ls /bin | wc -l'`.
+5. **M4, notes and /proc:** notify/noted, interrupt on Ctrl-C, devproc. `--timeout` posts `hangup` before teardown. Demo: an interactive rc session where `kill` and `ps` work.
+6. **M5, servers:** devsrv, rendezvous and semaphores, segattach. `net.outbound` becomes the default, plus `--net-allow` and `--write=ephemeral`; `/tmp` becomes a private ramfs. Demo: ramfs posts to /srv and is mounted; factotum runs; `aux/listen1` fails under the default profile.
+7. **M6, self-host:** the compilers, linkers and mk run (installing into the read-only root needs `--writable "$HP9ROOT"`). Demo: rebuild `/sys/src/cmd/ls` inside, and the rebuilt binary runs.
+8. **M7, graphics:** `--gfx` with devdraw. Research note on Seatbelt with `--gfx`. Demo: rio and acme run in a host window.
+9. **M8, Linux:** KVM backend; arm64 first, then the amd64 shim on x86\_64. Research note on Landlock and seccomp with KVM. Demo: M0 to M7 pass in CI on KVM.
+10. **M9, Windows:** WHP backend on x86\_64, then Windows on ARM. Research note on AppContainer with WHP. Demo: the same suite.
+11. **M10, 9P roots:** `--root` over 9P, then cwfs or gefs over an image. The copy-on-write overlay device (`--write=overlay`), which becomes the root's default.
+
+After M10, host self-sandboxing of the hp9 process (see Security) builds on the research notes from M2, M7, M8 and M9.
 
 
 ## Changelog
@@ -370,6 +475,17 @@ Record design changes as they are made using `- YYYY-MM-DD: <design change> (rea
 - 2026-11-02: kern isn't built for Windows targets until M2; hp9.exe builds without it (kern isn't linked into hp9 yet, and drawterm's Windows configuration needs porting to the Zig build).
 
 #### M2
+
+- 2026-11-02: `scripts/mkroot.py` builds the root tree by booting the pinned image in QEMU with its kernel loaded directly (`-kernel`, plus `plan9.ini` set to boot without prompting), then running `tar` in the guest onto a second raw disk and unpacking it on the host. It exports the whole disk except `/dist`, plus empty mount points (`/dev`, `/env`, `/proc`, `/srv`, `/mnt/term` and so on), not just `/arm64`, `/rc`, `/lib` and `/sys` through drawterm's `/mnt/term`. (This needs no drawterm, auth or network setup in the guest, and includes `/acme`, `/mail`, `/cfg` and `/usr`, which programs expect.)
+- 2026-11-02: kern is built with drawterm's libc, libsec, libmp, libauthsrv, libip, libmemdraw, libmemlayer, libdraw and posix-port into one static library, which the `hp9` module links. drawterm's `main.c`, `cpu.c`, GUI backends, exportfs and libauth are replaced by `src/kern/glue.c`, which holds the boot sequence (`hp9_kern_boot`) and no-op GUI and factotum stubs until M5 and M7. `#U` always attaches the host's `/`, so the root tree is bound to the guest's `/` with `bind("#U<dir>", "/")`, with no vendor changes. This boot namespace is provisional: `#U` still reaches the whole host and `#I` is bound unconditionally until the policy's namespace builder and device mask replace it. kern is a process-wide singleton (its devtab, env and Proc table are globals), so there's one booted kernel per host process, and `kern.boot` refuses a second boot. (No vendor changes, and it matches drawterm's own process model.)
+
+- 2026-11-02: Sandboxing becomes an isobox-style capability policy (`Machine.Options.policy`, profiles, `--print`, `--strict`) enforced in the namespace, the device mask and two leaf hooks in devfs and devip, replacing the `exposure` and `host_cmd` options. The default profile makes the root read-only and, from M5, the network outbound-only; `--sandbox DIR` becomes a tight-profile shorthand. Work is spread over M2–M5 and M10 as each mechanism arrives (one policy model instead of ad hoc flags; the shared kernel lets every backend enforce the same set).
+- 2026-11-02: Each guest process runs on a thread made through drawterm's `kproc`, and the kernel boots once per host process on a private thread, not the caller's (`up` is set before any kernel call, and HVF binds a vCPU to the thread that creates it).
+- 2026-11-02: Several machines can share one host process and one kernel. Each machine's first Proc gets a fresh Pgrp, Fgrp and Egrp, its own console device bound over `/dev/cons`, and its own device mask. drawterm's `kern/devtab.c` and `kern/devenv.c` aren't compiled; `src/kern/` has our device table and a devenv ported from 9front, with one environment per Egrp. This supersedes the earlier "one booted kernel per host process" as the limit on machines. (Namespaces are already per Pgrp; drawterm's devenv imports the host environment, which breaks `env.scrub`; drawterm's cons is wired to the host's fds; and the backend tests run several machines in one process.)
+- 2026-11-02: Guest memory reaches the kernel through `GuestBuf`: data buffers are passed in place, split at mapping boundaries and into chunks below 2 GiB; strings are copied into bounded host buffers (`validaddr` is a no-op in drawterm, and copying strings makes them safe against other threads once memory is shared in M3).
+- 2026-11-02: `#U` is restricted with drawterm's device mask after the namespace builder has bound the allowed host paths, rather than with a new filtering device. `#C` is always masked unless `--host-cmd`, and `#I` when the network is off. Symlink escapes from bound trees are still handled by the beneath-root check in devfs. (The mask exists in drawterm already and keeps existing binds working.)
+- 2026-11-02: M2 order: one process end to end first (`Options.root`, `cwd` and `env`, a `Program` that is a host path or a guest name, and a Zig syscall table for what `cat` needs), then the console and devenv devices, then the namespace builder and device mask, then the policy flags, `--print` and `--strict`. Bare program names are looked up through the kernel along `$path`. `main.zig` maps failures to exit codes 125–127. In development builds the default root is `.local/9front/root`. (Sandbox features need a working process to test against.)
+- 2026-11-02: Host self-sandboxing of the hp9 process (Seatbelt, Landlock/seccomp, AppContainer) is deferred to after M10; M2, M7, M8 and M9 each record a research note for their host (keeps the backend milestones focused while gathering what the later work needs).
 
 #### M3
 
@@ -399,8 +515,8 @@ Record design changes as they are made using `- YYYY-MM-DD: <design change> (rea
 - [x] Syscall conventions, Tos, UTZERO and USTKTOP: verified (Guest shims section).
 - [x] Page size: 9front uses 4 KiB pages on arm64 and amd64, so there's no mismatch with any host.
 - [x] Licensing: drawterm is MIT (Plan 9 Foundation, Russ Cox, 9front authors). hyper-linux is Apache-2.0, so code borrowed from it keeps its notice. The project can be MIT.
-- [ ] Pin a 9front release. The newest is "THIS WAS SUPPOSED TO BE FUN", released August 2026 ([OSnews](https://www.osnews.com/?p=145669)).
-- [ ] Build the arm64 root tree. The git repo holds source only, and the arm64 release ships as a QEMU qcow2 image. Plan: boot it in QEMU once, then tar `/arm64`, `/rc`, `/lib` and `/sys` out through drawterm's `/mnt/term`. Script this so the tree can be rebuilt for each pinned release.
+- [x] Pin a 9front release: 11952, "THIS WAS SUPPOSED TO BE FUN", released August 2026 ([OSnews](https://www.osnews.com/?p=145669)), pinned in `scripts/pins.sh`.
+- [x] Build the arm64 root tree: `scripts/mkroot.py` boots the pinned qcow2 headless in QEMU and tars the disk's file system out onto a second raw disk (see the M2 changelog).
 - [ ] vCPU limits. hyper-linux caps threads at 64 (`MAX_THREADS`), which hints at HVF's practical limit. Measure each hypervisor before M3.
 - [ ] Whether the Windows Hypervisor Platform's arm64 support is solid enough to target, or whether Windows on ARM waits.
 - [ ] macOS builds: the Cocoa backend (`screen.m`) is Objective-C, and HVF needs the macOS SDK plus an entitlement signature. So macOS builds run on a Mac, or use rcodesign when cross-building. Windows builds need a WinHvPlatform import library (a .def file for Zig).
@@ -415,3 +531,4 @@ Record design changes as they are made using `- YYYY-MM-DD: <design change> (rea
 - [9front drawterm (GitHub mirror)](https://github.com/9front/drawterm): `kern/sysfile.c`, `kern/dat.h`, `kern/devtab.c`, `LICENSE`
 - [hyper-linux](https://github.com/zw3rk/hyper-linux): `src/shim.S`, `src/thread.h`, `LICENSE`
 - [9front release announcement, OSnews](https://www.osnews.com/?p=145669)
+- [isobox](https://github.com/can1357/isobox): capability model, profiles, plan caveats and `--strict`

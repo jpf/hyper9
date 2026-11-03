@@ -9,7 +9,13 @@ Requires Zig 0.16.x and Xcode (for the macOS SDK and `codesign`).
 ```sh
 . scripts/env.sh               # Zig cache and tools live in .local/ (gitignored)
 ./scripts/fetch.sh             # reference sources, pinned 9front arm64 image, prebuilt Unicorn into .local/
+./scripts/mkroot.py            # extracts the 9front root tree into .local/9front/root (~1 min)
 ```
+
+`mkroot.py` boots the pinned image headless in QEMU (`brew install qemu`),
+tars the file system out onto a scratch disk, and unpacks it into
+`.local/9front/root-<release>`, with `.local/9front/root` linked to it. The
+image itself isn't modified. It's the host-tree root that M2 serves as `/`.
 
 Pinned upstream versions are in [scripts/pins.sh](scripts/pins.sh).
 
@@ -23,7 +29,7 @@ clean tree; it merges upstream into the subtree and keeps our local changes.
 ```sh
 zig build          # builds and ad-hoc signs zig-out/bin/hp9 with hp9.entitlements
 zig build test     # unit tests, and the backend tests on every backend built in
-zig build kern     # compiles drawterm's kern
+zig build kern     # compiles drawterm's kern and the libraries it uses
 zig build m0       # M0 demo: hp9 ./hello must print "hello"
 ```
 
@@ -38,7 +44,8 @@ zig build m1 -Demu=unicorn                           # M1 demo: hp9 --backend em
 
 Prebuilt Unicorn exists for macOS arm64 and Linux musl only. Windows builds
 (`-Dtarget=aarch64-windows`) produce hp9.exe without kern or the emulator
-until M2.
+until M2. Elsewhere kern is linked into hp9, but syscalls don't go through it
+yet.
 
 ## Run
 
@@ -83,6 +90,7 @@ scripts/lima/vm shell linux ./hp9/hp9 --backend emu ./hp9/hello
 | `src/main.zig`, `src/cli.zig` | CLI: entry point, and flag parsing with no I/O |
 | `src/root.zig` | library root |
 | `src/machine.zig` | one machine: runs a process and serves its syscalls |
+| `src/kern.zig`, `src/kern/glue.c` | the Zig/C seam into drawterm's kern, and the C boot code and GUI stubs that replace drawterm's `main.c` |
 | `src/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
 | `src/aout.zig` | a.out parser and arch layouts |
 | `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, and emu on Unicorn) |
@@ -90,4 +98,5 @@ scripts/lima/vm shell linux ./hp9/hp9 --backend emu ./hp9/hello
 | `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries) |
 | `tests/backends.zig` | backend conformance tests |
 | `tests/fixtures` | test programs and binary generators |
+| `scripts/mkroot.py` | builds the 9front root tree from the pinned image |
 | `.local/` | gitignored: tools, caches, upstream clones, 9front images, prebuilt Unicorn, test VMs |
