@@ -82,6 +82,13 @@ const c_stub = struct {
         return -1;
     }
     fn hp9_kern_execnotes() void {}
+    fn hp9_kern_mach() ?*anyopaque {
+        return null;
+    }
+    fn hp9_kern_putmach(_: ?*anyopaque) void {}
+    fn hp9_kern_postmach(_: ?*anyopaque, _: c_int, _: [*:0]const u8, _: c_int) c_int {
+        return 0;
+    }
     fn syspipe(_: *[2]c_int) c_int {
         return -1;
     }
@@ -178,6 +185,9 @@ const c_real = struct {
     extern fn hp9_kern_popnote(msg: [*]u8, pc: u64) c_int;
     extern fn hp9_kern_noted(arg: c_int, msg: [*]u8) c_int;
     extern fn hp9_kern_execnotes() void;
+    extern fn hp9_kern_mach() ?*anyopaque;
+    extern fn hp9_kern_putmach(m: ?*anyopaque) void;
+    extern fn hp9_kern_postmach(m: ?*anyopaque, all: c_int, msg: [*:0]const u8, flag: c_int) c_int;
     extern fn syspipe(fd: *[2]c_int) c_int;
     extern fn hp9_kern_user() [*:0]const u8;
     extern fn hp9_kern_devmask(devs: [*:0]const u8) void;
@@ -400,6 +410,35 @@ pub fn noted(arg: Noted, msg: *[ERRMAX]u8) Error!NoteAction {
     return @enumFromInt(r);
 }
 
+/// A machine as the kernel sees it: the process tree from one `spawn`.
+/// Holding one keeps it valid after its processes have exited.
+pub const Mach = opaque {
+    /// Releases the reference from `mach`.
+    pub fn put(m: *Mach) void {
+        c.hp9_kern_putmach(m);
+    }
+
+    /// Who a host-side note goes to.
+    pub const To = enum(c_int) {
+        /// The foreground note group: the first process's.
+        foreground = 0,
+        /// Every process.
+        all = 1,
+    };
+
+    /// Posts a note from the host side (Ctrl-C, hangup, a timeout). Safe
+    /// from any thread, including ones that aren't kernel processes.
+    /// Returns how many processes it reached.
+    pub fn post(m: *Mach, to: To, msg: [*:0]const u8) u32 {
+        return @intCast(c.hp9_kern_postmach(m, @intFromEnum(to), msg, @intFromEnum(NoteFlag.user)));
+    }
+};
+
+/// The calling process's machine, with a reference to release with `put`.
+pub fn mach() ?*Mach {
+    return @ptrCast(c.hp9_kern_mach());
+}
+
 /// exec's reset of the calling process's notes: no handler, none queued.
 pub fn execNotes() void {
     c.hp9_kern_execnotes();
@@ -573,7 +612,24 @@ pub const Console = struct {
     in: ?*consin.ConsoleInput,
     out: *std.Io.Writer,
     err: *std.Io.Writer,
+    /// Puts the host terminal in or out of raw mode (Machine.Stdio.raw).
+    raw: ?Raw = null,
     mutex: std.atomic.Mutex = .unlocked,
+    raw_on: bool = false,
+
+    pub const Raw = struct {
+        ctx: *anyopaque,
+        set: *const fn (ctx: *anyopaque, on: bool) void,
+    };
+
+    /// Turns raw mode on or off, if it isn't already.
+    pub fn setRaw(con: *Console, on: bool) void {
+        while (!con.mutex.tryLock()) std.atomic.spinLoopHint();
+        defer con.mutex.unlock();
+        if (con.raw_on == on) return;
+        con.raw_on = on;
+        if (con.raw) |r| r.set(r.ctx, on);
+    }
 };
 
 /// Wakes a guest read on console `id` sleeping for input. Called from the
@@ -610,6 +666,7 @@ comptime {
         @export(&hp9_cons_read, .{ .name = "hp9_cons_read" });
         @export(&hp9_cons_ready, .{ .name = "hp9_cons_ready" });
         @export(&hp9_cons_write, .{ .name = "hp9_cons_write" });
+        @export(&hp9_cons_raw, .{ .name = "hp9_cons_raw" });
         @export(&hp9_policy_active, .{ .name = "hp9_policy_active" });
         @export(&hp9_policy_check, .{ .name = "hp9_policy_check" });
     }
@@ -637,6 +694,11 @@ fn hp9_cons_ready(id: c_ulong) callconv(.c) c_int {
     const con = console(id) orelse return 1;
     const in = con.in orelse return 1;
     return @intFromBool(in.ready());
+}
+
+fn hp9_cons_raw(id: c_ulong, on: c_int) callconv(.c) void {
+    const con = console(id) orelse return;
+    con.setRaw(on != 0);
 }
 
 fn hp9_cons_write(id: c_ulong, fd: c_int, buf: [*]const u8, n: c_long) callconv(.c) c_long {

@@ -659,8 +659,7 @@ test "M4: kill and ps work in an interactive rc (M4 demo)" {
     }
 }
 
-test "M4: Ctrl-C interrupts the foreground command and rc carries on" {
-    try pending();
+test "Ctrl-C interrupts the foreground command and rc carries on (M4)" {
     const e = try env();
     var it = backendList(e);
     while (it.next()) |backend| {
@@ -679,8 +678,7 @@ test "M4: Ctrl-C interrupts the foreground command and rc carries on" {
     }
 }
 
-test "M4: a second Ctrl-C within a second tears the machine down" {
-    try pending();
+test "a second Ctrl-C within a second tears the machine down (M4)" {
     const e = try env();
     var it = backendList(e);
     while (it.next()) |backend| {
@@ -696,16 +694,16 @@ test "M4: a second Ctrl-C within a second tears the machine down" {
     }
 }
 
-test "M4: rawon puts the host terminal in raw mode until exit" {
-    try pending();
+test "rawon puts the host terminal in raw mode until exit (M4)" {
     if (builtin.os.tag == .windows) return error.SkipZigTest; // no termios to check
     const e = try env();
     var it = backendList(e);
     while (it.next()) |backend| {
         errdefer std.debug.print("backend {s}\n", .{backend});
-        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--rc", ">/dev/consctl { echo rawon; echo ready >/dev/cons; read >/dev/null }" });
+        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--rc", ">[3]/dev/consctl { echo rawon >[1=3]; echo ready; read >/dev/null }" });
         defer t.deinit();
-        try std.testing.expect(t.cooked());
+        // consctl is on fd 3: rc execs read in place, and closing the last
+        // consctl (as >/dev/null over it would) turns raw off.
         try t.expect("ready", slow(10_000));
         try std.testing.expect(!t.cooked());
         // Raw mode doesn't turn \r into \n, so read needs a newline.
@@ -715,8 +713,13 @@ test "M4: rawon puts the host terminal in raw mode until exit" {
     }
 }
 
-test "M4: closing the terminal posts hangup" {
-    try pending();
+/// Prints ready and waits for a hangup. rc execs a last simple command in
+/// place, dropping its handler, so sleep isn't last. A note that reaches rc
+/// as it sets up sleep is only acted on once sleep ends, so the tests wait
+/// for sleep to start before hanging up.
+const hangup_wait = "echo ready; sleep 1000; echo after";
+
+test "closing the terminal posts hangup (M4)" {
     const e = try env();
     var it = backendList(e);
     while (it.next()) |backend| {
@@ -725,25 +728,26 @@ test "M4: closing the terminal posts hangup" {
         var s: Scratch = undefined;
         try s.init();
         defer s.deinit();
-        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--cwd", s.path, "--rc", "fn sighup { echo >hup }; echo ready; sleep 1000" });
+        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--cwd", s.path, "--rc", "fn sighup { echo >hup }; " ++ hangup_wait });
         defer t.deinit();
         try t.expect("ready", slow(10_000));
+        try t.drain(slow(500));
         t.hangup();
         _ = try t.wait(slow(5_000));
         try std.testing.expect(s.exists("hup"));
     }
 }
 
-test "M4: SIGTERM posts hangup" {
-    try pending();
+test "SIGTERM posts hangup (M4)" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try env();
     var it = backendList(e);
     while (it.next()) |backend| {
         errdefer std.debug.print("backend {s}\n", .{backend});
-        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--rc", "fn sighup { echo got hangup }; echo ready; sleep 1000" });
+        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--rc", "fn sighup { echo got hangup }; " ++ hangup_wait });
         defer t.deinit();
         try t.expect("ready", slow(10_000));
+        try t.drain(slow(500));
         t.signal(.TERM);
         try t.expect("got hangup", slow(5_000));
         _ = try t.wait(slow(5_000));
@@ -768,11 +772,12 @@ test "M4: an unhandled note kills the process with the note as its status" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "M4: --timeout posts hangup before tearing down" {
-    try pending();
+test "--timeout posts hangup before tearing down (M4)" {
     const e = try env();
-    const r = try run(e, &.{ "--timeout", "300ms", "--rc", "fn sighup { echo got hangup }; sleep 10" });
+    const r = try run(e, &.{ "--timeout", "300ms", "--rc", "fn sighup { echo got hangup }; sleep 10; echo after" });
     defer r.deinit();
+    // rc execs a last simple command in place, dropping its handler, so
+    // sleep isn't last here.
     try std.testing.expect(std.mem.indexOf(u8, r.out, "got hangup") != null);
 }
 

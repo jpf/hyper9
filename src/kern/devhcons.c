@@ -26,6 +26,7 @@
 extern long hp9_cons_read(ulong machine, void *buf, long n);
 extern int hp9_cons_ready(ulong machine);
 extern long hp9_cons_write(ulong machine, int fd, void *buf, long n);
+extern void hp9_cons_raw(ulong machine, int on);
 
 enum {
 	Maxcons	= 64,	/* src/kern.zig's max_consoles */
@@ -37,6 +38,7 @@ struct Hcons
 {
 	Lock	lk;
 	int	busy;	/* a reader has its turn */
+	int	nctl;	/* open consctl files; the last close turns raw off */
 	Rendez	r;	/* the reader with the turn, waiting for input */
 };
 
@@ -150,13 +152,53 @@ hconsstat(Chan *c, uchar *db, int n)
 static Chan*
 hconsopen(Chan *c, int omode)
 {
-	return devopen(c, omode, hconsdir, nelem(hconsdir), devgen);
+	Hcons *h;
+
+	c = devopen(c, omode, hconsdir, nelem(hconsdir), devgen);
+	if((ulong)c->qid.path == Qconsctl && c->dev < Maxcons){
+		h = &hcons[c->dev];
+		lock(&h->lk);
+		h->nctl++;
+		unlock(&h->lk);
+	}
+	return c;
 }
 
+/* As drawterm's and 9front's: the last close of consctl turns raw off. */
 static void
 hconsclose(Chan *c)
 {
-	USED(c);
+	Hcons *h;
+	int last;
+
+	if((ulong)c->qid.path != Qconsctl || (c->flag&COPEN) == 0 || c->dev >= Maxcons)
+		return;
+	h = &hcons[c->dev];
+	lock(&h->lk);
+	last = --h->nctl == 0;
+	unlock(&h->lk);
+	if(last)
+		hp9_cons_raw(c->dev, 0);
+}
+
+/* consctl: rawon and rawoff, separated by spaces, as drawterm's. */
+static void
+consctl(ulong id, char *a, long n)
+{
+	char buf[256];
+
+	if(n >= sizeof buf)
+		n = sizeof buf - 1;
+	memmove(buf, a, n);
+	buf[n] = 0;
+	for(a = buf; a != nil;){
+		if(strncmp(a, "rawon", 5) == 0)
+			hp9_cons_raw(id, 1);
+		else if(strncmp(a, "rawoff", 6) == 0)
+			hp9_cons_raw(id, 0);
+		if((a = strchr(a, ' ')) != nil)
+			a++;
+	}
 }
 
 static long
@@ -187,7 +229,7 @@ hconswrite(Chan *c, void *va, long n, vlong off)
 			error(Eio);
 		return r;
 	case Qconsctl:
-		/* rawon/rawoff and the TTY come with the interactive console. */
+		consctl(c->dev, va, n);
 		return n;
 	}
 	error(Egreg);

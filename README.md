@@ -156,7 +156,17 @@ scripts), await and pipe; `/fd` is devdup. Notes are delivered as on 9front:
 a handler set with notify gets the note and a saved Ureg on its stack, and a
 process without one dies with the note as its status, so a write to a closed
 pipe ends the writer with `sys: write on closed pipe pc=...`, and a fault or
-bad syscall can be caught. Each process has its own kernel
+bad syscall can be caught.
+
+At the terminal, Ctrl-C posts `interrupt` to the foreground note group (rc
+abandons the command and prompts again); a second Ctrl-C within a second
+stops the machine. Closing the terminal or SIGTERM posts `hangup` to every
+process, and `--timeout` does the same at its deadline; the machine is torn
+down 2 s later if it hasn't exited. A program that writes `rawon` to
+`/dev/consctl` puts the host terminal in raw mode until `rawoff`, its last
+close of consctl, or the end of the run.
+
+Each process has its own kernel
 thread and normally its own vCPU. HVF allows 64 vCPUs, so past 56 processes
 the rest share a pool of 8 vCPUs, which costs a thread handoff per syscall.
 `--trace` prints one line per syscall
@@ -191,7 +201,7 @@ hp9 --strict --write=overlay mk      # exit 2: not enforceable before M10
 | `--read-deny PATH` | Hide a host path, even inside a bound tree |
 | `--write none\|scope` | Deny all writes, or allow them only in writable paths (`ephemeral` and `overlay` come in M5 and M10, and deny writes until then) |
 | `--net disable\|enable` | Mask `#I`, or leave it (`outbound` comes in M5) |
-| `--memory SIZE`, `--timeout DURATION` | Cap guest memory (`512m`); stop the machine after a deadline (`30s`, `1m`) |
+| `--memory SIZE`, `--timeout DURATION` | Cap guest memory (`512m`); post `hangup` after a deadline (`30s`, `1m`) and stop the machine 2 s later |
 | `--pids N`, `--cpus N` | Cap live processes (rfork fails with "no procs"); cap vCPUs running guest code at once |
 | `--host-fs`, `--host-cmd` | Show the whole host read-only at `/mnt/term`; unmask devcmd |
 | `--print`, `--strict` | Print the plan and exit; refuse (exit 2) capabilities this build can't enforce |
@@ -230,7 +240,7 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 
 | Path | Contents |
 | --- | --- |
-| `src/main.zig`, `src/cli.zig`, `src/stdin.zig`, `src/tools.zig` | CLI: entry point, flag parsing with no I/O, the host stdin reader (cancellable, for the console's reader thread), and `--check`/`--version` |
+| `src/main.zig`, `src/cli.zig`, `src/stdin.zig`, `src/hostsig.zig`, `src/tools.zig` | CLI: entry point, flag parsing with no I/O, the host stdin reader (cancellable, for the console's reader thread), Ctrl-C, hangup and raw mode on the host terminal, and `--check`/`--version` |
 | `src/root.zig` | library root |
 | `src/machine.zig` | one machine: builds its namespace, runs a process and serves its syscalls |
 | `src/consin.zig` | a machine run's console input: the reader thread a guest's console read waits on, so notes can interrupt it |

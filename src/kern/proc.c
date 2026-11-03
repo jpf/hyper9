@@ -390,6 +390,72 @@ hp9_kern_postnote(ulong pid, char *msg, int flag)
 	return r;
 }
 
+/*
+ * The calling process's machine, with a reference for the caller, which
+ * hp9_kern_putmach releases. nil if the caller isn't an hp9 process.
+ */
+void*
+hp9_kern_mach(void)
+{
+	Hproc *h;
+
+	h = lookup(up);
+	if(h == nil)
+		return nil;
+	incref(&h->mach->ref);
+	return h->mach;
+}
+
+void
+hp9_kern_putmach(void *m)
+{
+	putmach(m);
+}
+
+/*
+ * Posts a note from the host side (Ctrl-C, hangup, a timeout) to machine
+ * m: with all set, to every process; otherwise to the note group of its
+ * first process (pid 1), which is the foreground group. Callable from any
+ * thread, including ones that aren't kernel processes: it takes only
+ * locks, never up or an error label, as hp9_cons_wake doesn't. Returns
+ * how many processes it reached.
+ */
+int
+hp9_kern_postmach(void *v, int all, char *msg, int flag)
+{
+	Hmach *m;
+	Hnote *n;
+	Hproc *h;
+	ulong noteid;
+	int i, found, count;
+
+	m = v;
+	if((n = mknote(msg, flag)) == nil)
+		return 0;
+	count = 0;
+	lock(&tablk);
+	noteid = 0;
+	found = all;
+	for(i = 0; !found && i < PROCHASH; i++)
+		for(h = table[i]; h != nil; h = h->hash)
+			if(h->mach == m && h->pid == 1){
+				noteid = h->noteid;
+				found = 1;
+				break;
+			}
+	if(found)
+		for(i = 0; i < PROCHASH; i++)
+			for(h = table[i]; h != nil; h = h->hash){
+				if(h->mach != m || (!all && h->noteid != noteid))
+					continue;
+				incref(&n->ref);
+				count += pushnote(h, n);
+			}
+	unlock(&tablk);
+	freenote(n);
+	return count;
+}
+
 /* Posts a note to every process but the caller in its machine's note group noteid. */
 void
 hp9_kern_postnotepg(ulong noteid, char *msg, int flag)

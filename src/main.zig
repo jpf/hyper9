@@ -4,6 +4,16 @@ const hp9 = @import("hp9");
 const cli = @import("cli.zig");
 const Stdin = @import("stdin.zig").Stdin;
 const tools = @import("tools.zig");
+const hostsig = @import("hostsig.zig");
+
+/// Restores the host terminal before the default panic output, so a crash
+/// in raw mode doesn't leave the user's terminal raw.
+pub const panic = std.debug.FullPanic(struct {
+    fn f(msg: []const u8, ret_addr: ?usize) noreturn {
+        hostsig.restoreTerminal();
+        std.debug.defaultPanic(msg, ret_addr);
+    }
+}.f);
 
 /// Exit codes for hp9's own failures (DESIGN.md, "Exit codes").
 const exit_failed = 125;
@@ -154,8 +164,12 @@ pub fn main(init: std.process.Init) !u8 {
     in.init(io, &in_buf);
     var out = std.Io.File.stdout().writerStreaming(io, &.{});
     var err_w = std.Io.File.stderr().writerStreaming(io, &.{});
+    var host: hostsig.Host = undefined;
+    host.init(io);
+    defer host.deinit();
     var opts = base;
     opts.env = env.items;
+    opts.signals = &host.signals;
     opts.trace = if (cfg.trace) |t| (if (t.len > 0) &trace_w.interface else &err_w.interface) else null;
     opts.dump_on_fault = cfg.dump_on_fault;
     opts.ns = cfg.ns;
@@ -164,6 +178,7 @@ pub fn main(init: std.process.Init) !u8 {
         .in_cancel = .{ .ctx = &in, .func = Stdin.cancel, .reset = Stdin.reset },
         .out = &out.interface,
         .err = &err_w.interface,
+        .raw = host.raw(),
     };
     var machine = hp9.Machine.init(init.gpa, io, opts) catch |err| {
         const a: hp9.vmm.Arch = arch orelse hp9.vmm.host_arch orelse .arm64;
@@ -176,7 +191,10 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     const status = machine.run(prog, argv) catch |err| {
-        if (machine.stuck) std.process.exit(exit_failed);
+        if (machine.stuck) {
+            host.deinit();
+            std.process.exit(exit_failed);
+        }
         const why = if (machine.err_msg.len > 0) machine.err_msg else @errorName(err);
         std.debug.print("hp9: {s}: {s}\n", .{ prog_arg, why });
         return switch (err) {
@@ -195,7 +213,10 @@ pub fn main(init: std.process.Init) !u8 {
             std.debug.print("hp9: {s}: {s}\n", .{ prog_arg, msg });
             // The timed-out process is stuck in a host call; don't wait
             // for it or free what it's using.
-            if (machine.stuck) std.process.exit(1);
+            if (machine.stuck) {
+                host.deinit();
+                std.process.exit(1);
+            }
             return 1;
         },
     }

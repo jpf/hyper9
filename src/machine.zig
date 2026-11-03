@@ -81,7 +81,46 @@ pub const Machine = struct {
         /// pool (src/cpupool.zig); null means the backend's limit less the
         /// pool. For tests of the pool.
         owned_vcpus: ?u32 = null,
+        /// Host events to deliver while a run is in progress (Ctrl-C,
+        /// hangup); see `Signals`.
+        signals: ?*Signals = null,
         stdio: Stdio,
+    };
+
+    /// Host events an embedder delivers to a running machine, from any
+    /// thread, including a signal handler's watcher (DESIGN.md, "Signals
+    /// and TTY"). Each call only sets a flag and wakes `run`, which posts
+    /// the notes. Calls while no run is in progress are dropped.
+    pub const Signals = struct {
+        /// Bumped by each call, for `run` to wait on.
+        seq: std.atomic.Value(u32) = .init(0),
+        pending: std.atomic.Value(u8) = .init(0),
+
+        const interrupt_bit = 1;
+        const hangup_bit = 2;
+        const stop_bit = 4;
+
+        /// Posts `interrupt` to the foreground note group (Ctrl-C).
+        pub fn interrupt(s: *Signals, io: std.Io) void {
+            s.raise(io, interrupt_bit);
+        }
+
+        /// Posts `hangup` to every process, then tears the machine down
+        /// after the grace period (terminal closed, SIGTERM).
+        pub fn hangup(s: *Signals, io: std.Io) void {
+            s.raise(io, hangup_bit);
+        }
+
+        /// Tears the machine down at once (a second Ctrl-C).
+        pub fn stop(s: *Signals, io: std.Io) void {
+            s.raise(io, stop_bit);
+        }
+
+        fn raise(s: *Signals, io: std.Io, bit: u8) void {
+            _ = s.pending.fetchOr(bit, .acq_rel);
+            _ = s.seq.fetchAdd(1, .release);
+            io.futexWake(u32, &s.seq.raw, 1);
+        }
     };
 
     pub const InitError = vmm.CreateError || error{PolicyConflict};
@@ -95,7 +134,14 @@ pub const Machine = struct {
         in_cancel: ?consin.Cancel = null,
         out: *std.Io.Writer,
         err: *std.Io.Writer,
+        /// Called when the guest turns raw mode on or off (writing `rawon`
+        /// or `rawoff` to /dev/consctl, or closing its last consctl). The
+        /// CLI puts the host terminal in raw mode. The machine turns raw
+        /// mode off when a run ends.
+        raw: ?Raw = null,
     };
+
+    pub const Raw = kern.Console.Raw;
 
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -181,7 +227,7 @@ pub const Machine = struct {
             m.gpa.destroy(job);
             return e;
         };
-        job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = null, .out = m.opts.stdio.out, .err = m.opts.stdio.err }, .pool = pool };
+        job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = null, .out = m.opts.stdio.out, .err = m.opts.stdio.err, .raw = m.opts.stdio.raw }, .pool = pool };
         job.pool.gpa = m.gpa;
         kern.setNoteKick(Proc.noteKick);
         job.m = &job.mc;
@@ -212,24 +258,19 @@ pub const Machine = struct {
             return e;
         };
 
-        var timed_out = false;
-        if (m.plan.timeout_ns) |ns| {
-            const d: std.Io.Clock.Duration = .{ .raw = .fromNanoseconds(ns), .clock = .awake };
-            job.first_done.waitTimeout(m.io, .{ .duration = d }) catch {
-                job.timed_out.store(true, .release);
-                timed_out = true;
-            };
-        }
-        if (!timed_out) job.first_done.waitUncancelable(m.io);
+        const timed_out = job.waitFirst();
         // The machine ends with its first process: any others are stopped,
         // as at a timeout.
         job.stopAll();
         if (!job.waitAll()) {
             m.stuck = true;
             kern.removeConsole(job.con_id);
-            return .{ .killed = timeout_note };
+            job.con.setRaw(false);
+            return .{ .killed = if (timed_out) timeout_note else stopped_note };
         }
         kern.removeConsole(job.con_id);
+        job.con.setRaw(false);
+        if (job.mach.load(.acquire)) |mc| mc.put();
         // No process reads the console now. A reader thread still in a
         // host read that can't be cancelled keeps the Job, leaked.
         const freed = if (job.con_in) |*in| in.stop(grace_ms) else true;
@@ -257,6 +298,10 @@ pub const Machine = struct {
     const timeout_note = "hp9: timeout";
     const stopped_note = "hp9: machine stopped";
     const grace_ms = 500;
+    /// How long processes have to handle `hangup` (at a timeout, a closed
+    /// terminal or SIGTERM) before the machine is torn down. Shorter than
+    /// the 5 s Windows gives a console process after CTRL_CLOSE_EVENT.
+    const hangup_grace_ms = 2000;
 
     /// One run of the machine: its process tree and console.
     const Job = struct {
@@ -272,6 +317,12 @@ pub const Machine = struct {
         /// The first process's outcome, set before `first_done`.
         result: RunError!Status = error.Kern,
         first_done: std.Io.Event = .unset,
+        /// The kernel's machine, set by the first process once it's a
+        /// kernel process, for posting host-side notes. `run` releases it.
+        mach: std.atomic.Value(?*kern.Mach) = .init(null),
+        /// Bumped when `first_done` is set, so `run` can wait on one
+        /// futex for it and for `Signals`.
+        wake: std.atomic.Value(u32) = .init(0),
         /// Set when the last process has exited.
         all_done: std.Io.Event = .unset,
         timed_out: std.atomic.Value(bool) = .init(false),
@@ -289,6 +340,21 @@ pub const Machine = struct {
 
         fn lockSpin(j: *Job) void {
             while (!j.lock.tryLock()) std.atomic.spinLoopHint();
+        }
+
+        /// Wakes `run` to look at `first_done` again.
+        fn wakeRun(j: *Job) void {
+            _ = j.wake.fetchAdd(1, .release);
+            j.m.io.futexWake(u32, &j.wake.raw, 1);
+            if (j.m.opts.signals) |s| {
+                _ = s.seq.fetchAdd(1, .release);
+                j.m.io.futexWake(u32, &s.seq.raw, 1);
+            }
+        }
+
+        /// Posts a host-side note, if the first process has started.
+        fn post(j: *Job, to: kern.Mach.To, msg: [*:0]const u8) void {
+            if (j.mach.load(.acquire)) |mc| _ = mc.post(to, msg);
         }
 
         /// Allocates and registers a process with the next pid. Fails with
@@ -315,6 +381,50 @@ pub const Machine = struct {
             };
             j.lock.unlock();
             j.m.gpa.destroy(p);
+        }
+
+        /// Waits for the first process to exit, delivering host signals
+        /// meanwhile. At the timeout or a hangup, posts `hangup` to every
+        /// process and gives them `hangup_grace_ms` to finish before the
+        /// teardown. Returns whether the run reached its timeout.
+        fn waitFirst(j: *Job) bool {
+            const m = j.m;
+            const io = m.io;
+            const sig = m.opts.signals;
+            const futex = if (sig) |s| &s.seq.raw else &j.wake.raw;
+            var deadline: ?std.Io.Timestamp = if (m.plan.timeout_ns) |ns| std.Io.Timestamp.now(io, .awake).addDuration(.fromNanoseconds(ns)) else null;
+            var hung_up = false;
+            while (true) {
+                const seq = @atomicLoad(u32, futex, .acquire);
+                if (j.first_done.isSet()) break;
+                if (sig) |s| {
+                    const bits = s.pending.swap(0, .acq_rel);
+                    if (bits & Signals.stop_bit != 0) break;
+                    if (bits & Signals.interrupt_bit != 0) j.post(.foreground, "interrupt");
+                    if (bits & Signals.hangup_bit != 0 and !hung_up) {
+                        hung_up = true;
+                        j.post(.all, "hangup");
+                        deadline = std.Io.Timestamp.now(io, .awake).addDuration(.fromMilliseconds(hangup_grace_ms));
+                    }
+                }
+                const d = deadline orelse {
+                    io.futexWaitUncancelable(u32, futex, seq);
+                    continue;
+                };
+                const left = std.Io.Timestamp.now(io, .awake).durationTo(d);
+                if (left.nanoseconds > 0) {
+                    io.futexWaitTimeout(u32, futex, seq, .{ .duration = .{ .raw = left, .clock = .awake } }) catch {};
+                    continue;
+                }
+                // The grace period after a hangup is over.
+                if (hung_up) break;
+                // The timeout: hangup first, then the grace period.
+                hung_up = true;
+                j.timed_out.store(true, .release);
+                j.post(.all, "hangup");
+                deadline = std.Io.Timestamp.now(io, .awake).addDuration(.fromMilliseconds(hangup_grace_ms));
+            }
+            return j.timed_out.load(.acquire);
         }
 
         /// Stops every process: kicks vCPUs and interrupts blocking
@@ -467,6 +577,7 @@ pub const Machine = struct {
         kern.setPlan(&m.plan);
         kern.setGuestPid(p.pid);
         p.setKproc();
+        j.mach.store(kern.mach(), .release);
         const r = m.startFirst(p);
         // The status and err_msg can point into the Proc or its errstr,
         // which go when it exits.
@@ -479,6 +590,7 @@ pub const Machine = struct {
             m.err_msg = m.keep2(e);
         }
         j.first_done.set(m.io);
+        j.wakeRun();
         p.exit();
     }
 
