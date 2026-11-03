@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Fetches reference sources, the pinned 9front arm64 image and prebuilt
-# Unicorn libraries into .local.
+# Fetches reference sources, the pinned 9front arm64 image, prebuilt Unicorn
+# libraries and the patched Unicorn source into .local.
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 . "$HP9_ROOT/scripts/pins.sh"
@@ -50,3 +50,24 @@ echo "$UNICORN_WHEELS" | while read -r name tag sha; do
 	fi
 	echo "unicorn/$name: $UNICORN_VERSION"
 done
+
+# Unicorn source: unpacked into .local/src/unicorn with our patches applied.
+# A stamp holds the tarball hash and the patches' hashes, so it's redone only
+# when either changes.
+src="$HP9_LOCAL/src/unicorn"
+patches=("$HP9_ROOT"/third_party/unicorn/patches/*.patch)
+stamp="$UNICORN_SRC_SHA256 $(cat "${patches[@]}" | shasum -a 256 | cut -d' ' -f1)"
+if [ "$(cat "$src/.hp9-stamp" 2>/dev/null || true)" != "$stamp" ]; then
+	tgz="$HP9_LOCAL/cache/unicorn-$UNICORN_VERSION.tar.gz"
+	curl -fsSL -o "$tgz" "$UNICORN_SRC_URL"
+	echo "$UNICORN_SRC_SHA256  $tgz" | shasum -a 256 -c --quiet
+	rm -rf "$src" "$src.tmp" && mkdir -p "$src.tmp"
+	tar -xzf "$tgz" -C "$src.tmp" --strip-components 1
+	for p in "${patches[@]}"; do
+		patch -s -p1 -d "$src.tmp" <"$p" || { echo "fetch: $p doesn't apply" >&2; exit 1; }
+	done
+	echo "$stamp" >"$src.tmp/.hp9-stamp"
+	mv "$src.tmp" "$src"
+	rm -f "$tgz"
+fi
+echo "src/unicorn: $UNICORN_VERSION + ${#patches[@]} patches"
