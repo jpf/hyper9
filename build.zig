@@ -99,6 +99,41 @@ const kern_flags_win32 = kern_flags ++ [_][]const u8{ "-DWINDOWS", "-DUNICODE" }
 
 /// Zig's own macOS SDK detection runs xcodebuild, which fails in some
 /// environments; SDKROOT (set by scripts/env.sh) is used when present.
+/// Runs tests/integration.zig against the hp9 binary. `filters` selects
+/// cases by name; with `pending`, cases for a milestone not yet done (named
+/// "M3: ..." and so on) run instead of skipping.
+fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, hp9_bin: []const u8, root: []const u8, backends: []const u8, pending: bool) *std.Build.Step.Run {
+    const t = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+        .filters = filters,
+    });
+    const run = b.addRunArtifact(t);
+    run.setEnvironmentVariable("HP9_TEST_BIN", hp9_bin);
+    run.setEnvironmentVariable("HP9_TEST_ROOT", root);
+    run.setEnvironmentVariable("HP9_TEST_BACKENDS", backends);
+    if (pending) run.setEnvironmentVariable("HP9_TEST_PENDING", "1");
+    run.has_side_effects = true;
+    return run;
+}
+
+/// The number of entries in the root tree's /arm64/bin and /rc/bin, which
+/// `ls /bin` lists one after the other; null without a tree.
+fn countBin(b: *std.Build, root: []const u8) ?usize {
+    const io = b.graph.io;
+    var total: usize = 0;
+    for ([_][]const u8{ "arm64/bin", "rc/bin" }) |sub| {
+        var dir = std.Io.Dir.cwd().openDir(io, b.pathJoin(&.{ root, sub }), .{ .iterate = true }) catch return null;
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (it.next(io) catch return null) |_| total += 1;
+    }
+    return total;
+}
+
 fn addSdkPaths(b: *std.Build, m: *std.Build.Module) void {
     const sdk = b.graph.environ_map.get("SDKROOT") orelse return;
     m.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System/Library/Frameworks" }) });
@@ -376,23 +411,29 @@ pub fn build(b: *std.Build) void {
     m2_tight.step.dependOn(signed_step);
     m2_step.dependOn(&m2_tight.step);
 
-    // Runs real binaries through the hp9 CLI; skipped without a root tree.
-    const integration_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("tests/integration.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-    }) });
-    const run_integration = b.addRunArtifact(integration_tests);
-    run_integration.setEnvironmentVariable("HP9_TEST_BIN", hp9_bin);
-    run_integration.setEnvironmentVariable("HP9_TEST_ROOT", root);
-    // Each case runs on every backend built in that runs arm64 here.
+    // The M3 demo: ls prints each member of the /bin union, duplicates and
+    // all, so the count is the two directories' entries added together.
+    const m3 = b.addSystemCommand(&.{ hp9_bin, "--root", root, "--rc", "ls /bin | wc -l" });
+    m3.expectStdOutEqual(if (countBin(b, root)) |n| b.fmt("{d: >7}\n", .{n}) else "(no root tree; run scripts/mkroot.py)");
+    m3.step.dependOn(signed_step);
+    const m3_step = b.step("m3", "Run the M3 demo, hp9 --rc 'ls /bin | wc -l', and the M3 integration cases (needs a root tree)");
+    m3_step.dependOn(&m3.step);
+
+    // Each integration case runs on every backend built in that runs arm64 here.
     var backends: std.ArrayList(u8) = .empty;
     if (os == .macos and target.result.cpu.arch == .aarch64) backends.appendSlice(b.allocator, "hvf,") catch @panic("OOM");
     if (emu == .unicorn) backends.appendSlice(b.allocator, "emu,") catch @panic("OOM");
-    run_integration.setEnvironmentVariable("HP9_TEST_BACKENDS", if (backends.items.len > 0) backends.items else "auto");
-    run_integration.has_side_effects = true;
+    const backend_list = if (backends.items.len > 0) backends.items else "auto";
+
+    // Runs real binaries through the hp9 CLI; skipped without a root tree.
+    // Cases named "M3: ..." skip here until M3 makes them pass; zig build m3
+    // runs only those.
+    const run_integration = addIntegration(b, optimize, &.{}, hp9_bin, root, backend_list, false);
     run_integration.step.dependOn(signed_step);
     b.step("integration", "Run real 9front binaries from the root tree through hp9").dependOn(&run_integration.step);
+    const run_m3_cases = addIntegration(b, optimize, &.{"M3: "}, hp9_bin, root, backend_list, true);
+    run_m3_cases.step.dependOn(signed_step);
+    m3_step.dependOn(&run_m3_cases.step);
 
     const mod_tests = b.addTest(.{ .root_module = mod });
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });

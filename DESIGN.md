@@ -179,6 +179,8 @@ Each CLI invocation is one machine: one host process with one VM. Each Plan 9 pr
 
 **vCPU limits.** v1 is one vCPU per process. Measure each hypervisor's maximum early (`hv_vm_get_max_vcpu_count`, `KVM_CAP_MAX_VCPUS`, WHP's partition property). If a big tree hits the limit, release a process's vCPU while it is blocked in a long host syscall, keep its registers in the Proc, and reacquire a vCPU from a pool when it resumes. On HVF a vCPU is bound to its thread, so the pool has to be pool threads that run the guest on the process's behalf.
 
+Measured before M3 on an M3 Max (macOS 15.8.1, 14 cores): `hv_vm_get_max_vcpu_count` reports 64, and the 65th live `hv_vcpu_create` fails with `HV_NO_RESOURCES`. Destroyed vCPUs free their slots, and a create takes about 120 µs. A Unicorn engine has no limit but costs about 1.3 MiB of host memory and 0.3 ms to create. So on HVF 64 is a hard cap on *live* processes, not just running ones, and a pipeline of 65 stages or `mk -j` with many jobs reaches it. M3 therefore takes the pool approach above on HVF: a process holds a vCPU only while it runs guest code, and `--cpus` sets the pool size (at most 64).
+
 ## Kernel: drawterm `kern/` and the Zig seam
 
 We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, libmemlayer, libsec, libmp, libip, libauthsrv) and its GUI backends. Its `sysfile.c` already implements the file syscalls with Plan 9 semantics, so most syscall handlers are a decode followed by one call. We keep the vendored tree close to upstream so 9front fixes keep merging cleanly.
@@ -207,7 +209,7 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 4. drawterm's `up` (`_getproc()`, per host thread) stays authoritative. Every guest thread is created through drawterm's kproc path (`hp9_kern_spawn`), so `up` is set before any kernel call. Zig never uses bare `std.Thread` for anything that touches the kernel, and never boots the kernel on a caller's thread.
 5. drawterm's Proc has no parent, note group, segments or Egrp. We add these fields, plus a pointer to the Zig-side process record.
 6. The build uses `zig build`: C sources go through `addCSourceFiles` with drawterm's flags, and one `build.zig` produces binaries for every host.
-7. Guest memory reaches the kernel through `GuestBuf`, because drawterm's `validaddr` is a no-op and hp9's translation is the only check. A data buffer (`pread`, `pwrite`, `stat`) is passed to the `sys*` wrapper in place when it lies in one mapping, split into one call per mapping when it spans several, and split into chunks below 2 GiB (drawterm's `long` is 32 bits). Any unmapped byte posts "sys: bad address in syscall". Strings (paths, `errstr`) are always copied into a bounded host buffer first, so no other guest thread can change one during the call.
+7. Guest memory reaches the kernel through `GuestBuf`, because drawterm's `validaddr` is a no-op and hp9's translation is the only check. A data buffer (`pread`, `pwrite`, `stat`) is passed to the `sys*` wrapper in place when it is contiguous in host memory, and otherwise goes through a host bounce buffer, so each guest call is one kernel call. Only buffers of 1 GiB or more are split, since drawterm's `long` is 32 bits. Any unmapped byte posts "sys: bad address in syscall". Strings (paths, `errstr`) are always copied into a bounded host buffer first, so no other guest thread can change one during the call.
 
 ## Filesystem, boot and I/O
 
@@ -556,6 +558,10 @@ Record design changes as they are made using `- YYYY-MM-DD: <design change> (rea
 
 #### M3
 
+- 2026-11-02: `pread` and `pwrite` make one kernel call per guest call, using a bounce buffer when the guest buffer isn't contiguous on the host, instead of one call per host-contiguous piece. Only buffers of 1 GiB or more are still split. (Splitting a directory read made devfs return a short read and then 0 at the page boundary, so `ls` of a large directory, such as `/bin` with 453 entries, stopped after about 32. Splitting would also break message boundaries on pipes and ctl files, which M3 brings in. Zero-length reads and writes now reach the kernel too, since a zero-length pipe write is a message.)
+- 2026-11-02: HVF allows 64 live vCPUs per VM (measured; see Process model, vCPU limits), so on HVF a process holds a vCPU only while it runs guest code. Blocked processes return theirs to a pool of `--cpus` vCPU threads (at most 64), as the vCPU limits section already planned. The emulator keeps one engine per process. (rc pipelines and `mk -j` easily keep more than 64 processes alive at once, most of them blocked in reads.)
+- 2026-11-02: M3 order: first the Proc record (parent, children, wait queue, segments, Egrp, and a pointer to the Zig process), kept in a table keyed by Proc in `src/kern/` like devenv's, rather than added to drawterm's `kern/dat.h`. That table then replaces devenv's own. Next `vmm.AddressSpace.unmap` and segments (text, data, bss, stack) with an eager copy for `rfork`, and a TLB flush whenever a vCPU's address space changes (`TODO(M3)` in `hvf.zig`; ASIDs only if the flush shows up in profiles). Then `rfork`, `exec`, `exits` and `await` with machine-local pids, then devdup at `/fd` and pipes, then the HVF vCPU pool, then `--pids`, `--cpus` and `--ns`. The cases named "M3: ..." in `tests/integration.zig` cover each step, and `zig build m3` runs them along with the demo. (The demo only needs rfork, exec, await and pipes; the pool and caps build on a working tree.)
+
 #### M4
 
 #### M5
@@ -584,7 +590,7 @@ Record design changes as they are made using `- YYYY-MM-DD: <design change> (rea
 - [x] Licensing: drawterm is MIT (Plan 9 Foundation, Russ Cox, 9front authors). hyper-linux is Apache-2.0, so code borrowed from it keeps its notice. The project can be MIT.
 - [x] Pin a 9front release: 11952, "THIS WAS SUPPOSED TO BE FUN", released August 2026 ([OSnews](https://www.osnews.com/?p=145669)), pinned in `scripts/pins.sh` along with its source revision (`NINEFRONT_REV`, read from `/dist/9front` in the release image), which `scripts/fetch.sh` checks out in `.local/src/9front`. Port 9front code from that checkout, not from upstream HEAD.
 - [x] Build the arm64 root tree: `scripts/mkroot.py` boots the pinned qcow2 headless in QEMU and tars the disk's file system out onto a second raw disk (see the M2 changelog).
-- [ ] vCPU limits. hyper-linux caps threads at 64 (`MAX_THREADS`), which hints at HVF's practical limit. Measure each hypervisor before M3.
+- [x] vCPU limits on HVF: 64 live vCPUs per VM, measured before M3 (see Process model, vCPU limits). KVM and WHP are measured in M8 and M9.
 - [ ] Whether the Windows Hypervisor Platform's arm64 support is solid enough to target, or whether Windows on ARM waits.
 - [ ] macOS builds: the Cocoa backend (`screen.m`) is Objective-C, and HVF needs the macOS SDK plus an entitlement signature. So macOS builds run on a Mac, or use rcodesign when cross-building. Windows builds need a WinHvPlatform import library (a .def file for Zig).
 - [x] Startup budget: `hp9 /bin/echo` (VM create through exit) should take under 20 ms of wall time on HVF. Measured at M2 on an M3 Max, release build: about 5 ms median (4.4 ms for the hand-assembled hello with no root tree, so kern and the namespace add about 0.5 ms).

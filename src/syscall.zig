@@ -285,7 +285,45 @@ fn result0(r: kern.Error!void) Outcome {
 
 const Dir = enum { read, write };
 
+/// One kernel call per pread or pwrite, as on 9front: splitting a call
+/// would end directory reads early and break message boundaries on pipes
+/// and ctl files. A buffer that isn't contiguous on the host goes through
+/// a bounce buffer; only calls over `gm.max_chunk` are split. Zero-length
+/// calls reach the kernel too: a zero-length write to a pipe is a message.
 fn io(p: *Process, fd: u31, buf: u64, len: u32, off: i64, comptime dir: Dir) gm.Error!Outcome {
+    if (len > gm.max_chunk) return ioSplit(p, fd, buf, len, off, dir);
+    if (if (len == 0) @as([]u8, &.{}) else gm.contiguous(p.as, buf, len)) |s| {
+        const n = switch (dir) {
+            .read => kern.pread(fd, s, off),
+            .write => kern.pwrite(fd, s, off),
+        } catch return fail;
+        return ok(n);
+    }
+    const tmp = std.heap.page_allocator.alloc(u8, len) catch {
+        kern.setErrstr("no memory");
+        return fail;
+    };
+    defer std.heap.page_allocator.free(tmp);
+    switch (dir) {
+        .read => {
+            // Check the range before the read, so a bad buffer has no side effects.
+            _ = try gm.each(p.as, buf, len, &{}, struct {
+                fn f(_: *const void, s: []u8) gm.Error!usize {
+                    return s.len;
+                }
+            }.f);
+            const n = kern.pread(fd, tmp, off) catch return fail;
+            try gm.write(p.as, buf, tmp[0..n]);
+            return ok(n);
+        },
+        .write => {
+            try gm.read(p.as, buf, tmp);
+            return ok(kern.pwrite(fd, tmp, off) catch return fail);
+        },
+    }
+}
+
+fn ioSplit(p: *Process, fd: u31, buf: u64, len: u32, off: i64, comptime dir: Dir) gm.Error!Outcome {
     const Ctx = struct {
         fd: u31,
         off: i64,

@@ -34,12 +34,14 @@ zig build test     # unit tests, and the backend tests on every backend built in
 zig build kern     # compiles drawterm's kern and the libraries it uses
 zig build m0       # M0 demo: hp9 ./hello must print "hello"
 zig build m2       # M2 demos: hp9 /bin/cat /lib/namespace, and a write under --profile=tight fails
+zig build m3       # M3 demo, hp9 --rc 'ls /bin | wc -l', and the M3 integration cases (fails until M3 is done)
 zig build integration  # real 9front binaries from the root tree through the hp9 CLI
 ```
 
-The M2 demos and the integration tests use the root tree from
+The M2 and M3 demos and the integration tests use the root tree from
 `scripts/mkroot.py`, or `-Droot=DIR`. The integration tests skip when there's
-no tree.
+no tree. Cases for the milestone in progress are named `M3: ...` and skip in
+`zig build integration` and `zig build test`; `zig build m3` runs them.
 
 The emulator backend links the prebuilt Unicorn (GPLv2) fetched by
 `scripts/fetch.sh`, so it's opt-in and for development and CI only:

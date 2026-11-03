@@ -6,6 +6,11 @@
 //! .local/9front/root) and the backends to test (HP9_TEST_BACKENDS, the
 //! ones built in) through the environment. Every case runs on each backend
 //! that can run arm64 here. Without a root tree, the tests are skipped.
+//!
+//! Cases named "M3: ..." (and so on) are for a milestone in progress. They
+//! call `pending`, which skips them unless HP9_TEST_PENDING is set, as
+//! `zig build m3` does; when the milestone is done, drop the prefix and the
+//! call.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -24,6 +29,11 @@ fn env() !Env {
     std.Io.Dir.cwd().access(std.testing.io, try hostPath(root, "arm64/bin/cat"), .{}) catch return error.SkipZigTest;
     const backends = std.testing.environ.getPosix("HP9_TEST_BACKENDS") orelse "auto";
     return .{ .hp9 = hp9, .root = root, .backends = backends };
+}
+
+/// Skips a case for a milestone that isn't done yet, unless asked for.
+fn pending() !void {
+    if (std.testing.environ.getPosix("HP9_TEST_PENDING") == null) return error.SkipZigTest;
 }
 
 var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -152,6 +162,26 @@ test "stdin reaches the guest's console" {
     defer r.deinit();
     try std.testing.expectEqualStrings("      2       3       6\n", r.out);
     try std.testing.expectEqual(0, r.code);
+}
+
+test "directory reads return every entry" {
+    const e = try env();
+    // More entries than one host readdir buffer holds, so a read split
+    // across guest pages, or across kernel calls, would end the listing early.
+    const r = try run(e, &.{ "ls", "/arm64/bin" });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqual(try countDir(e, "arm64/bin"), std.mem.count(u8, r.out, "\n"));
+}
+
+/// The number of entries in a directory of the root tree.
+fn countDir(e: Env, rel: []const u8) !usize {
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, try hostPath(e.root, rel), .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var it = dir.iterate();
+    var n: usize = 0;
+    while (try it.next(std.testing.io)) |_| n += 1;
+    return n;
 }
 
 test "the host environment isn't imported" {
@@ -356,4 +386,117 @@ test "renames and case can't get around the rules" {
     const data = try s.tmp.dir.readFileAlloc(std.testing.io, ".env", gpa, .limited(64));
     defer gpa.free(data);
     try std.testing.expectEqualStrings("secret\n", data);
+}
+
+// M3: process trees. These skip until M3 is done (see `pending`).
+
+test "M3: ls /bin | wc -l (M3 demo)" {
+    try pending();
+    const e = try env();
+    const r = try run(e, &.{ "--rc", "ls /bin | wc -l" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("", r.err);
+    const want = try countDir(e, "arm64/bin") + try countDir(e, "rc/bin");
+    const got = try std.fmt.parseInt(usize, std.mem.trim(u8, r.out, " \n"), 10);
+    try std.testing.expectEqual(want, got);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "M3: a pipeline reads the guest's stdin" {
+    try pending();
+    const e = try env();
+    const r = try runIn(e, &.{ "--rc", "sed s/h/j/ | wc -c" }, "hello\n");
+    defer r.deinit();
+    try std.testing.expectEqualStrings("6\n", std.mem.trimStart(u8, r.out, " "));
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "M3: exit status comes back through await" {
+    try pending();
+    const e = try env();
+    const ok = try run(e, &.{ "--rc", "test -e /lib/namespace" });
+    defer ok.deinit();
+    try std.testing.expectEqual(0, ok.code);
+    const bad = try run(e, &.{ "--rc", "test -e /no/such/file" });
+    defer bad.deinit();
+    try std.testing.expectEqual(1, bad.code);
+    const st = try run(e, &.{ "--rc", "cat /no/such/file >[2]/dev/null; echo $status" });
+    defer st.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, st.out, "cat ") != null);
+    try std.testing.expectEqual(0, st.code);
+}
+
+test "M3: exec replaces the process" {
+    try pending();
+    const e = try env();
+    const r = try run(e, &.{ "--rc", "exec echo replaced; echo not reached" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("replaced\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "M3: /fd is devdup" {
+    try pending();
+    const e = try env();
+    const r = try run(e, &.{ "--rc", "echo through fd | cat /fd/0" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("through fd\n", r.out);
+}
+
+test "M3: many processes, one after another" {
+    try pending();
+    const e = try env();
+    // More than HVF's 64 vCPUs in total, so each exit has to free its vCPU.
+    const r = try run(e, &.{ "--rc", "for(i in `{seq 100}) echo $i | wc -l >/dev/null; echo done" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("done\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "M3: more live processes than HVF has vCPUs" {
+    try pending();
+    const e = try env();
+    // 80 processes alive at once, all but the first blocked reading a pipe.
+    var cmd: std.ArrayList(u8) = .empty;
+    defer cmd.deinit(gpa);
+    try cmd.appendSlice(gpa, "echo deep");
+    for (0..79) |_| try cmd.appendSlice(gpa, " | cat");
+    const r = try run(e, &.{ "--rc", cmd.items });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("deep\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "M3: --pids caps the process count" {
+    try pending();
+    const e = try env();
+    // rc plus ls and wc is three processes.
+    const capped = try run(e, &.{ "--pids", "2", "--rc", "ls /bin | wc -l" });
+    defer capped.deinit();
+    try std.testing.expect(capped.code != 0);
+    const ok = try run(e, &.{ "--pids", "3", "--rc", "ls /bin | wc -l" });
+    defer ok.deinit();
+    try std.testing.expectEqual(0, ok.code);
+}
+
+test "M3: --cpus 1 still runs a pipeline" {
+    try pending();
+    const e = try env();
+    const r = try run(e, &.{ "--cpus", "1", "--rc", "echo one | cat | cat" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("one\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "M3: --ns replays a namespace file" {
+    try pending();
+    const e = try env();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = "bind /sys/lib /lib\n" });
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "ls", "-d", "/lib/acid" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("/lib/acid\n", r.out);
+    try std.testing.expectEqual(0, r.code);
 }

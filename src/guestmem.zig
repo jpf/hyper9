@@ -41,6 +41,26 @@ pub fn each(as: vmm.AddressSpace, va: u64, len: u64, ctx: anytype, comptime f: a
     return total;
 }
 
+/// The host slice backing all of guest [va, va+len), or null if it isn't
+/// one contiguous run of host memory (or isn't mapped).
+pub fn contiguous(as: vmm.AddressSpace, va: u64, len: u64) ?[]u8 {
+    if (va +% len < va) return null;
+    const s = spanAt(as, va, len) orelse return null;
+    return if (s.len == len) s else null;
+}
+
+/// Copies guest [va, va+dst.len) into `dst`.
+pub fn read(as: vmm.AddressSpace, va: u64, dst: []u8) Error!void {
+    var d = dst;
+    _ = each(as, va, dst.len, &d, struct {
+        fn f(x: *[]u8, src: []u8) Error!usize {
+            @memcpy(x.*[0..src.len], src);
+            x.* = x.*[src.len..];
+            return src.len;
+        }
+    }.f) catch return error.BadAddress;
+}
+
 /// The longest host slice starting at guest `va`, up to `len` bytes, that
 /// is contiguous on the host. It grows a page at a time and stops where the
 /// next page isn't mapped or isn't adjacent in host memory.
@@ -93,14 +113,7 @@ pub fn write(as: vmm.AddressSpace, va: u64, data: []const u8) Error!void {
 /// Reads a little-endian u64 from guest memory.
 pub fn readU64(as: vmm.AddressSpace, va: u64) Error!u64 {
     var b: [8]u8 = undefined;
-    var dst: []u8 = &b;
-    _ = each(as, va, 8, &dst, struct {
-        fn f(d: *[]u8, src: []u8) Error!usize {
-            @memcpy(d.*[0..src.len], src);
-            d.* = d.*[src.len..];
-            return src.len;
-        }
-    }.f) catch return error.BadAddress;
+    try read(as, va, &b);
     return std.mem.readInt(u64, &b, .little);
 }
 
@@ -160,6 +173,14 @@ test "each splits at mapping boundaries and checks the whole range first" {
     try testing.expectError(error.BadAddress, each(as, Fake.base + 2 * vmm.page_size - 4, 8, &c, Ctx.cb));
     try testing.expectEqual(@as(usize, 0), c.calls);
     try testing.expectError(error.BadAddress, each(as, std.math.maxInt(u64) - 2, 8, &c, Ctx.cb));
+}
+
+test "contiguous only covers one host run" {
+    var f: Fake = .{};
+    const as = fakeSpace(&f);
+    try testing.expectEqual(@as(usize, 16), contiguous(as, Fake.base, 16).?.len);
+    try testing.expect(contiguous(as, Fake.base + vmm.page_size - 4, 8) == null);
+    try testing.expect(contiguous(as, 0x1000, 8) == null);
 }
 
 test "write and readU64 across the boundary" {
