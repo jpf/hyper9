@@ -13,6 +13,7 @@ pub const policy = @import("policy.zig");
 pub const Policy = policy.Policy;
 pub const guestmem = @import("guestmem.zig");
 pub const syscall = @import("syscall.zig");
+pub const newns = @import("newns.zig");
 
 test {
     _ = aout;
@@ -23,4 +24,6 @@ test {
     _ = guestmem;
     _ = syscall;
     _ = policy;
+    _ = newns;
+    _ = @import("cpupool.zig");
 }

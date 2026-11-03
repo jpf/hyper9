@@ -10,7 +10,8 @@ pub const usage =
     \\           [--env name=value]... [--profile default|tight] [--sandbox DIR]
     \\           [--readable PATH]... [--writable PATH]... [--read-deny PATH]...
     \\           [--write none|scope|ephemeral|overlay] [--net disable|outbound|enable]
-    \\           [--memory SIZE] [--timeout DURATION] [--host-fs] [--host-cmd]
+    \\           [--memory SIZE] [--timeout DURATION] [--pids N] [--cpus N]
+    \\           [--ns FILE] [--host-fs] [--host-cmd]
     \\           [--strict] [--print] [--trace[=FILE]] [--dump-on-fault]
     \\           [--] program [args...]
     \\       hp9 [flags] --rc 'command' [args...]
@@ -39,6 +40,10 @@ pub const Config = struct {
     net: ?policy.NetMode = null,
     memory: ?u64 = null,
     timeout_ns: ?u64 = null,
+    pids: ?u32 = null,
+    cpus: ?u32 = null,
+    /// --ns: a namespace file, in newns syntax, replayed before the program.
+    ns: ?[]const u8 = null,
     host_fs: bool = false,
     host_cmd: bool = false,
     strict: bool = false,
@@ -125,6 +130,12 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
         } else if (value(args, &i, "--timeout")) |v| {
             c.timeout_ns = policy.parseDuration(v orelse return error.Usage) orelse return error.Usage;
             if (c.timeout_ns == 0) return error.Usage;
+        } else if (value(args, &i, "--pids")) |v| {
+            c.pids = try count(v);
+        } else if (value(args, &i, "--cpus")) |v| {
+            c.cpus = try count(v);
+        } else if (value(args, &i, "--ns")) |v| {
+            c.ns = v orelse return error.Usage;
         } else if (value(args, &i, "--rc")) |v| {
             c.rc = v orelse return error.Usage;
         } else {
@@ -146,6 +157,12 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
 
 fn flag(a: []const u8, comptime name: []const u8) bool {
     return std.mem.eql(u8, a, name);
+}
+
+/// A positive count, for --pids and --cpus.
+fn count(v: ?[]const u8) Error!u32 {
+    const n = std.fmt.parseInt(u32, v orelse return error.Usage, 10) catch return error.Usage;
+    return if (n == 0) error.Usage else n;
 }
 
 fn enumValue(comptime E: type, v: ?[]const u8) Error!E {
@@ -234,6 +251,19 @@ test "--sandbox and --rc" {
     try t.expectError(error.Usage, parse(a, &.{ "hp9", "--memory", "lots", "ls" }));
     try t.expectError(error.Usage, parse(a, &.{ "hp9", "--timeout", "0", "ls" }));
     try t.expectError(error.Usage, parse(a, &.{ "hp9", "--write", "maybe", "ls" }));
+}
+
+test "--pids, --cpus and --ns" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c = try parse(a, &.{ "hp9", "--pids", "32", "--cpus=2", "--ns", "ns", "rc" });
+    try t.expectEqual(@as(?u32, 32), c.pids);
+    try t.expectEqual(@as(?u32, 2), c.cpus);
+    try t.expectEqualStrings("ns", c.ns.?);
+    try t.expectError(error.Usage, parse(a, &.{ "hp9", "--pids", "0", "rc" }));
+    try t.expectError(error.Usage, parse(a, &.{ "hp9", "--cpus", "x", "rc" }));
+    try t.expectError(error.Usage, parse(a, &.{ "hp9", "--ns" }));
 }
 
 test "program kinds" {

@@ -410,6 +410,43 @@ pub const Vcpu = struct {
         v.s.ureg = u.*;
     }
 
+    pub fn getExtra(v: *Vcpu, x: *vmm.Extra) vmm.Error!void {
+        const e = v.s.engine;
+        switch (v.s.arch) {
+            .arm64 => {
+                for (&x.v, 0..) |*q, i| try check(uc.uc_reg_read(e, uc.UC_ARM64_REG_Q0 + @as(c_int, @intCast(i)), q));
+                try check(uc.uc_reg_read(e, uc.UC_ARM64_REG_FPCR, &x.fpcr));
+                try check(uc.uc_reg_read(e, uc.UC_ARM64_REG_FPSR, &x.fpsr));
+                try check(uc.uc_reg_read(e, uc.UC_ARM64_REG_TPIDR_EL0, &x.tls));
+            },
+            .amd64 => {
+                for (x.v[0..16], 0..) |*q, i| try check(uc.uc_reg_read(e, uc.UC_X86_REG_XMM0 + @as(c_int, @intCast(i)), q));
+                var mxcsr: u32 = 0;
+                try check(uc.uc_reg_read(e, uc.UC_X86_REG_MXCSR, &mxcsr));
+                x.fpcr = mxcsr;
+                try check(uc.uc_reg_read(e, uc.UC_X86_REG_FS_BASE, &x.tls));
+            },
+        }
+    }
+
+    pub fn setExtra(v: *Vcpu, x: *const vmm.Extra) vmm.Error!void {
+        const e = v.s.engine;
+        switch (v.s.arch) {
+            .arm64 => {
+                for (&x.v, 0..) |*q, i| try check(uc.uc_reg_write(e, uc.UC_ARM64_REG_Q0 + @as(c_int, @intCast(i)), q));
+                try check(uc.uc_reg_write(e, uc.UC_ARM64_REG_FPCR, &x.fpcr));
+                try check(uc.uc_reg_write(e, uc.UC_ARM64_REG_FPSR, &x.fpsr));
+                try check(uc.uc_reg_write(e, uc.UC_ARM64_REG_TPIDR_EL0, &x.tls));
+            },
+            .amd64 => {
+                for (x.v[0..16], 0..) |*q, i| try check(uc.uc_reg_write(e, uc.UC_X86_REG_XMM0 + @as(c_int, @intCast(i)), q));
+                const mxcsr: u32 = @truncate(x.fpcr);
+                try check(uc.uc_reg_write(e, uc.UC_X86_REG_MXCSR, &mxcsr));
+                try check(uc.uc_reg_write(e, uc.UC_X86_REG_FS_BASE, &x.tls));
+            },
+        }
+    }
+
     /// Safe from any thread. A kick before `run` makes the next run return
     /// `.interrupted` at once.
     pub fn kick(v: *Vcpu) void {

@@ -179,7 +179,9 @@ Each CLI invocation is one machine: one host process with one VM. Each Plan 9 pr
 
 **vCPU limits.** v1 is one vCPU per process. Measure each hypervisor's maximum early (`hv_vm_get_max_vcpu_count`, `KVM_CAP_MAX_VCPUS`, WHP's partition property). If a big tree hits the limit, release a process's vCPU while it is blocked in a long host syscall, keep its registers in the Proc, and reacquire a vCPU from a pool when it resumes. On HVF a vCPU is bound to its thread, so the pool has to be pool threads that run the guest on the process's behalf.
 
-Measured before M3 on an M3 Max (macOS 15.8.1, 14 cores): `hv_vm_get_max_vcpu_count` reports 64, and the 65th live `hv_vcpu_create` fails with `HV_NO_RESOURCES`. Destroyed vCPUs free their slots, and a create takes about 120 µs. A Unicorn engine has no limit but costs about 1.3 MiB of host memory and 0.3 ms to create. So on HVF 64 is a hard cap on *live* processes, not just running ones, and a pipeline of 65 stages or `mk -j` with many jobs reaches it. M3 therefore takes the pool approach above on HVF: a process holds a vCPU only while it runs guest code, and `--cpus` sets the pool size (at most 64).
+Measured before M3 on an M3 Max (macOS 15.8.1, 14 cores): `hv_vm_get_max_vcpu_count` reports 64, and the 65th live `hv_vcpu_create` fails with `HV_NO_RESOURCES`. Destroyed vCPUs free their slots, and a create takes about 120 µs. A Unicorn engine has no limit but costs about 1.3 MiB of host memory and 0.3 ms to create. So on HVF 64 is a hard cap on *live* processes, not just running ones, and a pipeline of 65 stages or `mk -j` with many jobs reaches it.
+
+M3's answer (`src/cpupool.zig`) is a hybrid. A process creates and owns its vCPU on its own thread, as before, while the machine owns fewer than the limit less a reserve of 8. Processes beyond that run guest code through a pool of 8 pool threads, each with a vCPU: the process thread hands its Ureg, FP/SIMD registers and thread pointer to a pool thread, which runs the guest to its next exit and hands them back. Kernel calls stay on the process's own thread, so pool threads never block in the kernel and the pool always makes progress. A handoff costs two thread wake-ups per syscall, so only the processes past the first 56 pay it. `--cpus` caps how many vCPUs run guest code at the same moment, owned or pooled, on every backend. The emulator has no vCPU limit, so every process owns an engine there.
 
 ## Kernel: drawterm `kern/` and the Zig seam
 
@@ -222,7 +224,7 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 **Boot sequence**
 
 1. The kernel boots once per host process, on its own thread (see Process model).
-2. For each machine, the namespace builder gives the first Proc a fresh Pgrp. It binds the root at `/`, the cwd and other allowed host paths from `#U`, and `#c`, `#p`, `#s`, `#d`, `#e`, `#|` and (unless the network is off) `#I` to their usual places. It binds the machine's console over `/dev/cons` and opens fds 0–2 on it. Then it sets the device mask: `#U` and `#C` always (unless `--host-fs` or `--host-cmd`), and `#I` when the network is off. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
+2. For each machine, the namespace builder gives the first Proc a fresh Pgrp. It binds the root at `/`, the cwd and other allowed host paths from `#U`, and `#c`, `#p`, `#s`, `#d`, `#e` and (unless the network is off) `#I` to their usual places. It binds the machine's console over `/dev/cons` and opens fds 0–2 on it. Then it sets the device mask: `#U` and `#C` always (unless `--host-fs` or `--host-cmd`), and `#I` when the network is off. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
 3. If the binary is given as a host path, it's loaded straight from the host. Otherwise it's looked up through the kernel along `$path`, so lookup works the same over 9P roots.
 4. The CLI runs the binary directly with the given argv. `--rc` runs `/bin/rc -c` on the argument instead, and `--ns file` runs `newns` with that file first.
 
@@ -274,7 +276,7 @@ Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths
 | `net.disable` | `#I` is masked in the init Pgrp (drawterm's `devmasked`), so the guest can't re-attach it | M2 |
 | `res.memory` | A cap on the guest-physical page allocator; exact, not a watchdog | M2 |
 | `proc.timeout` | A machine deadline; hard teardown in M2, a `hangup` note and grace period from M4 | M2, M4 |
-| `res.pids`, `res.cpu` | A Proc cap in `rfork`; a limit on concurrently running vCPUs | M3 |
+| `res.pids`, `res.cpu` | A cap on live processes in `rfork`; a cap on vCPUs running guest code at once | M3 |
 | `net.outbound` | devip refuses `announce` | M5 |
 | `net.allow` | devip checks each `connect` against dial-string patterns (`tcp!10.0.0.0/8!564`); an egress allowlist isobox can't offer | M5 |
 | `fs.write.ephemeral` | A ramfs union-bound with `bind -c` over writable paths; new files go to the ramfs and vanish on exit | M5 |
@@ -316,7 +318,7 @@ namespace:
   bind '#c' /dev
   bind -b '#y<id>' /dev
   bind -c '#e' /env
-  bind '#|' /fd
+  bind '#d' /fd
   bind '/arm64/bin' /bin
   bind -a '/rc/bin' /bin
   bind '#U/Users/me/src/proj' /mnt/term/cwd                ro
@@ -422,7 +424,7 @@ hp9 [hp9-flags]                       # interactive rc if stdin is a TTY, otherw
 | `--env name=value` (repeatable) | M2 | Sets a guest environment variable. The host environment isn't imported. |
 | `--cwd PATH` | M2 | The guest cwd. Defaults to `/mnt/term/cwd`, the host cwd bound into the guest |
 | `--rc 'cmd'` | M2 | See program resolution |
-| `--ns file` | M3 | See program resolution |
+| `--ns file` | M3 | Replays a namespace file (newns syntax: `bind`, `mount`, `unmount`, `cd`, `clear`, with `-a -b -c -C`) after the policy's namespace and before the program is looked up. It's a guest path, read as newns reads it, and `--print`'s namespace output replays as is. Failed operations are skipped, as in newns; a syntax error is exit 125. |
 | `--gfx` | M7 | Opens a host window and serves `/dev/draw`, `/dev/mouse` and `/dev/kbd` |
 | `--profile default\|tight` | M2 | Sets the sandbox defaults (see Sandbox policy). Explicit flags override it. |
 | `--readable PATH` (repeatable) | M2 | Binds a host path read-only at `/mnt/term/PATH` |
@@ -563,6 +565,8 @@ Record design changes as they are made using `- YYYY-MM-DD: <design change> (rea
 - 2026-11-02: M3 order: first the Proc record (parent, children, wait queue, segments, Egrp, and a pointer to the Zig process), kept in a table keyed by Proc in `src/kern/` like devenv's, rather than added to drawterm's `kern/dat.h`. That table then replaces devenv's own. Next `vmm.AddressSpace.unmap` and segments (text, data, bss, stack) with an eager copy for `rfork`, and a TLB flush whenever a vCPU's address space changes (`TODO(M3)` in `hvf.zig`; ASIDs only if the flush shows up in profiles). Then `rfork`, `exec`, `exits` and `await` with machine-local pids, then devdup at `/fd` and pipes, then the HVF vCPU pool, then `--pids`, `--cpus` and `--ns`. The cases named "M3: ..." in `tests/integration.zig` cover each step, and `zig build m3` runs them along with the demo. (The demo only needs rfork, exec, await and pipes; the pool and caps build on a working tree.)
 - 2026-11-03: Segments are Zig objects (`src/segment.zig`): text, data (data and bss as one segment, which brk moves) and stack, each a list of chunks of backend pages, attached to every address space that shares it and freed when the last detaches. The stack is no longer mapped whole: like 9front's, it starts with what the arguments need plus 64 KiB and grows down on faults, and at each syscall to cover the arguments, up to 16 MiB. brk grows the data segment's mapping ahead of the break, in steps of at least 64 KiB, and shrinking frees whole chunks above the break and zeroes the rest. A process's memory is freed when it exits. (rfork copies the stack eagerly, and copying 16 MiB per fork would make a pipeline of 80 processes need 1.3 GiB, more than the default `--memory`. `--memory 8m` is now enough for small programs, so the cap tests use 64 KiB.)
 - 2026-11-03: A machine run is a process tree: each guest process is a `Proc` in the machine's registry with its own kernel thread, address space, segments and vCPU, and every process runs the same exit loop. rfork and exec are decoded in `syscall.zig` but done in `machine.zig`, which owns processes. Pids are the machine's own, from 1, and set in each child's Tos. `Machine.run` returns when the first process exits, and then stops the rest as a timeout does (kick, interrupt, grace period). exec loads into a new address space and only replaces the old one once loading has succeeded, follows up to 8 levels of `#!`, and builds argv as 9front does. Until notes arrive in M4, a write to a closed pipe kills the writer with `sys: write on closed pipe`, as for a process with no handler. drawterm's `closefgrp` doesn't close the fds' channels (its kprocs never exit holding fds), so `src/kern/proc.c` uses 9front's, or a pipe's reader would never see EOF. (One loop for every process, and `Machine.run` keeps its contract.)
+- 2026-11-03: The HVF vCPU pool is a hybrid rather than a pool for every process: processes own vCPUs, created on their own threads, up to HVF's 64 less a reserve of 8, and only the processes past that share the 8 pooled vCPUs, handing their registers to pool threads for each run. `--cpus` becomes a cap on vCPUs running guest code at once, the same on every backend, rather than the pool size. vCPUs now carry the FP/SIMD registers, FPCR/FPSR and the thread pointer (`vmm.Extra`) across pooled runs and into rfork children; exec resets them. (A handoff costs two thread wake-ups per syscall, against 0.86 µs for an owned vCPU, so small trees, the common case, keep their speed.)
+- 2026-11-03: devdup (`#d`, `src/kern/devdup.c`) is ported from 9front with `procfdprint` from devproc, and bound at `/fd`; the policy had bound `#|` there. `--pids` caps live processes in rfork ("no procs"), `--ns` replays a newns file through `src/newns.zig`, and `res.pids` and `res.cpu` join the capabilities. The integration cases for a finished milestone are tagged `(M3)` in their names, which `zig build m3` selects, instead of the `M3: ` prefix that marks pending ones. (The `/fd` bind was a placeholder until devdup existed.)
 
 #### M4
 

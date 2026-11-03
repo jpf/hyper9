@@ -120,6 +120,24 @@ pub const Ureg = union(Arch) {
     }
 };
 
+/// User state beyond the Ureg that a process keeps across vCPUs: the
+/// FP/SIMD registers and the thread pointer. A process that moves between
+/// pooled vCPUs, or forks, carries it with it.
+pub const Extra = struct {
+    /// Q0-Q31 on arm64, XMM0-XMM15 on amd64 (the rest unused).
+    v: [32]u128 = @splat(0),
+    /// FPCR and FPSR on arm64; MXCSR in `fpcr` on amd64.
+    fpcr: u64 = 0,
+    fpsr: u64 = 0,
+    /// TPIDR_EL0 on arm64; FS base on amd64.
+    tls: u64 = 0,
+
+    /// The state at exec, with the MXCSR default on amd64.
+    pub fn initExec(arch: Arch) Extra {
+        return .{ .fpcr = if (arch == .amd64) 0x1f80 else 0 };
+    }
+};
+
 /// The native hypervisor backend for this host, if there is one.
 fn native() ?Kind {
     return if (have_hvf) .hvf else null;
@@ -275,6 +293,17 @@ pub const Vcpu = union(Kind) {
         switch (v.*) {
             inline else => |*p| p.setUreg(u),
         }
+    }
+    /// Reads the FP/SIMD registers and thread pointer.
+    pub fn getExtra(v: *Vcpu, x: *Extra) Error!void {
+        return switch (v.*) {
+            inline else => |*p| p.getExtra(x),
+        };
+    }
+    pub fn setExtra(v: *Vcpu, x: *const Extra) Error!void {
+        return switch (v.*) {
+            inline else => |*p| p.setExtra(x),
+        };
     }
     /// Makes `run` return `.interrupted` soon. Safe to call from any thread.
     pub fn kick(v: *Vcpu) void {

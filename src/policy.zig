@@ -48,6 +48,11 @@ pub const Policy = struct {
     memory: ?u64 = null,
     /// Machine deadline; null means the profile's default.
     timeout_ns: ?u64 = null,
+    /// Cap on live processes in the machine; null means unlimited.
+    pids: ?u32 = null,
+    /// Cap on vCPUs running guest code at once; null means the backend's
+    /// limit (64 on HVF) or, on the emulator, unlimited.
+    cpus: ?u32 = null,
     /// Whether the cwd is writable; null means the profile's default.
     /// `--sandbox` sets it.
     cwd_writable: ?bool = null,
@@ -98,7 +103,9 @@ pub const Capability = enum {
     @"net.disable",
     @"net.outbound",
     @"proc.timeout",
+    @"res.cpu",
     @"res.memory",
+    @"res.pids",
 
     /// Whether this build can enforce it.
     pub fn enforceable(c: Capability) bool {
@@ -117,6 +124,8 @@ pub const Plan = struct {
     net: NetMode,
     memory: ?u64,
     timeout_ns: ?u64,
+    pids: ?u32,
+    cpus: ?u32,
     /// Device letters masked after the namespace is built.
     devmask: []const u8,
     binds: []const Bind,
@@ -149,6 +158,8 @@ pub const Plan = struct {
         try w.print("limits:   write={t} net={t}", .{ p.write, p.net });
         if (p.memory) |m| try w.print(" memory={f}", .{fmtSize(m)});
         if (p.timeout_ns) |d| try w.print(" timeout={f}", .{fmtDuration(d)});
+        if (p.pids) |n| try w.print(" pids={d}", .{n});
+        if (p.cpus) |n| try w.print(" cpus={d}", .{n});
         try w.writeAll("\n");
         try w.writeAll("devmask: ");
         for (p.devmask) |d| try w.print(" #{c}", .{d});
@@ -262,7 +273,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     try binds.append(arena, .{ .from = "#c", .to = "/dev", .optional = true });
     try binds.append(arena, .{ .from = "#y", .to = "/dev", .flag = .before, .console = true });
     try binds.append(arena, .{ .from = "#e", .to = "/env", .create = true, .optional = true });
-    try binds.append(arena, .{ .from = "#|", .to = "/fd", .optional = true });
+    try binds.append(arena, .{ .from = "#d", .to = "/fd", .optional = true });
     if (net != .disable) try binds.append(arena, .{ .from = "#I", .to = "/net", .optional = true });
     if (in.root != null) {
         try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "/{t}/bin", .{in.arch}), .to = "/bin", .optional = true });
@@ -341,6 +352,8 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     if (pol.read_deny.len > 0) enforces.insert(.@"fs.read.deny");
     if (net == .disable) enforces.insert(.@"net.disable");
     if (pol.memory != null) enforces.insert(.@"res.memory");
+    if (pol.pids != null) enforces.insert(.@"res.pids");
+    if (pol.cpus != null) enforces.insert(.@"res.cpu");
     const timeout = pol.timeout_ns orelse (if (tight) tight_timeout_ns else null);
     if (timeout != null) enforces.insert(.@"proc.timeout");
 
@@ -364,6 +377,8 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         .net = net,
         .memory = pol.memory,
         .timeout_ns = timeout,
+        .pids = pol.pids,
+        .cpus = pol.cpus,
         .devmask = devmask.items,
         .binds = binds.items,
         .rules = rules.items,

@@ -101,7 +101,7 @@ const kern_flags_win32 = kern_flags ++ [_][]const u8{ "-DWINDOWS", "-DUNICODE" }
 /// environments; SDKROOT (set by scripts/env.sh) is used when present.
 /// Runs tests/integration.zig against the hp9 binary. `filters` selects
 /// cases by name; with `pending`, cases for a milestone not yet done (named
-/// "M3: ..." and so on) run instead of skipping.
+/// "M4: ..." and so on) run instead of skipping.
 fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, hp9_bin: []const u8, root: []const u8, backends: []const u8, pending: bool) *std.Build.Step.Run {
     const t = b.addTest(.{
         .root_module = b.createModule(.{
@@ -282,7 +282,7 @@ pub fn build(b: *std.Build) void {
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "fscheck.c" },
+        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "fscheck.c" },
         .flags = flags,
     });
     for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
@@ -426,12 +426,12 @@ pub fn build(b: *std.Build) void {
     const backend_list = if (backends.items.len > 0) backends.items else "auto";
 
     // Runs real binaries through the hp9 CLI; skipped without a root tree.
-    // Cases named "M3: ..." skip here until M3 makes them pass; zig build m3
-    // runs only those.
+    // Cases for the milestone in progress ("M4: ...") skip here until it's
+    // done. zig build m3 runs the M3 cases, tagged "(M3" in their names.
     const run_integration = addIntegration(b, optimize, &.{}, hp9_bin, root, backend_list, false);
     run_integration.step.dependOn(signed_step);
     b.step("integration", "Run real 9front binaries from the root tree through hp9").dependOn(&run_integration.step);
-    const run_m3_cases = addIntegration(b, optimize, &.{"M3: "}, hp9_bin, root, backend_list, true);
+    const run_m3_cases = addIntegration(b, optimize, &.{"(M3"}, hp9_bin, root, backend_list, false);
     run_m3_cases.step.dependOn(signed_step);
     m3_step.dependOn(&run_m3_cases.step);
 

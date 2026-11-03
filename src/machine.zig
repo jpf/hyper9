@@ -16,6 +16,8 @@ const kern = @import("kern.zig");
 const syscall = @import("syscall.zig");
 const policy = @import("policy.zig");
 const segment = @import("segment.zig");
+const newns = @import("newns.zig");
+const cpupool = @import("cpupool.zig");
 
 pub const Status = union(enum) {
     /// The `exits` string; empty means success.
@@ -68,6 +70,15 @@ pub const Machine = struct {
         trace: ?*std.Io.Writer = null,
         /// On a fault, print the Ureg and a symbolized PC to `stdio.err`.
         dump_on_fault: bool = false,
+        /// A namespace file (newns syntax, src/newns.zig) to replay in the
+        /// first process after the policy's namespace is built and before
+        /// the program is looked up. It's a guest path, read as newns
+        /// would, so a relative one is in the guest's cwd.
+        ns: ?[]const u8 = null,
+        /// How many processes may own a vCPU before the rest share the
+        /// pool (src/cpupool.zig); null means the backend's limit less the
+        /// pool. For tests of the pool.
+        owned_vcpus: ?u32 = null,
         stdio: Stdio,
     };
 
@@ -158,7 +169,12 @@ pub const Machine = struct {
         // Heap-allocated, with its own copy of the machine, so a stuck
         // process never refers to the caller's Machine.
         const job = try m.gpa.create(Job);
-        job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = m.opts.stdio.in, .out = m.opts.stdio.out, .err = m.opts.stdio.err } };
+        const pool = cpupool.Pool.init(m.gpa, m.io, m.backend, m.plan.cpus, m.opts.owned_vcpus) catch |e| {
+            m.gpa.destroy(job);
+            return e;
+        };
+        job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = m.opts.stdio.in, .out = m.opts.stdio.out, .err = m.opts.stdio.err }, .pool = pool };
+        job.pool.gpa = m.gpa;
         job.m = &job.mc;
         job.mc.err_msg = "";
         job.con_id = kern.addConsole(&job.con) catch |e| {
@@ -167,13 +183,18 @@ pub const Machine = struct {
         };
         const first = job.newProc() catch |e| {
             kern.removeConsole(job.con_id);
+            job.pool.deinit();
             m.gpa.destroy(job);
-            return e;
+            return switch (e) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.TooManyProcs => unreachable, // the cap is at least 1
+            };
         };
         kern.spawn("hp9", Proc, firstMain, first) catch |e| {
             job.dropProc(first);
             kern.removeConsole(job.con_id);
             job.procs.deinit(m.gpa);
+            job.pool.deinit();
             m.gpa.destroy(job);
             return e;
         };
@@ -198,6 +219,7 @@ pub const Machine = struct {
         kern.removeConsole(job.con_id);
         defer {
             job.procs.deinit(m.gpa);
+            job.pool.deinit();
             m.gpa.destroy(job);
         }
         if (timed_out) return .{ .killed = timeout_note };
@@ -236,25 +258,29 @@ pub const Machine = struct {
         timed_out: std.atomic.Value(bool) = .init(false),
         /// Set to end every process; exit loops check it after every exit.
         stopping: std.atomic.Value(bool) = .init(false),
-        /// Guards `procs`, `next_pid` and each Proc's `kproc` and `vcpu`.
+        /// Guards `procs`, `next_pid` and each Proc's `kproc` and `lease`.
         lock: std.atomic.Mutex = .unlocked,
         /// Live processes. A process is only made by a live one, so once
         /// this is empty it stays empty.
         procs: std.ArrayList(*Proc) = .empty,
         next_pid: u32 = 1,
         trace_lock: std.atomic.Mutex = .unlocked,
+        /// vCPUs for the processes.
+        pool: cpupool.Pool,
 
         fn lockSpin(j: *Job) void {
             while (!j.lock.tryLock()) std.atomic.spinLoopHint();
         }
 
-        /// Allocates and registers a process with the next pid.
-        fn newProc(j: *Job) error{OutOfMemory}!*Proc {
+        /// Allocates and registers a process with the next pid. Fails with
+        /// TooManyProcs at the policy's `--pids` cap.
+        fn newProc(j: *Job) error{ OutOfMemory, TooManyProcs }!*Proc {
             const gpa = j.m.gpa;
             const p = try gpa.create(Proc);
             errdefer gpa.destroy(p);
             j.lockSpin();
             defer j.lock.unlock();
+            if (j.m.plan.pids) |cap| if (j.procs.items.len >= cap) return error.TooManyProcs;
             try j.procs.append(gpa, p);
             p.* = .{ .job = j, .pid = j.next_pid };
             j.next_pid += 1;
@@ -279,7 +305,7 @@ pub const Machine = struct {
             j.lockSpin();
             defer j.lock.unlock();
             for (j.procs.items) |p| {
-                if (p.vcpu) |v| v.kick();
+                if (p.lease) |l| l.kick();
                 if (p.kproc) |k| kern.interrupt(k);
             }
         }
@@ -304,13 +330,15 @@ pub const Machine = struct {
         pid: u32,
         /// Set on the process's own thread; guarded by `job.lock`.
         kproc: ?*kern.Proc = null,
-        vcpu: ?*vmm.Vcpu = null,
-        vcpu_store: vmm.Vcpu = undefined,
+        /// How it runs guest code, while it does.
+        lease: ?*cpupool.Lease = null,
+        lease_store: cpupool.Lease = undefined,
         as: ?vmm.AddressSpace = null,
         segs: segment.Segs = .{},
         sys: syscall.Process = undefined,
         /// Registers to start from.
         ureg: vmm.Ureg = undefined,
+        extra: vmm.Extra = .{},
         /// The Tos address, for the pid at fork.
         tos: u64 = 0,
         /// The a.out, for symbolizing faults with dump_on_fault.
@@ -323,10 +351,10 @@ pub const Machine = struct {
             p.kproc = kern.self();
         }
 
-        fn setVcpu(p: *Proc, v: ?*vmm.Vcpu) void {
+        fn setLease(p: *Proc, l: ?*cpupool.Lease) void {
             p.job.lockSpin();
             defer p.job.lock.unlock();
-            p.vcpu = v;
+            p.lease = l;
         }
 
         fn initSys(p: *Proc) void {
@@ -353,9 +381,9 @@ pub const Machine = struct {
             const j = p.job;
             const gpa = j.m.gpa;
             const io = j.m.io;
-            if (p.vcpu) |v| {
-                p.setVcpu(null);
-                v.destroy();
+            if (p.lease) |l| {
+                p.setLease(null);
+                l.release();
             }
             if (p.as) |as| {
                 p.segs.release(as);
@@ -402,6 +430,13 @@ pub const Machine = struct {
         const j = p.job;
         if (j.stopping.load(.acquire)) return .{ .killed = timeout_note };
         try m.buildNamespace(j.con_id);
+        if (m.opts.ns) |path| {
+            var buf: [1024]u8 = undefined;
+            const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return m.fail("--ns: name too long", .{});
+            const text = readFile(m.gpa, z) catch return m.fail("--ns {s}: {s}", .{ path, kern.errstr() });
+            defer m.gpa.free(text);
+            try m.replayNamespace(text, j.con_id);
+        }
 
         var arena: std.heap.ArenaAllocator = .init(m.gpa);
         defer arena.deinit();
@@ -429,6 +464,7 @@ pub const Machine = struct {
         p.segs = img.segs;
         p.tos = img.tos;
         p.ureg = .initExec(img.arch, img.entry, img.sp, img.tos);
+        p.extra = .initExec(img.arch);
         p.keepImage(bytes);
         p.initSys();
         return m.loop(p);
@@ -459,14 +495,11 @@ pub const Machine = struct {
     /// until it exits or dies. Runs on the process's thread.
     fn loop(m: *Machine, p: *Proc) RunError!Status {
         const j = p.job;
-        p.vcpu_store = m.backend.createVcpu() catch |e| switch (e) {
-            // HVF's 64 live vCPUs, until processes share a pool of them.
-            error.HypervisorFailed => return .{ .killed = "hp9: no vcpus" },
-            else => return e,
-        };
-        p.setVcpu(&p.vcpu_store);
-        const vcpu = &p.vcpu_store;
+        try j.pool.acquire(&p.lease_store);
+        p.setLease(&p.lease_store);
+        const vcpu = &p.lease_store;
         try vcpu.setAddressSpace(p.as.?);
+        vcpu.setExtra(&p.extra);
         var u = p.ureg;
         vcpu.setUreg(&u);
         while (true) {
@@ -485,6 +518,7 @@ pub const Machine = struct {
                     },
                     .killed => |s| return .{ .killed = s },
                     .rfork => |flags| {
+                        try vcpu.getExtra(&p.extra);
                         const r: i64 = if (m.fork(p, flags, &u)) |pid| pid else |_| -1;
                         p.sys.traceRet("rfork", r);
                         u.setReturn(@bitCast(r));
@@ -495,6 +529,7 @@ pub const Machine = struct {
                         if (m.exec(p, vcpu, e)) |_| {
                             p.sys.traceRet("exec", 0);
                             u = p.ureg;
+                            vcpu.setExtra(&p.extra);
                         } else |_| {
                             p.sys.traceRet("exec", -1);
                             u.setReturn(@bitCast(@as(i64, -1)));
@@ -525,6 +560,7 @@ pub const Machine = struct {
             return 0;
         }
         const j = p.job;
+        // 9front's error when it runs out of procs.
         const c = j.newProc() catch return failWith("no procs");
         const cas = m.backend.newAddressSpace() catch {
             j.dropProc(c);
@@ -540,6 +576,7 @@ pub const Machine = struct {
         c.tos = p.tos;
         c.ureg = u.*;
         c.ureg.setReturn(0);
+        c.extra = p.extra;
         if (p.image) |b| c.image = m.gpa.dupe(u8, b) catch null;
         c.initSys();
         c.sys.notify = p.sys.notify;
@@ -566,7 +603,7 @@ pub const Machine = struct {
     /// replaces the process's memory, closes its close-on-exec fds and
     /// resets its registers. On error the process is unchanged and the
     /// error string is set.
-    fn exec(m: *Machine, p: *Proc, vcpu: *vmm.Vcpu, e: syscall.Exec) error{Failed}!void {
+    fn exec(m: *Machine, p: *Proc, vcpu: *cpupool.Lease, e: syscall.Exec) error{Failed}!void {
         var arena_state: std.heap.ArenaAllocator = .init(m.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -629,6 +666,7 @@ pub const Machine = struct {
         p.sys.as = nas;
         p.sys.notify = 0;
         p.ureg = .initExec(img.arch, img.entry, img.sp, img.tos);
+        p.extra = .initExec(img.arch);
         p.keepImage(bytes);
         kern.closeExec();
         var name_buf: [kern.ERRMAX]u8 = undefined;
@@ -710,6 +748,50 @@ pub const Machine = struct {
         // Existing binds keep working, but masked devices can't be attached
         // again to reach more of the host.
         if (m.plan.devmask.len > 0) kern.devmask(try std.fmt.bufPrintZ(&buf, "{s}", .{m.plan.devmask}));
+    }
+
+    /// Runs a namespace file's operations, as newns does: a failed bind or
+    /// mount is skipped, and only a syntax error fails the run. The device
+    /// mask is already set, so it can't reach masked devices.
+    fn replayNamespace(m: *Machine, text: []const u8, con_id: u32) RunError!void {
+        var arena_state: std.heap.ArenaAllocator = .init(m.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        var line: usize = 0;
+        const ops = newns.parse(arena, text, &line) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Syntax => return m.fail("--ns: line {d}: syntax error", .{line}),
+        };
+        for (ops) |op| switch (op) {
+            .bind => |b| kern.bind(try m.nsPath(arena, b.from, con_id), try m.nsPath(arena, b.to, con_id), mountFlag(b.flag)) catch {},
+            .mount => |mt| {
+                const fd = kern.open(try m.nsPath(arena, mt.file, con_id), kern.ORDWR) catch continue;
+                defer kern.close(fd) catch {};
+                kern.mount(fd, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch {};
+            },
+            .unmount => |u| kern.unmount(if (u.from) |f| try m.nsPath(arena, f, con_id) else null, try m.nsPath(arena, u.to, con_id)) catch {},
+            .cd => |d| kern.chdir(try m.nsPath(arena, d, con_id)) catch {},
+            // newns's rfork(RFCNAMEG): an empty namespace, keeping the mask.
+            .clear => kern.rfork(kern.RF.CNAMEG) catch {},
+        };
+    }
+
+    /// A namespace-file path, with --print's `<id>` console placeholder
+    /// filled in.
+    fn nsPath(_: *Machine, arena: std.mem.Allocator, p: []const u8, con_id: u32) RunError![:0]const u8 {
+        if (std.mem.indexOf(u8, p, "<id>")) |i| return std.fmt.allocPrintSentinel(arena, "{s}{d}{s}", .{ p[0..i], con_id, p[i + 4 ..] }, 0);
+        return arena.dupeZ(u8, p);
+    }
+
+    fn mountFlag(f: newns.Flag) c_int {
+        var flag: c_int = switch (f.order) {
+            .repl => kern.MREPL,
+            .before => kern.MBEFORE,
+            .after => kern.MAFTER,
+        };
+        if (f.create) flag |= kern.MCREATE;
+        if (f.cache) flag |= kern.MCACHE;
+        return flag;
     }
 
     fn setEnv(m: *Machine) RunError!void {

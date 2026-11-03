@@ -441,3 +441,74 @@ test "segments: releasing a process's segments frees its memory" {
         }
     }.f);
 }
+
+test "pooled vCPUs carry FP state, the thread pointer and fork across processes" {
+    // Forks four times (16 processes), then each sets d8 and TPIDR_EL0 from
+    // its Tos pid and makes 2000 syscalls, each one a fresh trip through
+    // the shared pool when no vCPUs can be owned, so processes keep landing
+    // on vCPUs others last used. Each checks both registers at the end, and
+    // faults if either is wrong.
+    const code = words(&.{
+        0xaa0003f7, // mov  x23, x0            Tos
+        0xd10083ff, // sub  sp, sp, #32
+        0xd2800098, // mov  x24, #4
+        // fork:
+        0xd2800281, // mov  x1, #0x14          RFPROC|RFFDG
+        0xf90007e1, // str  x1, [sp, #8]
+        0xd2800260, // mov  x0, #19            RFORK
+        0xd4000001, // svc  #0
+        0xf1000718, // subs x24, x24, #1
+        0x54ffff61, // b.ne fork
+        0xb94042f4, // ldr  w20, [x23, #64]    Tos.pid
+        0x91019294, // add  x20, x20, #100
+        0x9e670288, // fmov d8, x20
+        0xd51bd054, // msr  tpidr_el0, x20
+        0xd280fa15, // mov  x21, #2000
+        // loop:
+        0xf90007ff, // str  xzr, [sp, #8]
+        0xd2800220, // mov  x0, #17            SLEEP(0)
+        0xd4000001, // svc  #0
+        0xf10006b5, // subs x21, x21, #1
+        0x54ffff81, // b.ne loop
+        0x9e660116, // fmov x22, d8
+        0xeb1402df, // cmp  x22, x20
+        0x540000c1, // b.ne bad
+        0xd53bd056, // mrs  x22, tpidr_el0
+        0xeb1402df, // cmp  x22, x20
+        0x54000061, // b.ne bad
+        0xf90007ff, // str  xzr, [sp, #8]      exits(nil)
+        0x14000002, // b    exit
+        // bad:
+        0xf9400000, // ldr  x0, [x0]           x0 is 0: a fault kills it
+        // exit:
+        0xd2800100, // mov  x0, #8             EXITS
+        0xd4000001, // svc  #0
+    });
+    const bytes = try image(std.testing.allocator, .arm64, &code);
+    defer std.testing.allocator.free(bytes);
+    const gpa = std.testing.allocator;
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| for ([_]u32{ 0, 1 }) |own| {
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        var m = hp9.Machine.init(gpa, std.testing.io, .{
+            .backend = kind,
+            .arch = .arm64,
+            .owned_vcpus = own,
+            .stdio = .{ .out = &out.writer, .err = &out.writer },
+        }) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
+            else => return e,
+        };
+        defer m.deinit();
+        const status = try m.run(.{ .bytes = bytes }, &.{"t"});
+        errdefer std.debug.print("backend {t}, owned_vcpus {d}\n", .{ kind, own });
+        var sb: [300]u8 = undefined;
+        try std.testing.expectEqualStrings("exited ", switch (status) {
+            .exited => |t| try std.fmt.bufPrint(&sb, "exited {s}", .{t}),
+            .killed => |t| try std.fmt.bufPrint(&sb, "killed {s}", .{t}),
+        });
+        ran += 1;
+    };
+    if (ran == 0) return error.SkipZigTest;
+}

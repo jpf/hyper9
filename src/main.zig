@@ -72,6 +72,8 @@ pub fn main(init: std.process.Init) !u8 {
         .net = cfg.net,
         .memory = cfg.memory,
         .timeout_ns = cfg.timeout_ns,
+        .pids = cfg.pids,
+        .cpus = cfg.cpus,
         .cwd_writable = if (cfg.sandbox != null) true else null,
         .host_fs = cfg.host_fs,
         .host_cmd = cfg.host_cmd,
@@ -129,6 +131,7 @@ pub fn main(init: std.process.Init) !u8 {
     opts.env = env.items;
     opts.trace = if (cfg.trace) |t| (if (t.len > 0) &trace_w.interface else &err_w.interface) else null;
     opts.dump_on_fault = cfg.dump_on_fault;
+    opts.ns = cfg.ns;
     opts.stdio = .{ .in = &in.interface, .out = &out.interface, .err = &err_w.interface };
     var machine = hp9.Machine.init(init.gpa, io, opts) catch |err| {
         const a: hp9.vmm.Arch = arch orelse hp9.vmm.host_arch orelse .arm64;

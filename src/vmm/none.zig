@@ -62,4 +62,10 @@ pub const Vcpu = struct {
     pub fn kick(_: *Vcpu) void {
         unreachable;
     }
+    pub fn getExtra(_: *Vcpu, _: *vmm.Extra) vmm.Error!void {
+        unreachable;
+    }
+    pub fn setExtra(_: *Vcpu, _: *const vmm.Extra) vmm.Error!void {
+        unreachable;
+    }
 };

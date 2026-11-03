@@ -34,14 +34,15 @@ zig build test     # unit tests, and the backend tests on every backend built in
 zig build kern     # compiles drawterm's kern and the libraries it uses
 zig build m0       # M0 demo: hp9 ./hello must print "hello"
 zig build m2       # M2 demos: hp9 /bin/cat /lib/namespace, and a write under --profile=tight fails
-zig build m3       # M3 demo, hp9 --rc 'ls /bin | wc -l', and the M3 integration cases (fails until M3 is done)
+zig build m3       # M3 demo, hp9 --rc 'ls /bin | wc -l', and the M3 integration cases
 zig build integration  # real 9front binaries from the root tree through the hp9 CLI
 ```
 
 The M2 and M3 demos and the integration tests use the root tree from
 `scripts/mkroot.py`, or `-Droot=DIR`. The integration tests skip when there's
-no tree. Cases for the milestone in progress are named `M3: ...` and skip in
-`zig build integration` and `zig build test`; `zig build m3` runs them.
+no tree. Cases for the milestone in progress are named `M4: ...` and so on, and
+skip in `zig build integration` and `zig build test`. Cases for a finished
+milestone are tagged `(M3)` and so on; `zig build m3` runs the M3 ones.
 
 The emulator backend links the prebuilt Unicorn (GPLv2) fetched by
 `scripts/fetch.sh`, so it's opt-in and for development and CI only:
@@ -82,8 +83,12 @@ when hp9 itself fails, 126 when the program isn't a runnable a.out and 127
 when it isn't found.
 
 Flags: `--backend auto|hvf|kvm|whp|emu`, `--root DIR`, `--cwd DIR`, `--env
-name=value` (repeatable), `--rc 'cmd'`, `--trace[=FILE]`, `--dump-on-fault`,
-and the sandbox flags below. `--rc` runs `/bin/rc -c`; pipelines and subprocesses work.
+name=value` (repeatable), `--rc 'cmd'`, `--ns FILE`, `--trace[=FILE]`,
+`--dump-on-fault`, and the sandbox flags below. `--rc` runs `/bin/rc -c`.
+`--ns FILE` replays a namespace file in newns syntax (`bind`, `mount`,
+`unmount`, `cd`, `clear`) before the program runs; it's a guest path, so a
+relative one is in the guest's cwd, and `--print`'s namespace section can be
+saved and replayed as is.
 
 `--backend auto` (the default) uses the host hypervisor and otherwise falls
 back to the emulator with a warning. The emulator also runs amd64 binaries on
@@ -92,8 +97,10 @@ arm64 hosts, for testing; HVF runs arm64 only.
 Syscalls go through drawterm's kern: open, create, close, dup, pread, pwrite,
 seek, stat, fstat, wstat, fwstat, fd2path, bind, chdir, remove, errstr, brk_,
 sleep, notify, exits, and for process trees rfork, exec (including `#!`
-scripts), await and pipe. Each process has its own thread and vCPU; on HVF a
-tree can't yet hold more than 64 live processes. `--trace` prints one line per syscall
+scripts), await and pipe; `/fd` is devdup. Each process has its own kernel
+thread and normally its own vCPU. HVF allows 64 vCPUs, so past 56 processes
+the rest share a pool of 8 vCPUs, which costs a thread handoff per syscall.
+`--trace` prints one line per syscall
 to stderr, or to a file with `--trace=FILE`. `--dump-on-fault` prints the
 registers and the symbolized PC when the guest faults.
 
@@ -111,6 +118,7 @@ hp9 --sandbox ./work touch f         # tight, with only ./work bound, writable
 hp9 --profile=tight --writable ./out touch out/x
 hp9 --readable ~/src --read-deny ~/src/.env ls /mnt/term/$HOME/src
 hp9 --memory 256m --timeout 30s ls   # resource caps
+hp9 --pids 32 --cpus 2 --rc 'mk'     # at most 32 processes, 2 running at once
 hp9 --print --profile=tight mk       # print the compiled plan and exit
 hp9 --strict --write=overlay mk      # exit 2: not enforceable before M10
 ```
@@ -123,6 +131,7 @@ hp9 --strict --write=overlay mk      # exit 2: not enforceable before M10
 | `--write none\|scope` | Deny all writes, or allow them only in writable paths (`ephemeral` and `overlay` come in M5 and M10, and deny writes until then) |
 | `--net disable\|enable` | Mask `#I`, or leave it (`outbound` comes in M5) |
 | `--memory SIZE`, `--timeout DURATION` | Cap guest memory (`512m`); stop the machine after a deadline (`30s`, `1m`) |
+| `--pids N`, `--cpus N` | Cap live processes (rfork fails with "no procs"); cap vCPUs running guest code at once |
 | `--host-fs`, `--host-cmd` | Show the whole host read-only at `/mnt/term`; unmask devcmd |
 | `--print`, `--strict` | Print the plan and exit; refuse (exit 2) capabilities this build can't enforce |
 

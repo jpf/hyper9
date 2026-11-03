@@ -24,6 +24,7 @@ pub const MREPL = 0;
 pub const MBEFORE = 1;
 pub const MAFTER = 2;
 pub const MCREATE = 4;
+pub const MCACHE = 0x10;
 pub const ERRMAX = 128;
 
 /// The C side, or stubs where kern isn't built so hp9 still links.
@@ -107,6 +108,12 @@ const c_stub = struct {
     fn sysbind(_: [*:0]const u8, _: [*:0]const u8, _: c_int) c_int {
         return -1;
     }
+    fn sysmount(_: c_int, _: c_int, _: [*:0]const u8, _: c_int, _: [*:0]const u8) c_int {
+        return -1;
+    }
+    fn sysunmount(_: ?[*:0]const u8, _: [*:0]const u8) c_int {
+        return -1;
+    }
     fn syschdir(_: [*:0]const u8) c_int {
         return -1;
     }
@@ -161,6 +168,8 @@ const c_real = struct {
     extern fn syspwrite(fd: c_int, buf: [*]const u8, n: c_int, off: i64) c_int;
     extern fn sysseek(fd: c_int, off: i64, whence: c_int) i64;
     extern fn sysbind(old: [*:0]const u8, new: [*:0]const u8, flag: c_int) c_int;
+    extern fn sysmount(fd: c_int, afd: c_int, new: [*:0]const u8, flag: c_int, spec: [*:0]const u8) c_int;
+    extern fn sysunmount(old: ?[*:0]const u8, new: [*:0]const u8) c_int;
     extern fn syschdir(name: [*:0]const u8) c_int;
     extern fn sysdup(fd0: c_int, fd1: c_int) c_int;
     extern fn sysstat(name: [*:0]const u8, buf: [*]u8, n: c_int) c_int;
@@ -410,6 +419,16 @@ pub fn seek(fd: u31, off: i64, whence: c_int) Error!i64 {
 
 pub fn bind(old: [*:0]const u8, new: [*:0]const u8, flag: c_int) Error!void {
     _ = try check(c.sysbind(old, new, flag));
+}
+
+/// Mounts the 9P server on `fd` at `new`.
+pub fn mount(fd: u31, new: [*:0]const u8, flag: c_int, spec: [*:0]const u8) Error!void {
+    _ = try check(c.sysmount(fd, -1, new, flag, spec));
+}
+
+/// Undoes binds and mounts on `new`: only `old`'s, or all with null.
+pub fn unmount(old: ?[*:0]const u8, new: [*:0]const u8) Error!void {
+    _ = try check(c.sysunmount(old, new));
 }
 
 pub fn chdir(name: [*:0]const u8) Error!void {

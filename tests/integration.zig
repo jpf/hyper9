@@ -7,10 +7,11 @@
 //! ones built in) through the environment. Every case runs on each backend
 //! that can run arm64 here. Without a root tree, the tests are skipped.
 //!
-//! Cases named "M3: ..." (and so on) are for a milestone in progress. They
-//! call `pending`, which skips them unless HP9_TEST_PENDING is set, as
-//! `zig build m3` does; when the milestone is done, drop the prefix and the
-//! call.
+//! Cases named "M4: ..." (and so on) are for a milestone in progress. They
+//! call `pending`, which skips them unless HP9_TEST_PENDING is set; when
+//! the milestone is done, drop the prefix and the call. Cases for a done
+//! milestone are tagged "(M3)" and the like, so `zig build m3` can select
+//! them.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -246,7 +247,6 @@ test "default profile: the cwd is writable and the root isn't" {
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
-    // rc can't fork until M3, so files are made with touch.
     const r = try run(e, &.{ "--cwd", s.path, "touch", "f" });
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
@@ -389,8 +389,7 @@ test "renames and case can't get around the rules" {
     try std.testing.expectEqualStrings("secret\n", data);
 }
 
-// M3: process trees. The cases still named "M3: ..." skip until M3 is
-// done (see `pending`).
+// Process trees (M3).
 
 test "ls /bin | wc -l (M3 demo)" {
     const e = try env();
@@ -403,7 +402,7 @@ test "ls /bin | wc -l (M3 demo)" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "a pipeline reads the guest's stdin" {
+test "a pipeline reads the guest's stdin (M3)" {
     const e = try env();
     const r = try runIn(e, &.{ "--rc", "sed s/h/j/ | wc -c" }, "hello\n");
     defer r.deinit();
@@ -411,7 +410,7 @@ test "a pipeline reads the guest's stdin" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "exit status comes back through await" {
+test "exit status comes back through await (M3)" {
     const e = try env();
     const ok = try run(e, &.{ "--rc", "test -e /lib/namespace" });
     defer ok.deinit();
@@ -425,7 +424,7 @@ test "exit status comes back through await" {
     try std.testing.expectEqual(0, st.code);
 }
 
-test "exec replaces the process" {
+test "exec replaces the process (M3)" {
     const e = try env();
     const r = try run(e, &.{ "--rc", "exec echo replaced; echo not reached" });
     defer r.deinit();
@@ -433,15 +432,14 @@ test "exec replaces the process" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "M3: /fd is devdup" {
-    try pending();
+test "/fd is devdup (M3)" {
     const e = try env();
     const r = try run(e, &.{ "--rc", "echo through fd | cat /fd/0" });
     defer r.deinit();
     try std.testing.expectEqualStrings("through fd\n", r.out);
 }
 
-test "many processes, one after another" {
+test "many processes, one after another (M3)" {
     const e = try env();
     // More than HVF's 64 vCPUs in total, so each exit has to free its vCPU.
     const r = try run(e, &.{ "--rc", "for(i in `{seq 100}) echo $i | wc -l >/dev/null; echo done" });
@@ -450,8 +448,7 @@ test "many processes, one after another" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "M3: more live processes than HVF has vCPUs" {
-    try pending();
+test "more live processes than HVF has vCPUs (M3)" {
     const e = try env();
     // 80 processes alive at once, all but the first blocked reading a pipe.
     var cmd: std.ArrayList(u8) = .empty;
@@ -464,8 +461,7 @@ test "M3: more live processes than HVF has vCPUs" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "M3: --pids caps the process count" {
-    try pending();
+test "--pids caps the process count (M3)" {
     const e = try env();
     // rc plus ls and wc is three processes.
     const capped = try run(e, &.{ "--pids", "2", "--rc", "ls /bin | wc -l" });
@@ -476,8 +472,7 @@ test "M3: --pids caps the process count" {
     try std.testing.expectEqual(0, ok.code);
 }
 
-test "M3: --cpus 1 still runs a pipeline" {
-    try pending();
+test "--cpus 1 still runs a pipeline (M3)" {
     const e = try env();
     const r = try run(e, &.{ "--cpus", "1", "--rc", "echo one | cat | cat" });
     defer r.deinit();
@@ -485,8 +480,7 @@ test "M3: --cpus 1 still runs a pipeline" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "M3: --ns replays a namespace file" {
-    try pending();
+test "--ns replays a namespace file (M3)" {
     const e = try env();
     var s: Scratch = undefined;
     try s.init();

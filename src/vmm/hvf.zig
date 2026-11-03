@@ -66,7 +66,10 @@ const EXIT_VTIMER = 2;
 
 const REG_X0 = 0;
 const REG_PC = 31;
+const REG_FPCR = 32;
+const REG_FPSR = 33;
 const REG_CPSR = 34;
+const SYS_TPIDR_EL0: u16 = 0xde82;
 
 const SYS_SCTLR_EL1: u16 = 0xc080;
 const SYS_CPACR_EL1: u16 = 0xc082;
@@ -88,6 +91,10 @@ extern "c" fn hv_vcpu_run(vcpu: u64) hv_return_t;
 extern "c" fn hv_vcpu_get_reg(vcpu: u64, reg: u32, value: *u64) hv_return_t;
 extern "c" fn hv_vcpu_set_reg(vcpu: u64, reg: u32, value: u64) hv_return_t;
 extern "c" fn hv_vcpu_set_sys_reg(vcpu: u64, reg: u16, value: u64) hv_return_t;
+extern "c" fn hv_vcpu_get_sys_reg(vcpu: u64, reg: u16, value: *u64) hv_return_t;
+// hv_simd_fp_uchar16_t is a 16-byte vector, passed in a SIMD register.
+extern "c" fn hv_vcpu_get_simd_fp_reg(vcpu: u64, reg: u32, value: *@Vector(16, u8)) hv_return_t;
+extern "c" fn hv_vcpu_set_simd_fp_reg(vcpu: u64, reg: u32, value: @Vector(16, u8)) hv_return_t;
 extern "c" fn hv_vcpus_exit(vcpus: [*]const u64, count: u32) hv_return_t;
 
 fn check(r: hv_return_t) vmm.Error!void {
@@ -460,6 +467,24 @@ pub const Vcpu = struct {
 
     pub fn setUreg(v: *Vcpu, u: *const vmm.Ureg) void {
         v.shared.ureg = u.arm64;
+    }
+
+    pub fn getExtra(v: *Vcpu, x: *vmm.Extra) vmm.Error!void {
+        for (&x.v, 0..) |*q, i| {
+            var b: @Vector(16, u8) = undefined;
+            try check(hv_vcpu_get_simd_fp_reg(v.id, @intCast(i), &b));
+            q.* = @bitCast(b);
+        }
+        try check(hv_vcpu_get_reg(v.id, REG_FPCR, &x.fpcr));
+        try check(hv_vcpu_get_reg(v.id, REG_FPSR, &x.fpsr));
+        try check(hv_vcpu_get_sys_reg(v.id, SYS_TPIDR_EL0, &x.tls));
+    }
+
+    pub fn setExtra(v: *Vcpu, x: *const vmm.Extra) vmm.Error!void {
+        for (x.v, 0..) |q, i| try check(hv_vcpu_set_simd_fp_reg(v.id, @intCast(i), @bitCast(q)));
+        try check(hv_vcpu_set_reg(v.id, REG_FPCR, x.fpcr));
+        try check(hv_vcpu_set_reg(v.id, REG_FPSR, x.fpsr));
+        try check(hv_vcpu_set_sys_reg(v.id, SYS_TPIDR_EL0, x.tls));
     }
 
     /// Safe to call from any thread.
