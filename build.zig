@@ -297,6 +297,30 @@ pub fn build(b: *std.Build) void {
         m1_step.dependOn(&m1.step);
     }
 
+    // M2 and later run real 9front binaries from a host root tree.
+    const root = b.option([]const u8, "root", "9front root tree for the M2 demo and integration tests (default .local/9front/root)") orelse
+        b.pathFromRoot(".local/9front/root");
+    const hp9_bin = b.getInstallPath(.bin, exe.out_filename);
+
+    const m2 = b.addSystemCommand(&.{ hp9_bin, "--root", root, "/bin/cat", "/lib/namespace" });
+    m2.expectStdOutEqual(b.build_root.handle.readFileAlloc(b.graph.io, b.pathJoin(&.{ root, "lib/namespace" }), b.allocator, .limited(1 << 20)) catch "(no root tree; run scripts/mkroot.py)");
+    m2.step.dependOn(signed_step);
+    b.step("m2", "Run the M2 demo: hp9 /bin/cat /lib/namespace (needs a root tree)").dependOn(&m2.step);
+
+    // Runs real binaries through the hp9 CLI; skipped without a root tree.
+    // Not part of `test` until M2 makes them pass.
+    const integration_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/integration.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    }) });
+    const run_integration = b.addRunArtifact(integration_tests);
+    run_integration.setEnvironmentVariable("HP9_TEST_BIN", hp9_bin);
+    run_integration.setEnvironmentVariable("HP9_TEST_ROOT", root);
+    run_integration.has_side_effects = true;
+    run_integration.step.dependOn(signed_step);
+    b.step("integration", "Run real 9front binaries from the root tree through hp9").dependOn(&run_integration.step);
+
     const mod_tests = b.addTest(.{ .root_module = mod });
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     linkUnicorn(mod_tests); // exe_tests shares exe's root module, already linked

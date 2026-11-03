@@ -334,6 +334,8 @@ This is future work. Each backend milestone records research notes so it can be 
 - Unit tests in Zig for the a.out loader, the page allocator and the syscall decoders.
 - Integration tests run real 9front binaries from a pinned root tree: rc scripts, the 9front regression tests where they exist, and a self-build of a few `/sys/src/cmd` programs.
 - The full suite runs on the emulator on every hosted CI runner, and Linux CI also runs it on KVM. macOS (HVF) and Windows (WHP) need self-hosted machines, because hosted runners there generally lack nested virtualization.
+- `zig build integration` runs real binaries from the root tree through the `hp9` CLI as subprocesses, so each case gets a fresh kernel and checks exit codes end to end; it skips when there's no tree. `zig build m2` runs the M2 demo. The Lima test VMs get the tree with `scripts/lima/vm push-root`.
+- CI isn't set up yet. When it is, one Linux job runs `scripts/fetch.sh` and `scripts/mkroot.py` and caches `.local/9front/root-<release>` keyed on `NINEFRONT_RELEASE` and a hash of `mkroot.py`; the other jobs restore that cache, so QEMU (slow without hardware acceleration on hosted runners) only runs when the pin or the script changes. The prebuilt Unicorn in `.local/unicorn` is cached the same way, keyed on `UNICORN_VERSION`. Integration tests skip, rather than fail, when no root tree is present.
 
 ## CLI
 
@@ -355,8 +357,9 @@ hp9 [hp9-flags]                       # interactive rc if stdin is a TTY, otherw
 
 | Argument | Resolution |
 | --- | --- |
-| Contains `/` (`./hello`, `/tmp/x`) | A host path relative to the host cwd, read on the host. It doesn't need to be in the guest namespace. |
-| Bare name (`ls`) | Looked up in the guest namespace through `$path` (default `(. /bin)`) |
+| Starts with `./` or `../` (`./hello`, `../out/x`) | A host path relative to the host cwd, read on the host. It doesn't need to be in the guest namespace. |
+| Absolute (`/bin/cat`) | A guest path, resolved in the guest namespace. To run an absolute host path, use the guest view of it (`/mnt/term/...`) or a relative path. |
+| Bare name or other relative path (`ls`, `aux/vga`) | Looked up in the guest namespace through `$path` (default `(. /bin)`) |
 | `--rc 'cmd'` | Runs `/bin/rc -c 'cmd'`; the remaining arguments become `$*` |
 | `--ns file` | Runs `newns` with the file before the program |
 
@@ -476,7 +479,7 @@ Record design changes as they are made using `- YYYY-MM-DD: <design change> (rea
 
 #### M2
 
-- 2026-11-02: `scripts/mkroot.py` builds the root tree by booting the pinned image in QEMU with its kernel loaded directly (`-kernel`, plus `plan9.ini` set to boot without prompting), then running `tar` in the guest onto a second raw disk and unpacking it on the host. It exports the whole disk except `/dist`, plus empty mount points (`/dev`, `/env`, `/proc`, `/srv`, `/mnt/term` and so on), not just `/arm64`, `/rc`, `/lib` and `/sys` through drawterm's `/mnt/term`. (This needs no drawterm, auth or network setup in the guest, and includes `/acme`, `/mail`, `/cfg` and `/usr`, which programs expect.)
+- 2026-11-02: `scripts/mkroot.py` builds the root tree by booting the pinned image in QEMU with its kernel loaded directly (`-kernel`, plus `plan9.ini` set to boot without prompting), then running `tar` in the guest onto a second raw disk and unpacking it on the host. It keeps everything programs might read (`/arm64`, `/rc`, `/lib`, `/sys/lib`, `/sys/include`, `/acme`, `/mail`, `/cfg`, `/usr` and so on) and adds empty mount points (`/dev`, `/env`, `/proc`, `/srv`, `/mnt/term`), but leaves out `/dist`, the boot kernels for real hardware, `/sys/doc` and, unless `--src` is given, `/sys/src`. That's about 250 MB instead of 420 MB; `/arm64/bin` alone is 135 MB. `/sys/src` comes back for M6 (self-host). (Tarring in the guest needs no drawterm, auth or network setup.)
 - 2026-11-02: kern is built with drawterm's libc, libsec, libmp, libauthsrv, libip, libmemdraw, libmemlayer, libdraw and posix-port into one static library, which the `hp9` module links. drawterm's `main.c`, `cpu.c`, GUI backends, exportfs and libauth are replaced by `src/kern/glue.c`, which holds the boot sequence (`hp9_kern_boot`) and no-op GUI and factotum stubs until M5 and M7. `#U` always attaches the host's `/`, so the root tree is bound to the guest's `/` with `bind("#U<dir>", "/")`, with no vendor changes. This boot namespace is provisional: `#U` still reaches the whole host and `#I` is bound unconditionally until the policy's namespace builder and device mask replace it. kern is a process-wide singleton (its devtab, env and Proc table are globals), so there's one booted kernel per host process, and `kern.boot` refuses a second boot. (No vendor changes, and it matches drawterm's own process model.)
 
 - 2026-11-02: Sandboxing becomes an isobox-style capability policy (`Machine.Options.policy`, profiles, `--print`, `--strict`) enforced in the namespace, the device mask and two leaf hooks in devfs and devip, replacing the `exposure` and `host_cmd` options. The default profile makes the root read-only and, from M5, the network outbound-only; `--sandbox DIR` becomes a tight-profile shorthand. Work is spread over M2–M5 and M10 as each mechanism arrives (one policy model instead of ad hoc flags; the shared kernel lets every backend enforce the same set).
@@ -485,6 +488,8 @@ Record design changes as they are made using `- YYYY-MM-DD: <design change> (rea
 - 2026-11-02: Guest memory reaches the kernel through `GuestBuf`: data buffers are passed in place, split at mapping boundaries and into chunks below 2 GiB; strings are copied into bounded host buffers (`validaddr` is a no-op in drawterm, and copying strings makes them safe against other threads once memory is shared in M3).
 - 2026-11-02: `#U` is restricted with drawterm's device mask after the namespace builder has bound the allowed host paths, rather than with a new filtering device. `#C` is always masked unless `--host-cmd`, and `#I` when the network is off. Symlink escapes from bound trees are still handled by the beneath-root check in devfs. (The mask exists in drawterm already and keeps existing binds working.)
 - 2026-11-02: M2 order: one process end to end first (`Options.root`, `cwd` and `env`, a `Program` that is a host path or a guest name, and a Zig syscall table for what `cat` needs), then the console and devenv devices, then the namespace builder and device mask, then the policy flags, `--print` and `--strict`. Bare program names are looked up through the kernel along `$path`. `main.zig` maps failures to exit codes 125–127. In development builds the default root is `.local/9front/root`. (Sandbox features need a working process to test against.)
+- 2026-11-02: Program resolution: absolute paths (`/bin/cat`) are guest paths, and only `./` or `../` paths are read from the host; previously any argument containing `/` was a host path (the M2 demo `hp9 /bin/cat /lib/namespace` names a guest binary, and `/mnt/term` covers absolute host paths).
+- 2026-11-02: Startup budget: `hp9 /bin/echo` under 20 ms wall time on HVF, VM create through exit (sets a pass/fail target for M2's measurement).
 - 2026-11-02: Host self-sandboxing of the hp9 process (Seatbelt, Landlock/seccomp, AppContainer) is deferred to after M10; M2, M7, M8 and M9 each record a research note for their host (keeps the backend milestones focused while gathering what the later work needs).
 
 #### M3
@@ -515,12 +520,12 @@ Record design changes as they are made using `- YYYY-MM-DD: <design change> (rea
 - [x] Syscall conventions, Tos, UTZERO and USTKTOP: verified (Guest shims section).
 - [x] Page size: 9front uses 4 KiB pages on arm64 and amd64, so there's no mismatch with any host.
 - [x] Licensing: drawterm is MIT (Plan 9 Foundation, Russ Cox, 9front authors). hyper-linux is Apache-2.0, so code borrowed from it keeps its notice. The project can be MIT.
-- [x] Pin a 9front release: 11952, "THIS WAS SUPPOSED TO BE FUN", released August 2026 ([OSnews](https://www.osnews.com/?p=145669)), pinned in `scripts/pins.sh`.
+- [x] Pin a 9front release: 11952, "THIS WAS SUPPOSED TO BE FUN", released August 2026 ([OSnews](https://www.osnews.com/?p=145669)), pinned in `scripts/pins.sh` along with its source revision (`NINEFRONT_REV`, read from `/dist/9front` in the release image), which `scripts/fetch.sh` checks out in `.local/src/9front`. Port 9front code from that checkout, not from upstream HEAD.
 - [x] Build the arm64 root tree: `scripts/mkroot.py` boots the pinned qcow2 headless in QEMU and tars the disk's file system out onto a second raw disk (see the M2 changelog).
 - [ ] vCPU limits. hyper-linux caps threads at 64 (`MAX_THREADS`), which hints at HVF's practical limit. Measure each hypervisor before M3.
 - [ ] Whether the Windows Hypervisor Platform's arm64 support is solid enough to target, or whether Windows on ARM waits.
 - [ ] macOS builds: the Cocoa backend (`screen.m`) is Objective-C, and HVF needs the macOS SDK plus an entitlement signature. So macOS builds run on a Mac, or use rcodesign when cross-building. Windows builds need a WinHvPlatform import library (a .def file for Zig).
-- [ ] Startup budget: set a target for `hp9 /bin/echo` wall time (VM create through exit) and measure it at M2.
+- [x] Startup budget: `hp9 /bin/echo` (VM create through exit) should take under 20 ms of wall time on HVF; measured at M2.
 - [ ] Should the host-tree root go through devfs as-is, or get a faster read path for exec and compilers?
 - [ ] When to add the binfmt\_misc registration on Linux, so that `./prog` runs directly.
 - [x] Emulator speed: measured at M1 (see Limits and selection). About 5× slower than HVF for arm64 compute and on par for syscalls, so the native interpreter isn't urgent.

@@ -4,6 +4,8 @@ DRAWTERM_REV=be39bbaa88fda83bf75be642d093b20956297c8c
 
 NINEFRONT_REPO=https://github.com/9front/9front
 NINEFRONT_RELEASE=11952 # "THIS WAS SUPPOSED TO BE FUN", Aug 2026
+# The release's source: HEAD of /dist/9front in the release image.
+NINEFRONT_REV=602faae9a52f342a40b086d10b23c71c82dd52d7
 NINEFRONT_ISO_URL=https://9front.org/iso
 
 HYPERLINUX_REPO=https://github.com/zw3rk/hyper-linux

@@ -35,8 +35,21 @@ zig build -Demu=unicorn -Dtarget=aarch64-linux-musl --prefix zig-out/linux
 scripts/lima/vm up linux                    # create (first time), start, provision
 scripts/lima/vm push linux zig-out/linux/bin/hp9 zig-out/fixtures/hello  # into ~/hp9
 scripts/lima/vm shell linux ./hp9/hp9 --backend emu ./hp9/hello
+scripts/lima/vm push-root linux             # 9front root tree into ~/hp9/root
+scripts/lima/vm shell linux ./hp9/hp9 --root hp9/root /bin/cat /lib/namespace
 scripts/lima/vm down linux
 ```
+
+`push-root` copies `.local/9front/root` (from `scripts/mkroot.py`, about
+250 MB in 10k files) as one tar stream over ssh, which takes seconds where
+`push` would take minutes. It writes `hp9/root/.hp9-root` with the tree's
+name and build time, and skips the copy when that matches; `-f` forces it.
+The copy is unpacked beside the old one and swapped in, so an interrupted
+push leaves the old tree intact. It takes about a second on Linux and about
+a minute on Windows, where NTFS and Defender are slower. On Windows, three
+files are left out: rc's `"` and `""` scripts (NTFS doesn't allow `"` in
+names) and troff's `charlib/☺` (Windows `tar` decodes names in the ANSI code
+page, not UTF-8).
 
 `vm status` lists the VMs, `vm shell <os>` with no command opens a shell
 (`cmd.exe` on Windows), and `vm rm <os>` deletes one.

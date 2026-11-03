@@ -9,6 +9,7 @@
 #   scripts/lima/vm status             list the VMs
 #   scripts/lima/vm shell <os> [cmd]   ssh into it (cmd.exe on windows)
 #   scripts/lima/vm push <os> file...  copy files into ~/hp9 in the guest
+#   scripts/lima/vm push-root <os> [-f] copy the 9front root tree into ~/hp9/root
 #
 # Env: WIN_ISO (Windows 11 Arm64 installer ISO).
 set -euo pipefail
@@ -69,11 +70,51 @@ cmd_push() {
 	scp_ "$os" "$@" "lima-$os:hp9/" </dev/null
 }
 
-[[ $# -gt 0 ]] || { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+# The root tree from scripts/mkroot.py, streamed as one tar over ssh (it's
+# ~250 MB in ~10k files, too many for scp). A stamp in the guest copy names
+# the tree and its build time, so an unchanged tree isn't copied again.
+cmd_push_root() {
+	local os=$1 force=${2:-}
+	local root="$ROOT/.local/9front/root"
+	[[ -d "$root/arm64" ]] || die "no root tree at $root (run scripts/mkroot.py)"
+	[[ -z "$force" || "$force" == -f ]] || die "usage: scripts/lima/vm push-root <os> [-f]"
+	need_running "$os"
+	local real; real="$(cd "$root" && pwd -P)"
+	local stamp; stamp="$(basename "$real") $(stat -f %m "$real" 2>/dev/null || stat -c %Y "$real")"
+	local have
+	if [[ "$os" == windows ]]; then
+		have="$(ssh_ "$os" type 'hp9\root\.hp9-root' 2>/dev/null </dev/null | tr -d '\r' | sed 's/ *$//' || true)"
+	else
+		have="$(ssh_ "$os" cat hp9/root/.hp9-root 2>/dev/null </dev/null || true)"
+	fi
+	if [[ -z "$force" && "$have" == "$stamp" ]]; then
+		log "$os: hp9/root is up to date ($stamp)"
+		return
+	fi
+	log "$os: copying $(basename "$real") into hp9/root"
+	if [[ "$os" == windows ]]; then
+		# NTFS can't hold rc's '"' and '""' scripts, and Windows tar decodes
+		# names in the ANSI code page, so non-ASCII names (just troff's
+		# charlib/☺) are mangled. Both are left out. Windows tar also rejects
+		# the "./" entry, so the top-level entries are named instead.
+		local skip=(--exclude '^rc/bin/"*')
+		while IFS= read -r f; do skip+=(--exclude "^${f#./}\$"); done < <(cd "$real" && LC_ALL=C find . -name '*[^ -~]*')
+		bsdtar -cf - --no-xattrs --no-mac-metadata --no-acls --no-fflags -C "$real" "${skip[@]}" $(ls -A "$real") |
+			ssh_ "$os" '(if exist hp9\root.tmp rmdir /s /q hp9\root.tmp) & mkdir hp9\root.tmp && tar -xf - -C hp9\root.tmp'
+		ssh_ "$os" "(echo $stamp)> hp9\\root.tmp\\.hp9-root && (if exist hp9\\root rmdir /s /q hp9\\root) & move hp9\\root.tmp hp9\\root >nul" </dev/null
+	else
+		bsdtar -cf - --no-xattrs --no-mac-metadata --no-acls --no-fflags -C "$real" . |
+			ssh_ "$os" 'set -e; mkdir -p hp9; rm -rf hp9/root.tmp; mkdir hp9/root.tmp; tar -xf - -C hp9/root.tmp'
+		ssh_ "$os" "set -e; echo '$stamp' > hp9/root.tmp/.hp9-root; rm -rf hp9/root; mv hp9/root.tmp hp9/root" </dev/null
+	fi
+	log "$os: hp9/root ready"
+}
+
+[[ $# -gt 0 ]] || { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 cmd=$1; shift
 case "$cmd" in
 	status) limactl list; exit ;;
-	up|down|rm|shell|push) check_os "${1:-}"; os=$1; shift ;;
+	up|down|rm|shell|push|push-root) check_os "${1:-}"; os=$1; shift ;;
 	*) die "unknown command '$cmd'" ;;
 esac
 case "$cmd" in
@@ -82,4 +123,5 @@ case "$cmd" in
 	rm) limactl delete --force "$os" ;;
 	shell) need_running "$os"; if [[ $# -gt 0 ]]; then ssh_ "$os" "$@"; else ssh_ "$os" -t; fi ;;
 	push) cmd_push "$os" "$@" ;;
+	push-root) cmd_push_root "$os" "$@" ;;
 esac

@@ -5,7 +5,11 @@ Boots the image headless in QEMU (no network), tars the file system out onto
 a second raw disk, and unpacks it into .local/9front/root-<release>, with
 .local/9front/root pointing at it. The image itself is left untouched.
 
-Usage: scripts/mkroot.py [--force]
+The tree leaves out what running programs doesn't need: boot kernels,
+/sys/doc and, unless --src is given, /sys/src (needed from M6, self-host).
+That's about 250 MB instead of 420 MB.
+
+Usage: scripts/mkroot.py [--force] [--src]
 Needs qemu-system-aarch64, qemu-img and bsdtar (or a tar that reads ustar).
 """
 
@@ -30,8 +34,15 @@ MOUNT_POINTS = [
     "bin", "boot", "dev", "env", "fd", "mnt", "mnt/term", "mnt/wsys", "n",
     "net", "net.alt", "proc", "root", "shr", "srv", "tmp",
 ]
-# On-disk directories left out of the tree: dist holds installer payloads.
+# On-disk directories left out of the export: dist holds installer payloads.
 EXCLUDE = ["dist"]
+# Left out when unpacking: kernels and boot files for real hardware, and
+# documentation. bsdtar patterns, matched against the whole path.
+SKIP = [
+    "arm64/9*", "arm64/s9*", "386/9boot*", "386/*.efi", "386/efiboot.fat",
+    "386/mbr", "386/pbs", "sys/doc",
+]
+SKIP_SRC = ["sys/src"]
 
 PROMPT = b"HP9> "
 
@@ -141,7 +152,12 @@ class Console:
 
 
 def main():
-    force = "--force" in sys.argv[1:]
+    args = sys.argv[1:]
+    for a in args:
+        if a not in ("--force", "--src"):
+            die("usage: scripts/mkroot.py [--force] [--src]")
+    force = "--force" in args
+    skip = SKIP + ([] if "--src" in args else SKIP_SRC)
     release = pin("NINEFRONT_RELEASE")
     image = os.path.join(LOCAL, "9front", "9front-%s.arm64.qcow2" % release)
     dest = os.path.join(LOCAL, "9front", "root-%s" % release)
@@ -216,7 +232,8 @@ def main():
         staging = dest + ".tmp"
         shutil.rmtree(staging, ignore_errors=True)
         os.makedirs(staging)
-        run("bsdtar", "-xpf", out, "-C", staging)
+        excl = [a for pat in skip for a in ("--exclude", "^" + pat)]
+        run("bsdtar", "-xpf", out, "-C", staging, *excl)
         for d in MOUNT_POINTS:
             os.makedirs(os.path.join(staging, d), exist_ok=True)
         shutil.rmtree(dest, ignore_errors=True)

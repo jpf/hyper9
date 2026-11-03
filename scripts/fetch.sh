@@ -7,9 +7,17 @@ set -euo pipefail
 
 mkdir -p "$HP9_LOCAL"/{bin,src,cache,9front,unicorn}
 
+# clone repo dir [rev]: a shallow clone at rev, or tracking the default
+# branch if rev is empty.
 clone() {
-	local repo=$1 dir="$HP9_LOCAL/src/$2"
-	if [ -d "$dir/.git" ]; then
+	local repo=$1 dir="$HP9_LOCAL/src/$2" rev=${3:-}
+	if [ -n "$rev" ]; then
+		[ -d "$dir/.git" ] || git init -q "$dir"
+		if [ "$(git -C "$dir" rev-parse -q --verify HEAD || true)" != "$rev" ]; then
+			git -C "$dir" fetch -q --depth 1 "$repo" "$rev"
+			git -C "$dir" checkout -q --detach "$rev"
+		fi
+	elif [ -d "$dir/.git" ]; then
 		git -C "$dir" pull -q --ff-only
 	else
 		git clone -q --depth 1 "$repo" "$dir"
@@ -18,7 +26,7 @@ clone() {
 }
 
 clone "$HYPERLINUX_REPO" hyper-linux
-clone "$NINEFRONT_REPO" 9front
+clone "$NINEFRONT_REPO" 9front "$NINEFRONT_REV"
 
 img="9front-$NINEFRONT_RELEASE.arm64.qcow2"
 if [ ! -f "$HP9_LOCAL/9front/$img" ]; then
