@@ -348,10 +348,11 @@ test "--strict refuses what this build can't enforce" {
 
 test "--memory caps guest memory" {
     const e = try env();
-    const r = try run(e, &.{ "--memory", "8m", "echo", "x" });
+    const r = try run(e, &.{ "--memory", "64k", "echo", "x" });
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
-    const ok = try run(e, &.{ "--memory", "64m", "echo", "x" });
+    // The stack grows on demand, so 8 MiB is plenty for echo.
+    const ok = try run(e, &.{ "--memory", "8m", "echo", "x" });
     defer ok.deinit();
     try std.testing.expectEqual(0, ok.code);
 }
@@ -388,10 +389,10 @@ test "renames and case can't get around the rules" {
     try std.testing.expectEqualStrings("secret\n", data);
 }
 
-// M3: process trees. These skip until M3 is done (see `pending`).
+// M3: process trees. The cases still named "M3: ..." skip until M3 is
+// done (see `pending`).
 
-test "M3: ls /bin | wc -l (M3 demo)" {
-    try pending();
+test "ls /bin | wc -l (M3 demo)" {
     const e = try env();
     const r = try run(e, &.{ "--rc", "ls /bin | wc -l" });
     defer r.deinit();
@@ -402,8 +403,7 @@ test "M3: ls /bin | wc -l (M3 demo)" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "M3: a pipeline reads the guest's stdin" {
-    try pending();
+test "a pipeline reads the guest's stdin" {
     const e = try env();
     const r = try runIn(e, &.{ "--rc", "sed s/h/j/ | wc -c" }, "hello\n");
     defer r.deinit();
@@ -411,8 +411,7 @@ test "M3: a pipeline reads the guest's stdin" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "M3: exit status comes back through await" {
-    try pending();
+test "exit status comes back through await" {
     const e = try env();
     const ok = try run(e, &.{ "--rc", "test -e /lib/namespace" });
     defer ok.deinit();
@@ -426,8 +425,7 @@ test "M3: exit status comes back through await" {
     try std.testing.expectEqual(0, st.code);
 }
 
-test "M3: exec replaces the process" {
-    try pending();
+test "exec replaces the process" {
     const e = try env();
     const r = try run(e, &.{ "--rc", "exec echo replaced; echo not reached" });
     defer r.deinit();
@@ -443,8 +441,7 @@ test "M3: /fd is devdup" {
     try std.testing.expectEqualStrings("through fd\n", r.out);
 }
 
-test "M3: many processes, one after another" {
-    try pending();
+test "many processes, one after another" {
     const e = try env();
     // More than HVF's 64 vCPUs in total, so each exit has to free its vCPU.
     const r = try run(e, &.{ "--rc", "for(i in `{seq 100}) echo $i | wc -l >/dev/null; echo done" });

@@ -164,7 +164,8 @@ fn expectKick(arch: aout.Arch, text: []const u8) !void {
         defer b.destroy();
         const as = try b.newAddressSpace();
         defer as.destroy();
-        const img = try hp9.loader.load(b, as, bytes, &.{"spin"}, 1);
+        var img = try hp9.loader.load(gpa, b, as, bytes, &.{"spin"}, 1);
+        defer img.segs.release(as);
         var v = try b.createVcpu();
         defer v.destroy();
         try v.setAddressSpace(as);
@@ -256,7 +257,8 @@ test "a timeout interrupts sleep arm64" {
 test "the memory cap is exact" {
     const bytes = try image(std.testing.allocator, .arm64, &hello.arm64_text);
     defer std.testing.allocator.free(bytes);
-    // The 16 MiB stack alone doesn't fit in 8 MiB.
+    // The text page and the stack's first 68 KiB don't fit in 64 KiB (on
+    // HVF, the kernel's page tables count too).
     const gpa = std.testing.allocator;
     var ran: usize = 0;
     for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
@@ -265,7 +267,7 @@ test "the memory cap is exact" {
         var m = hp9.Machine.init(gpa, std.testing.io, .{
             .backend = kind,
             .arch = .arm64,
-            .policy = .{ .memory = 8 << 20 },
+            .policy = .{ .memory = 64 << 10 },
             .stdio = .{ .out = &out.writer, .err = &out.writer },
         }) catch |e| switch (e) {
             error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
@@ -276,4 +278,166 @@ test "the memory cap is exact" {
         ran += 1;
     }
     if (ran == 0) return error.SkipZigTest;
+}
+
+/// Runs `f(backend)` on each backend that can run arm64 here.
+fn eachBackend(comptime f: fn (vmm.Backend) anyerror!void) !void {
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        var b = vmm.create(std.testing.allocator, std.testing.io, kind, .{ .arch = .arm64, .memory = 64 << 20 }) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
+            else => return e,
+        };
+        defer b.destroy();
+        errdefer std.debug.print("backend {t}\n", .{kind});
+        try f(b);
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+fn byteAt(as: vmm.AddressSpace, va: u64) ?u8 {
+    const s = as.translate(va, 1) orelse return null;
+    return s[0];
+}
+
+fn setByte(as: vmm.AddressSpace, va: u64, v: u8) void {
+    as.translate(va, 1).?[0] = v;
+}
+
+test "segments: fork shares text, copies the stack, and shares data only with RFMEM" {
+    try eachBackend(struct {
+        fn f(b: vmm.Backend) !void {
+            const gpa = std.testing.allocator;
+            const bytes = try image(gpa, .arm64, &hello.arm64_text);
+            defer gpa.free(bytes);
+            const as = try b.newAddressSpace();
+            defer as.destroy();
+            var img = try hp9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
+            defer img.segs.release(as);
+            // hello has no data or bss, so give it some.
+            const data = img.segs.data.?.base;
+            try img.segs.brk(data + vmm.page_size);
+            const sp = img.sp;
+            setByte(as, data, 1);
+            setByte(as, sp, 1);
+
+            for ([_]bool{ false, true }) |share| {
+                const cas = try b.newAddressSpace();
+                defer cas.destroy();
+                var c = try img.segs.fork(cas, share);
+                defer c.release(cas);
+                try std.testing.expectEqual(img.segs.text.?, c.text.?);
+                try std.testing.expectEqual(share, img.segs.data.? == c.data.?);
+                try std.testing.expect(img.segs.stack.? != c.stack.?);
+                // The child sees the parent's memory at fork time...
+                try std.testing.expectEqual(@as(?u8, 1), byteAt(cas, data));
+                try std.testing.expectEqual(@as(?u8, 1), byteAt(cas, sp));
+                // ...and then only shared segments follow each other.
+                setByte(cas, data, 2);
+                setByte(cas, sp, 2);
+                try std.testing.expectEqual(@as(?u8, if (share) 2 else 1), byteAt(as, data));
+                try std.testing.expectEqual(@as(?u8, 1), byteAt(as, sp));
+                setByte(as, data, 1);
+                // Growing a shared break maps the pages into both spaces
+                // (past the headroom the parent's mapping already has).
+                const top = img.segs.brkTop();
+                const far = top + (1 << 20);
+                try c.brk(far + 1);
+                try std.testing.expectEqual(share, byteAt(as, far) != null);
+                try std.testing.expectEqual(@as(?u8, 0), byteAt(cas, far));
+                // 9front won't shrink a segment others share.
+                if (share) try std.testing.expectError(error.InUse, c.brk(top)) else try c.brk(top);
+            }
+        }
+    }.f);
+}
+
+test "segments: brk grows and shrinks, and memory above the break is zeroed" {
+    try eachBackend(struct {
+        fn f(b: vmm.Backend) !void {
+            const gpa = std.testing.allocator;
+            const bytes = try image(gpa, .arm64, &hello.arm64_text);
+            defer gpa.free(bytes);
+            const as = try b.newAddressSpace();
+            defer as.destroy();
+            var img = try hp9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
+            defer img.segs.release(as);
+            const s = &img.segs;
+            const base = s.brkTop();
+            try std.testing.expectEqual(@as(?u8, null), byteAt(as, base));
+
+            // Small steps don't each add a mapping (hello's data starts empty).
+            for (1..9) |i| try s.brk(base + i * 100);
+            try std.testing.expectEqual(base + vmm.page_size, s.brkTop());
+            for (1..9) |i| try s.brk(base + i * vmm.page_size);
+            try std.testing.expectEqual(@as(usize, 1), s.data.?.chunks.items.len);
+
+            try s.brk(base + (1 << 20) + 1);
+            try std.testing.expectEqual(base + (1 << 20) + vmm.page_size, s.brkTop());
+            setByte(as, base + 10, 7);
+            setByte(as, base + (1 << 20), 7);
+
+            try s.brk(base);
+            try std.testing.expectEqual(base, s.brkTop());
+            try s.brk(base + (1 << 20) + 1);
+            try std.testing.expectEqual(@as(?u8, 0), byteAt(as, base + 10));
+            try std.testing.expectEqual(@as(?u8, 0), byteAt(as, base + (1 << 20)));
+
+            try std.testing.expectError(error.NoVmem, s.brk(s.data.?.base - 1));
+            try std.testing.expectError(error.NoVmem, s.brk(s.stack_floor + 1));
+            try std.testing.expectError(error.NoVmem, s.brk(std.math.maxInt(u64)));
+            // More than --memory.
+            try std.testing.expectError(error.NoVmem, s.brk(base + (128 << 20)));
+        }
+    }.f);
+}
+
+test "segments: the stack grows down to its 16 MiB limit" {
+    try eachBackend(struct {
+        fn f(b: vmm.Backend) !void {
+            const gpa = std.testing.allocator;
+            const bytes = try image(gpa, .arm64, &hello.arm64_text);
+            defer gpa.free(bytes);
+            const as = try b.newAddressSpace();
+            defer as.destroy();
+            var img = try hp9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
+            defer img.segs.release(as);
+            const s = &img.segs;
+            const l = aout.layout(.arm64);
+            try std.testing.expect(s.stack.?.base > s.stack_floor);
+            const deep = l.ustktop - (8 << 20);
+            try std.testing.expectEqual(@as(?u8, null), byteAt(as, deep));
+            try std.testing.expect(s.growStack(deep));
+            try std.testing.expectEqual(@as(?u8, 0), byteAt(as, deep));
+            try std.testing.expect(s.growStack(s.stack_floor));
+            try std.testing.expectEqual(s.stack_floor, s.stack.?.base);
+            try std.testing.expect(!s.growStack(s.stack_floor - 1));
+            try std.testing.expect(!s.growStack(l.ustktop));
+        }
+    }.f);
+}
+
+test "segments: releasing a process's segments frees its memory" {
+    try eachBackend(struct {
+        fn f(b: vmm.Backend) !void {
+            const gpa = std.testing.allocator;
+            const bytes = try image(gpa, .arm64, &hello.arm64_text);
+            defer gpa.free(bytes);
+            // 64 MiB of guest memory, so 200 processes' worth only fits if
+            // each one's pages come back.
+            for (0..200) |_| {
+                const as = try b.newAddressSpace();
+                defer as.destroy();
+                var img = try hp9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
+                defer img.segs.release(as);
+                try img.segs.brk(img.segs.brkTop() + (1 << 20));
+                _ = img.segs.growStack(img.sp - (1 << 20));
+                const cas = try b.newAddressSpace();
+                defer cas.destroy();
+                var c = try img.segs.fork(cas, false);
+                c.release(cas);
+            }
+        }
+    }.f);
 }

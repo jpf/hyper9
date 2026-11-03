@@ -17,6 +17,9 @@ pub const Backend = struct {
     pub fn allocPages(_: *Backend, _: usize) vmm.Error![]align(vmm.page_size) u8 {
         unreachable;
     }
+    pub fn freePages(_: *Backend, _: []align(vmm.page_size) u8) void {
+        unreachable;
+    }
     pub fn newAddressSpace(_: *Backend) vmm.CreateError!*AddressSpace {
         unreachable;
     }
@@ -30,6 +33,9 @@ pub const AddressSpace = struct {
         unreachable;
     }
     pub fn map(_: *AddressSpace, _: u64, _: []align(vmm.page_size) u8, _: vmm.Perms) vmm.CreateError!void {
+        unreachable;
+    }
+    pub fn unmap(_: *AddressSpace, _: u64) void {
         unreachable;
     }
     pub fn translate(_: *AddressSpace, _: u64, _: u64) ?[]u8 {

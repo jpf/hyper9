@@ -5,7 +5,7 @@
  * process's environment on first attach (DESIGN.md, env.scrub).
  *
  * drawterm's Proc has no egrp, and kern/dat.h stays unmodified, so a Proc's
- * group is kept in a small table here (hp9_setegrp). drawterm's own Egrp
+ * group is kept on its hp9 process record (src/kern/proc.c). drawterm's own Egrp
  * and Evalue types don't match 9front's, so this file uses its own (HEgrp,
  * HEvalue). #ec (the kernel configuration group) isn't supported.
  */
@@ -56,32 +56,12 @@ struct HEgrp
 #define QID(qidpath)	((uint)(qidpath) & 0x7FFFFFFF)
 #define ROUND(s, sz)	(((s)+((sz)-1))&~((sz)-1))
 
-/*
- * Proc -> HEgrp. A Proc looks its group up on each call; M2 has at most a
- * process per machine, so a short list is enough until rfork (M3) moves
- * this into the Proc record.
- */
-enum { Maxprocs = 256 };
-static Lock egrplk;
-static struct { Proc *p; HEgrp *eg; } egrps[Maxprocs];
+extern void *hp9_upegrp(void);	/* proc.c */
 
 static HEgrp*
 upegrp(void)
 {
-	HEgrp *eg;
-	int i;
-
-	eg = nil;
-	lock(&egrplk);
-	for(i = 0; i < Maxprocs; i++)
-		if(egrps[i].p == up){
-			eg = egrps[i].eg;
-			break;
-		}
-	unlock(&egrplk);
-	if(eg == nil)
-		error("no environment");
-	return eg;
+	return hp9_upegrp();
 }
 
 static void
@@ -103,60 +83,86 @@ hcloseegrp(HEgrp *eg)
 	free(eg);
 }
 
-/* Gives the calling Proc a new, empty environment. Returns 0 or -1. */
-int
-hp9_newegrp(void)
+/*
+ * Groups for proc.c, which keeps each process's on its record. They're
+ * void* there, since HEgrp is private to this file.
+ */
+
+/* A new, empty environment. */
+void*
+hp9_egrpnew(void)
 {
-	HEgrp *eg, *old;
-	int i, slot;
+	HEgrp *eg;
 
 	eg = mallocz(sizeof(HEgrp), 1);
 	if(eg == nil)
-		return -1;
+		error(Enomem);
 	eg->ref.ref = 1;
-	old = nil;
-	slot = -1;
-	lock(&egrplk);
-	for(i = 0; i < Maxprocs; i++){
-		if(egrps[i].p == up){
-			old = egrps[i].eg;
-			slot = i;
-			break;
-		}
-		if(slot < 0 && egrps[i].p == nil)
-			slot = i;
-	}
-	if(slot >= 0){
-		egrps[slot].p = up;
-		egrps[slot].eg = eg;
-	}
-	unlock(&egrplk);
-	if(slot < 0){
-		free(eg);
-		return -1;
-	}
-	hcloseegrp(old);
-	return 0;
+	return eg;
 }
 
-/* Drops the calling Proc's environment, when it exits. */
 void
-hp9_closeegrp(void)
+hp9_egrpincref(void *eg)
 {
-	HEgrp *eg;
-	int i;
+	incref(&((HEgrp*)eg)->ref);
+}
 
-	eg = nil;
-	lock(&egrplk);
-	for(i = 0; i < Maxprocs; i++)
-		if(egrps[i].p == up){
-			eg = egrps[i].eg;
-			egrps[i].p = nil;
-			egrps[i].eg = nil;
-			break;
-		}
-	unlock(&egrplk);
+void
+hp9_egrpclose(void *eg)
+{
 	hcloseegrp(eg);
+}
+
+static void*	envrealloc(HEgrp*, void*, int, int);
+static HEvalue**	envhash(HEgrp*, char*);
+
+/* A copy of an environment, for RFENVG: 9front's envcpy. */
+void*
+hp9_egrpcopy(void *vfrom)
+{
+	HEgrp *to, *from;
+	HEvalue *e, *ne, **h;
+	int i, n;
+
+	from = vfrom;
+	to = hp9_egrpnew();
+	if(waserror()){
+		hcloseegrp(to);
+		nexterror();
+	}
+	rlock(&from->lk);
+	if(waserror()){
+		runlock(&from->lk);
+		nexterror();
+	}
+	to->ent = envrealloc(to, nil, 0, ROUND(from->nent, DELTAENV) * sizeof(HEvalue*));
+	for(i = 0; i < from->nent; i++){
+		e = from->ent[i];
+		if(e == nil)
+			continue;
+		h = envhash(to, e->name);
+		n = strlen(e->name)+1;
+		ne = envrealloc(to, nil, 0, sizeof(HEvalue)+n);
+		memmove(ne->name, e->name, n);
+		ne->value = nil;
+		ne->len = 0;
+		ne->size = 0;
+		ne->vers = 0;
+		ne->path = PATH(++to->path, to->nent);
+		ne->hash = *h, *h = ne;
+		to->ent[to->nent++] = ne;
+		if(e->len > 0){
+			ne->value = envrealloc(to, nil, 0, e->len);
+			memmove(ne->value, e->value, e->len);
+			ne->len = e->len;
+			ne->size = e->len;
+		}
+	}
+	to->low = to->nent;
+	runlock(&from->lk);
+	poperror();
+	poperror();
+	return to;
 }
 
 static HEvalue*

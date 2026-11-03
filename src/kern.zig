@@ -42,6 +42,32 @@ const c_stub = struct {
     fn hp9_kern_pid() c_ulong {
         return 0;
     }
+    fn hp9_kern_fork(_: c_int, _: c_ulong, _: *const fn (?*anyopaque) callconv(.c) void, _: ?*anyopaque) c_int {
+        return -1;
+    }
+    fn hp9_kern_rfork(_: c_int) c_int {
+        return -1;
+    }
+    fn hp9_kern_await(_: [*]u8, _: c_int) c_int {
+        return -1;
+    }
+    fn hp9_kern_setexits(_: [*:0]const u8) void {}
+    fn hp9_kern_gpid() c_ulong {
+        return 0;
+    }
+    fn hp9_kern_setgpid(_: c_ulong) void {}
+    fn hp9_kern_settext(_: [*:0]const u8) void {}
+    fn hp9_kern_aux() ?*anyopaque {
+        return null;
+    }
+    fn hp9_kern_setaux(_: ?*anyopaque) void {}
+    fn hp9_kern_closeexec() void {}
+    fn hp9_kern_takenote() c_int {
+        return 0;
+    }
+    fn syspipe(_: *[2]c_int) c_int {
+        return -1;
+    }
     fn hp9_kern_user() [*:0]const u8 {
         return "none";
     }
@@ -109,6 +135,18 @@ const c_real = struct {
     extern fn hp9_kern_park() noreturn;
     extern fn hp9_kern_spawn(name: [*:0]const u8, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
     extern fn hp9_kern_pid() c_ulong;
+    extern fn hp9_kern_fork(flag: c_int, pid: c_ulong, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
+    extern fn hp9_kern_rfork(flag: c_int) c_int;
+    extern fn hp9_kern_await(buf: [*]u8, n: c_int) c_int;
+    extern fn hp9_kern_setexits(msg: [*:0]const u8) void;
+    extern fn hp9_kern_gpid() c_ulong;
+    extern fn hp9_kern_setgpid(pid: c_ulong) void;
+    extern fn hp9_kern_settext(text: [*:0]const u8) void;
+    extern fn hp9_kern_aux() ?*anyopaque;
+    extern fn hp9_kern_setaux(aux: ?*anyopaque) void;
+    extern fn hp9_kern_closeexec() void;
+    extern fn hp9_kern_takenote() c_int;
+    extern fn syspipe(fd: *[2]c_int) c_int;
     extern fn hp9_kern_user() [*:0]const u8;
     extern fn hp9_kern_devmask(devs: [*:0]const u8) void;
     extern fn hp9_kern_self() ?*anyopaque;
@@ -162,8 +200,8 @@ fn bootThread() void {
 }
 
 /// Runs `func(arg)` on a new kernel process with its own host thread, a
-/// fresh namespace containing only #/, and no fds. The process ends when
-/// `func` returns.
+/// fresh namespace containing only #/, no fds, an empty environment and no
+/// parent. The process ends when `func` returns.
 pub fn spawn(name: [*:0]const u8, comptime T: type, comptime func: fn (*T) void, arg: *T) Error!void {
     try boot();
     const Tramp = struct {
@@ -172,6 +210,95 @@ pub fn spawn(name: [*:0]const u8, comptime T: type, comptime func: fn (*T) void,
         }
     };
     if (c.hp9_kern_spawn(name, Tramp.run, arg) < 0) return error.OutOfMemory;
+}
+
+/// rfork flags (9front's libc.h).
+pub const RF = struct {
+    pub const NAMEG = 1 << 0;
+    pub const ENVG = 1 << 1;
+    pub const FDG = 1 << 2;
+    pub const NOTEG = 1 << 3;
+    pub const PROC = 1 << 4;
+    pub const MEM = 1 << 5;
+    pub const NOWAIT = 1 << 6;
+    pub const CNAMEG = 1 << 10;
+    pub const CENVG = 1 << 11;
+    pub const CFDG = 1 << 12;
+    pub const REND = 1 << 13;
+    pub const NOMNT = 1 << 14;
+};
+
+/// rfork with RF.PROC from a process made by `spawn` or `fork`: runs
+/// `func(arg)` on a new kernel process that is the caller's child, with its
+/// namespace, fds, environment and rendezvous group shared or copied as
+/// `flag` says. `pid` is its machine-local pid. Without RF.NOWAIT, its exit
+/// leaves a wait record for the caller's `await`. On error `func` never
+/// runs, and `errstr` says why.
+pub fn fork(flag: c_int, child_pid: u32, comptime T: type, comptime func: fn (*T) void, arg: *T) Error!void {
+    const Tramp = struct {
+        fn run(p: ?*anyopaque) callconv(.c) void {
+            func(@ptrCast(@alignCast(p.?)));
+        }
+    };
+    _ = try check(c.hp9_kern_fork(flag, child_pid, Tramp.run, arg));
+}
+
+/// rfork without RF.PROC: changes the caller's own groups.
+pub fn rfork(flag: c_int) Error!void {
+    _ = try check(c.hp9_kern_rfork(flag));
+}
+
+/// Waits for a child to exit and writes its wait message to `buf`, as the
+/// await syscall returns it: "pid utime stime real 'msg'". Fails with "no
+/// living children" when there are none.
+pub fn await(buf: []u8) Error!usize {
+    return try check(c.hp9_kern_await(buf.ptr, clampLen(buf.len)));
+}
+
+/// Sets the exit string the parent's wait record carries; "" is success.
+pub fn setExits(msg: [*:0]const u8) void {
+    c.hp9_kern_setexits(msg);
+}
+
+/// The calling process's machine-local pid (0 if never set).
+pub fn guestPid() u32 {
+    return @intCast(c.hp9_kern_gpid());
+}
+
+pub fn setGuestPid(p: u32) void {
+    c.hp9_kern_setgpid(p);
+}
+
+/// Sets the process's name, as wait messages show it.
+pub fn setText(text: [*:0]const u8) void {
+    c.hp9_kern_settext(text);
+}
+
+/// The Zig process attached to the calling kernel process.
+pub fn aux() ?*anyopaque {
+    return c.hp9_kern_aux();
+}
+
+pub fn setAux(p: ?*anyopaque) void {
+    c.hp9_kern_setaux(p);
+}
+
+/// Closes the calling process's close-on-exec fds.
+pub fn closeExec() void {
+    c.hp9_kern_closeexec();
+}
+
+/// Returns and clears the process's pending-note flag, which devpipe sets
+/// on a write to a closed pipe.
+pub fn takeNote() bool {
+    return c.hp9_kern_takenote() != 0;
+}
+
+/// Makes a pipe and returns its two fds.
+pub fn pipe() Error![2]u31 {
+    var fd: [2]c_int = .{ -1, -1 };
+    _ = try check(c.syspipe(&fd));
+    return .{ @intCast(fd[0]), @intCast(fd[1]) };
 }
 
 /// The host user, which is the kernel's hostowner (eve).
@@ -325,6 +452,9 @@ pub const Console = struct {
     out: *std.Io.Writer,
     err: *std.Io.Writer,
     mutex: std.atomic.Mutex = .unlocked,
+    /// Serializes reads, since processes in a tree share the console. A
+    /// reader blocked on the host waits with the lock held, so others yield.
+    rmutex: std.atomic.Mutex = .unlocked,
 };
 
 const max_consoles = 64;
@@ -371,6 +501,8 @@ fn hp9_policy_check(path: [*]const u8, len: c_long, op: c_int) callconv(.c) c_in
 fn hp9_cons_read(id: c_ulong, buf: [*]u8, n: c_long) callconv(.c) c_long {
     const con = console(id) orelse return -1;
     const r = con.in orelse return 0;
+    while (!con.rmutex.tryLock()) std.Thread.yield() catch {};
+    defer con.rmutex.unlock();
     const got = r.readSliceShort(buf[0..@intCast(n)]) catch return -1;
     return @intCast(got);
 }
@@ -437,4 +569,134 @@ test "spawn a process and read a host file through kern" {
     try std.testing.expectEqualStrings("mount -a #s/boot /\n", t.data[0..t.len]);
     try std.testing.expect(std.mem.indexOf(u8, t.missing, "does not exist") != null);
     try std.testing.expectEqualStrings("hp9", t.sysname[0..t.sysname_len]);
+}
+
+test "fork shares or copies groups, and await returns wait records" {
+    if (!available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try tmp.dir.createDirPath(io, "lib");
+    try tmp.dir.writeFile(io, .{ .sub_path = "lib/namespace", .data = "ns\n" });
+    try tmp.dir.createDirPath(io, "dev");
+    try tmp.dir.createDirPath(io, "env");
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &buf);
+    buf[n] = 0;
+
+    const T = struct {
+        root: [:0]u8,
+        err: ?anyerror = null,
+        where: []const u8 = "",
+        done: std.atomic.Value(bool) = .init(false),
+        waits: [4][64]u8 = undefined,
+        wait_lens: [4]usize = @splat(0),
+        no_child: [ERRMAX]u8 = undefined,
+        no_child_len: usize = 0,
+        child_saw: [16]u8 = undefined,
+        child_saw_len: usize = 0,
+
+        const Self = @This();
+        const Child = struct {
+            t: *Self,
+            kind: enum { copy_env, share_env, new_ns, nowait },
+            fn run(ch: *Child) void {
+                ch.body() catch |e| {
+                    ch.t.err = e;
+                    ch.t.where = @tagName(ch.kind);
+                };
+            }
+            fn body(ch: *Child) !void {
+                switch (ch.kind) {
+                    .copy_env => {
+                        ch.t.child_saw_len = try readAll("/env/x", &ch.t.child_saw);
+                        try writeAll("/env/x", "child");
+                        if (guestPid() != 2) return error.WrongPid;
+                        setExits("boom");
+                    },
+                    .share_env => try writeAll("/env/x", "shared"),
+                    .new_ns => {
+                        // The copied namespace still has the root; the new bind stays here.
+                        var scratch: [16]u8 = undefined;
+                        _ = try readAll("/lib/namespace", &scratch);
+                        try bind("#c", "/dev", MREPL);
+                        _ = try readAll("/dev/sysname", &scratch);
+                    },
+                    .nowait => {},
+                }
+            }
+        };
+
+        fn run(t: *@This()) void {
+            defer t.done.store(true, .release);
+            t.body() catch |e| {
+                if (t.err == null) t.err = e;
+                if (t.where.len == 0) t.where = "parent";
+            };
+        }
+        fn body(t: *@This()) !void {
+            var spec: [std.fs.max_path_bytes + 3]u8 = undefined;
+            try bind(try std.fmt.bufPrintZ(&spec, "#U{s}", .{t.root}), "/", MREPL);
+            try bind("#e", "/env", MREPL | MCREATE);
+            setGuestPid(1);
+            try writeAll("/env/x", "parent");
+            var tmpb: [16]u8 = undefined;
+
+            if (fork(0, 9, Child, Child.run, undefined)) |_| return error.ForkWithoutProc else |_| {}
+
+            var c1: Child = .{ .t = t, .kind = .copy_env };
+            try fork(RF.PROC | RF.FDG | RF.ENVG, 2, Child, Child.run, &c1);
+            t.wait_lens[0] = try await(&t.waits[0]);
+            try std.testing.expectEqualStrings("parent", tmpb[0..try readAll("/env/x", &tmpb)]);
+
+            var c2: Child = .{ .t = t, .kind = .share_env };
+            try fork(RF.PROC, 3, Child, Child.run, &c2);
+            t.wait_lens[1] = try await(&t.waits[1]);
+            try std.testing.expectEqualStrings("shared", tmpb[0..try readAll("/env/x", &tmpb)]);
+
+            var c3: Child = .{ .t = t, .kind = .new_ns };
+            try fork(RF.PROC | RF.NAMEG, 4, Child, Child.run, &c3);
+            t.wait_lens[2] = try await(&t.waits[2]);
+            if (open("/dev/sysname", OREAD)) |_| return error.ChildBindLeaked else |_| {}
+
+            var c4: Child = .{ .t = t, .kind = .nowait };
+            try fork(RF.PROC | RF.NOWAIT, 5, Child, Child.run, &c4);
+            if (await(&t.waits[3])) |_| return error.AwaitedNowaitChild else |_| {}
+            const e = errstr();
+            @memcpy(t.no_child[0..e.len], e);
+            t.no_child_len = e.len;
+            // Let the RFNOWAIT child finish before c4 goes out of scope.
+            try sleep(50);
+        }
+
+        fn readAll(path: [*:0]const u8, out: []u8) !usize {
+            const fd = try open(path, OREAD);
+            defer close(fd) catch {};
+            return pread(fd, out, 0);
+        }
+        fn writeAll(path: [*:0]const u8, data: []const u8) !void {
+            const fd = try create(path, OWRITE, 0o664);
+            defer close(fd) catch {};
+            _ = try pwrite(fd, data, 0);
+        }
+    };
+    var t: T = .{ .root = buf[0..n :0] };
+    try spawn("test", T, T.run, &t);
+    while (!t.done.load(.acquire)) std.Thread.yield() catch {};
+    if (t.err) |e| {
+        std.debug.print("failed in {s}\n", .{t.where});
+        return e;
+    }
+    try std.testing.expectEqualStrings("parent", t.child_saw[0..t.child_saw_len]);
+    // "pid utime stime real 'msg'", with the message as 9front's pexit makes it.
+    var f = std.mem.tokenizeScalar(u8, t.waits[0][0..t.wait_lens[0]], ' ');
+    try std.testing.expectEqualStrings("2", f.next().?);
+    _ = f.next();
+    _ = f.next();
+    _ = f.next();
+    try std.testing.expectEqualStrings("'test 2: boom'", f.rest());
+    try std.testing.expect(std.mem.startsWith(u8, t.waits[1][0..t.wait_lens[1]], "3 "));
+    try std.testing.expect(std.mem.endsWith(u8, t.waits[1][0..t.wait_lens[1]], " ''"));
+    try std.testing.expect(std.mem.startsWith(u8, t.waits[2][0..t.wait_lens[2]], "4 "));
+    try std.testing.expectEqualStrings("no living children", t.no_child[0..t.no_child_len]);
 }

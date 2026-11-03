@@ -66,13 +66,10 @@ hostuser(void)
 /*
  * Boots the kernel. The calling thread becomes the kernel's first Proc for
  * good, so callers use a private thread (src/kern.zig). Machines' processes
- * are made later with hp9_kern_spawn. Returns 0, or -1 with the error
+ * are made later with hp9_kern_spawn (proc.c). Returns 0, or -1 with the error
  * string set.
  */
-static Proc *bootproc;
-void hp9_kern_exit(void);
-extern int hp9_newegrp(void);
-extern void hp9_closeegrp(void);
+extern void hp9_proc_boot(void);	/* proc.c */
 
 int
 hp9_kern_boot(void)
@@ -88,7 +85,7 @@ hp9_kern_boot(void)
 	/* After chandevinit: devip sets sysname to the host name. */
 	kstrdup(&sysname, "hp9");
 	quotefmtinstall();
-	bootproc = up;
+	hp9_proc_boot();
 	return 0;
 }
 
@@ -98,65 +95,6 @@ hp9_kern_park(void)
 {
 	for(;;)
 		procsleep();
-}
-
-typedef struct Spawn Spawn;
-struct Spawn {
-	void	(*fn)(void*);
-	void	*arg;
-};
-
-static void
-spawntramp(void *v)
-{
-	Spawn s;
-
-	s = *(Spawn*)v;
-	free(v);
-	/* Now that up is set, kernel calls (and their errors) are allowed. */
-	up->slash = cclone(bootproc->slash);
-	up->dot = cclone(bootproc->slash);
-	up->pgrp = newpgrp();
-	up->fgrp = dupfgrp(nil);
-	up->rgrp = newrgrp();
-	if(hp9_newegrp() < 0)
-		panic("hp9_newegrp");
-	s.fn(s.arg);
-	hp9_kern_exit();
-}
-
-/*
- * Runs fn(arg) on a new kernel process with its own thread, a fresh
- * namespace (just #/, as the boot Proc has), no fds and its own rendezvous
- * group. Unlike drawterm's kproc it can be called from a thread that isn't
- * a Proc: it only allocates here, and the new thread sets up its groups
- * once up is set. Returns 0, or -1 if allocation fails.
- */
-int
-hp9_kern_spawn(char *name, void (*fn)(void*), void *arg)
-{
-	Proc *p;
-	Spawn *s;
-
-	s = malloc(sizeof *s);
-	if(s == nil)
-		return -1;
-	s->fn = fn;
-	s->arg = arg;
-	p = newproc();
-	p->fn = spawntramp;
-	p->arg = s;
-	strecpy(p->text, p->text+sizeof p->text, name);
-	osproc(p);
-	return 0;
-}
-
-/* Ends the calling kernel process; it doesn't return. */
-void
-hp9_kern_exit(void)
-{
-	hp9_closeegrp();
-	pexit("", 1);
 }
 
 /* The host user, which is hostowner. */

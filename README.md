@@ -83,17 +83,17 @@ when it isn't found.
 
 Flags: `--backend auto|hvf|kvm|whp|emu`, `--root DIR`, `--cwd DIR`, `--env
 name=value` (repeatable), `--rc 'cmd'`, `--trace[=FILE]`, `--dump-on-fault`,
-and the sandbox flags below. `--rc` runs `/bin/rc -c`, but rc can't fork
-until M3, so only commands without pipes or subprocesses work.
+and the sandbox flags below. `--rc` runs `/bin/rc -c`; pipelines and subprocesses work.
 
 `--backend auto` (the default) uses the host hypervisor and otherwise falls
 back to the emulator with a warning. The emulator also runs amd64 binaries on
 arm64 hosts, for testing; HVF runs arm64 only.
 
-Syscalls go through drawterm's kern. M2 serves one process: open, create,
-close, dup, pread, pwrite, seek, stat, fstat, wstat, fwstat, fd2path, bind,
-chdir, remove, errstr, brk_, sleep, notify and exits. rfork and exec come in
-M3, so rc and pipelines don't run yet. `--trace` prints one line per syscall
+Syscalls go through drawterm's kern: open, create, close, dup, pread, pwrite,
+seek, stat, fstat, wstat, fwstat, fd2path, bind, chdir, remove, errstr, brk_,
+sleep, notify, exits, and for process trees rfork, exec (including `#!`
+scripts), await and pipe. Each process has its own thread and vCPU; on HVF a
+tree can't yet hold more than 64 live processes. `--trace` prints one line per syscall
 to stderr, or to a file with `--trace=FILE`. `--dump-on-fault` prints the
 registers and the symbolized PC when the guest faults.
 

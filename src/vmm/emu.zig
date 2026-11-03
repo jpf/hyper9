@@ -49,7 +49,8 @@ pub const Backend = struct {
     io: std.Io,
     arch: vmm.Arch,
     lock: std.Io.Mutex = .init,
-    allocs: std.ArrayList([]align(vmm.page_size) u8) = .empty,
+    /// Live allocations: address to length.
+    allocs: std.AutoHashMapUnmanaged(usize, usize) = .empty,
     /// Bytes handed out, against the cap in `limit`.
     used: u64 = 0,
     limit: u64,
@@ -65,7 +66,8 @@ pub const Backend = struct {
     }
 
     pub fn destroy(b: *Backend) void {
-        for (b.allocs.items) |m| std.heap.page_allocator.free(m);
+        var it = b.allocs.iterator();
+        while (it.next()) |e| std.heap.page_allocator.free(@as([*]align(vmm.page_size) u8, @ptrFromInt(e.key_ptr.*))[0..e.value_ptr.*]);
         b.allocs.deinit(b.gpa);
         b.gpa.destroy(b);
     }
@@ -96,11 +98,23 @@ pub const Backend = struct {
         @memset(mem, 0);
         b.lock.lockUncancelable(b.io);
         defer b.lock.unlock(b.io);
-        b.allocs.append(b.gpa, mem) catch {
+        b.allocs.put(b.gpa, @intFromPtr(mem.ptr), mem.len) catch {
             std.heap.page_allocator.free(mem);
             return error.OutOfGuestMemory;
         };
         return mem;
+    }
+
+    /// Returns a whole allocation from `allocPages`.
+    pub fn freePages(b: *Backend, mem: []align(vmm.page_size) u8) void {
+        {
+            b.lock.lockUncancelable(b.io);
+            defer b.lock.unlock(b.io);
+            const len = (b.allocs.fetchRemove(@intFromPtr(mem.ptr)) orelse return).value;
+            std.debug.assert(len == mem.len);
+            b.used -= len;
+        }
+        std.heap.page_allocator.free(mem);
     }
 
     pub fn newAddressSpace(b: *Backend) vmm.CreateError!*AddressSpace {
@@ -139,6 +153,14 @@ pub const AddressSpace = struct {
         }
         try as.regions.append(as.backend.gpa, .{ .va = va, .mem = mem, .perms = perms });
         as.generation += 1;
+    }
+
+    pub fn unmap(as: *AddressSpace, va: u64) void {
+        for (as.regions.items, 0..) |r, i| if (r.va == va) {
+            _ = as.regions.swapRemove(i);
+            as.generation += 1;
+            return;
+        };
     }
 
     pub fn translate(as: *AddressSpace, va: u64, len: u64) ?[]u8 {
@@ -223,6 +245,8 @@ const State = struct {
             try check(uc.uc_mem_map_ptr(s.engine, r.va, r.mem.len, prot(r.perms), r.mem.ptr));
             s.mapped.append(s.backend.gpa, r) catch return error.OutOfGuestMemory;
         }
+        // Translated blocks may hold code from the old mappings.
+        try check(uc.uc_ctl(s.engine, uc_ctl_tb_flush));
         s.generation = as.generation;
     }
 
@@ -315,6 +339,9 @@ const State = struct {
     }
 };
 
+// uc_ctl_flush_tb is a macro: UC_CTL_WRITE(UC_CTL_TB_FLUSH, 0).
+const uc_ctl_tb_flush: c_uint = uc.UC_CTL_TB_FLUSH | (1 << 30);
+
 // QEMU's arm64 exception numbers, as passed to UC_HOOK_INTR.
 const arm64_excp_swi = 2;
 const arm64_nzcv: u64 = 0xf000_0000;
@@ -369,6 +396,7 @@ pub const Vcpu = struct {
     }
 
     pub fn setAddressSpace(v: *Vcpu, as: *AddressSpace) vmm.Error!void {
+        if (v.s.as == as) return;
         v.s.as = as;
         v.s.generation = 0;
     }

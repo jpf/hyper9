@@ -2,9 +2,11 @@
 //! drawterm's kern. See DESIGN.md, "Process model" and "Filesystem, boot
 //! and I/O".
 //!
-//! M2 runs one process. It runs on its own kernel thread (kern.spawn),
-//! which builds the machine's namespace, loads the binary, creates the vCPU
-//! and runs the exit loop; Machine.run waits for it.
+//! Each guest process runs on its own kernel thread with its own vCPU. The
+//! first is made with kern.spawn: it builds the machine's namespace, loads
+//! the program and runs the exit loop. rfork makes the others with
+//! kern.fork, and they run the same loop. Machine.run waits for the first
+//! to exit, then stops the rest.
 
 const std = @import("std");
 const vmm = @import("vmm.zig");
@@ -13,6 +15,7 @@ const aout = @import("aout.zig");
 const kern = @import("kern.zig");
 const syscall = @import("syscall.zig");
 const policy = @import("policy.zig");
+const segment = @import("segment.zig");
 
 pub const Status = union(enum) {
     /// The `exits` string; empty means success.
@@ -87,6 +90,7 @@ pub const Machine = struct {
     plan: policy.Plan,
     arena: *std.heap.ArenaAllocator,
     msg_buf: [256]u8 = undefined,
+    err_buf: [256]u8 = undefined,
     /// Why the last run failed with NamespaceFailed, NotFound or NotExecutable,
     /// or why init failed with PolicyConflict.
     err_msg: []const u8 = "",
@@ -161,32 +165,42 @@ pub const Machine = struct {
             m.gpa.destroy(job);
             return e;
         };
-        kern.spawn("hp9", Job, Job.main, job) catch |e| {
+        const first = job.newProc() catch |e| {
             kern.removeConsole(job.con_id);
             m.gpa.destroy(job);
             return e;
         };
+        kern.spawn("hp9", Proc, firstMain, first) catch |e| {
+            job.dropProc(first);
+            kern.removeConsole(job.con_id);
+            job.procs.deinit(m.gpa);
+            m.gpa.destroy(job);
+            return e;
+        };
 
+        var timed_out = false;
         if (m.plan.timeout_ns) |ns| {
             const d: std.Io.Clock.Duration = .{ .raw = .fromNanoseconds(ns), .clock = .awake };
-            job.done.waitTimeout(m.io, .{ .duration = d }) catch {
-                job.stop();
-                // Keep kicking until it notices, for a grace period.
-                var waited: u32 = 0;
-                while (waited < grace_ms) : (waited += 10) {
-                    const tick: std.Io.Clock.Duration = .{ .raw = .fromMilliseconds(10), .clock = .awake };
-                    if (job.done.waitTimeout(m.io, .{ .duration = tick })) |_| break else |_| job.stop();
-                }
-                if (!job.done.isSet()) {
-                    m.stuck = true;
-                    kern.removeConsole(job.con_id);
-                    return .{ .killed = timeout_note };
-                }
+            job.first_done.waitTimeout(m.io, .{ .duration = d }) catch {
+                job.timed_out.store(true, .release);
+                timed_out = true;
             };
         }
-        job.done.waitUncancelable(m.io);
+        if (!timed_out) job.first_done.waitUncancelable(m.io);
+        // The machine ends with its first process: any others are stopped,
+        // as at a timeout.
+        job.stopAll();
+        if (!job.waitAll()) {
+            m.stuck = true;
+            kern.removeConsole(job.con_id);
+            return .{ .killed = timeout_note };
+        }
         kern.removeConsole(job.con_id);
-        defer m.gpa.destroy(job);
+        defer {
+            job.procs.deinit(m.gpa);
+            m.gpa.destroy(job);
+        }
+        if (timed_out) return .{ .killed = timeout_note };
         m.err_msg = m.copyOut(job.mc.err_msg);
         const st = job.result catch |e| return e;
         return switch (st) {
@@ -202,8 +216,10 @@ pub const Machine = struct {
     }
 
     const timeout_note = "hp9: timeout";
+    const stopped_note = "hp9: machine stopped";
     const grace_ms = 500;
 
+    /// One run of the machine: its process tree and console.
     const Job = struct {
         /// Points at `mc`.
         m: *Machine,
@@ -212,57 +228,179 @@ pub const Machine = struct {
         argv: []const []const u8,
         con: kern.Console,
         con_id: u32 = 0,
+        /// The first process's outcome, set before `first_done`.
         result: RunError!Status = error.Kern,
-        done: std.Io.Event = .unset,
-        /// Set at the deadline; the exit loop checks it after every exit.
+        first_done: std.Io.Event = .unset,
+        /// Set when the last process has exited.
+        all_done: std.Io.Event = .unset,
         timed_out: std.atomic.Value(bool) = .init(false),
-        /// The running process's Proc and vCPU, for `stop`. Guarded by `lock`.
+        /// Set to end every process; exit loops check it after every exit.
+        stopping: std.atomic.Value(bool) = .init(false),
+        /// Guards `procs`, `next_pid` and each Proc's `kproc` and `vcpu`.
         lock: std.atomic.Mutex = .unlocked,
-        proc: ?*kern.Proc = null,
-        vcpu: ?*vmm.Vcpu = null,
-
-        fn main(j: *Job) void {
-            j.result = j.m.process(j);
-            // err_msg can be the Proc's errstr, which goes when it exits.
-            const e = j.m.err_msg;
-            if (e.len > 0 and !(@intFromPtr(e.ptr) >= @intFromPtr(&j.m.msg_buf) and @intFromPtr(e.ptr) < @intFromPtr(&j.m.msg_buf) + j.m.msg_buf.len)) {
-                j.m.err_msg = j.m.keep(e);
-            }
-            j.lockSpin();
-            j.proc = null;
-            j.vcpu = null;
-            j.lock.unlock();
-            j.done.set(j.m.io);
-        }
+        /// Live processes. A process is only made by a live one, so once
+        /// this is empty it stays empty.
+        procs: std.ArrayList(*Proc) = .empty,
+        next_pid: u32 = 1,
+        trace_lock: std.atomic.Mutex = .unlocked,
 
         fn lockSpin(j: *Job) void {
             while (!j.lock.tryLock()) std.atomic.spinLoopHint();
         }
 
-        /// Stops the process at the deadline. Safe from any thread.
-        fn stop(j: *Job) void {
-            j.timed_out.store(true, .release);
+        /// Allocates and registers a process with the next pid.
+        fn newProc(j: *Job) error{OutOfMemory}!*Proc {
+            const gpa = j.m.gpa;
+            const p = try gpa.create(Proc);
+            errdefer gpa.destroy(p);
             j.lockSpin();
             defer j.lock.unlock();
-            if (j.vcpu) |v| v.kick();
-            if (j.proc) |p| kern.interrupt(p);
+            try j.procs.append(gpa, p);
+            p.* = .{ .job = j, .pid = j.next_pid };
+            j.next_pid += 1;
+            return p;
         }
 
-        fn attach(j: *Job, v: ?*vmm.Vcpu) void {
+        /// Unregisters and frees a process that never ran.
+        fn dropProc(j: *Job, p: *Proc) void {
+            j.lockSpin();
+            for (j.procs.items, 0..) |q, i| if (q == p) {
+                _ = j.procs.swapRemove(i);
+                break;
+            };
+            j.lock.unlock();
+            j.m.gpa.destroy(p);
+        }
+
+        /// Stops every process: kicks vCPUs and interrupts blocking
+        /// kernel calls. Safe from any thread.
+        fn stopAll(j: *Job) void {
+            j.stopping.store(true, .release);
             j.lockSpin();
             defer j.lock.unlock();
-            j.proc = kern.self();
-            j.vcpu = v;
+            for (j.procs.items) |p| {
+                if (p.vcpu) |v| v.kick();
+                if (p.kproc) |k| kern.interrupt(k);
+            }
+        }
+
+        /// Waits for every process to exit after `stopAll`, kicking again
+        /// for a grace period. Returns false if some are stuck.
+        fn waitAll(j: *Job) bool {
+            var waited: u32 = 0;
+            while (waited < grace_ms) : (waited += 10) {
+                const tick: std.Io.Clock.Duration = .{ .raw = .fromMilliseconds(10), .clock = .awake };
+                if (j.all_done.waitTimeout(j.m.io, .{ .duration = tick })) |_| return true else |_| j.stopAll();
+            }
+            return j.all_done.isSet();
         }
     };
 
-    /// Runs on the process's kernel thread.
-    fn process(m: *Machine, j: *Job) RunError!Status {
+    /// One guest process: a kernel process with its own host thread, an
+    /// address space and segments, and a vCPU while it runs.
+    const Proc = struct {
+        job: *Job,
+        /// Machine-local pid.
+        pid: u32,
+        /// Set on the process's own thread; guarded by `job.lock`.
+        kproc: ?*kern.Proc = null,
+        vcpu: ?*vmm.Vcpu = null,
+        vcpu_store: vmm.Vcpu = undefined,
+        as: ?vmm.AddressSpace = null,
+        segs: segment.Segs = .{},
+        sys: syscall.Process = undefined,
+        /// Registers to start from.
+        ureg: vmm.Ureg = undefined,
+        /// The Tos address, for the pid at fork.
+        tos: u64 = 0,
+        /// The a.out, for symbolizing faults with dump_on_fault.
+        image: ?[]u8 = null,
+        msg_buf: [256]u8 = undefined,
+
+        fn setKproc(p: *Proc) void {
+            p.job.lockSpin();
+            defer p.job.lock.unlock();
+            p.kproc = kern.self();
+        }
+
+        fn setVcpu(p: *Proc, v: ?*vmm.Vcpu) void {
+            p.job.lockSpin();
+            defer p.job.lock.unlock();
+            p.vcpu = v;
+        }
+
+        fn initSys(p: *Proc) void {
+            const m = p.job.m;
+            p.sys = .{
+                .pid = p.pid,
+                .gpa = m.gpa,
+                .backend = m.backend,
+                .as = p.as.?,
+                .segs = &p.segs,
+                .trace = m.opts.trace,
+                .trace_lock = &p.job.trace_lock,
+            };
+        }
+
+        fn keepImage(p: *Proc, bytes: []const u8) void {
+            if (p.image) |old| p.job.m.gpa.free(old);
+            p.image = if (p.job.m.opts.dump_on_fault) p.job.m.gpa.dupe(u8, bytes) catch null else null;
+        }
+
+        /// Frees the process and unregisters it. Called last on its thread;
+        /// the job may be gone once it returns.
+        fn exit(p: *Proc) void {
+            const j = p.job;
+            const gpa = j.m.gpa;
+            const io = j.m.io;
+            if (p.vcpu) |v| {
+                p.setVcpu(null);
+                v.destroy();
+            }
+            if (p.as) |as| {
+                p.segs.release(as);
+                as.destroy();
+            }
+            if (p.image) |b| gpa.free(b);
+            j.lockSpin();
+            for (j.procs.items, 0..) |q, i| if (q == p) {
+                _ = j.procs.swapRemove(i);
+                break;
+            };
+            const empty = j.procs.items.len == 0;
+            j.lock.unlock();
+            gpa.destroy(p);
+            if (empty) j.all_done.set(io);
+        }
+    };
+
+    /// The first process's thread: builds the namespace, loads the program
+    /// and runs it.
+    fn firstMain(p: *Proc) void {
+        const j = p.job;
+        const m = j.m;
         // devfs checks this thread's accesses against the plan.
         kern.setPlan(&m.plan);
-        defer kern.setPlan(null);
-        j.attach(null);
-        if (j.timed_out.load(.acquire)) return .{ .killed = timeout_note };
+        kern.setGuestPid(p.pid);
+        p.setKproc();
+        const r = m.startFirst(p);
+        // The status and err_msg can point into the Proc or its errstr,
+        // which go when it exits.
+        j.result = if (r) |st| switch (st) {
+            .exited => |t| .{ .exited = m.keep(t) },
+            .killed => |t| .{ .killed = m.keep(t) },
+        } else |e| e;
+        const e = m.err_msg;
+        if (e.len > 0 and !(@intFromPtr(e.ptr) >= @intFromPtr(&m.msg_buf) and @intFromPtr(e.ptr) < @intFromPtr(&m.msg_buf) + m.msg_buf.len)) {
+            m.err_msg = m.keep2(e);
+        }
+        j.first_done.set(m.io);
+        p.exit();
+    }
+
+    fn startFirst(m: *Machine, p: *Proc) RunError!Status {
+        const j = p.job;
+        if (j.stopping.load(.acquire)) return .{ .killed = timeout_note };
         try m.buildNamespace(j.con_id);
 
         var arena: std.heap.ArenaAllocator = .init(m.gpa);
@@ -279,59 +417,249 @@ pub const Machine = struct {
             m.err_msg = "wrong architecture";
             return error.NotExecutable;
         }
-
-        const as = try m.backend.newAddressSpace();
-        defer as.destroy();
-        // pids are per machine; the first process is 1 (rfork numbers the
-        // rest from M3).
-        const pid = 1;
-        const img = try loader.load(m.backend, as, bytes, j.argv, pid);
-
-        var vcpu = try m.backend.createVcpu();
-        defer vcpu.destroy();
-        try vcpu.setAddressSpace(as);
-        j.attach(&vcpu);
-        defer j.attach(null);
-
-        var p: syscall.Process = .{
-            .pid = pid,
-            .backend = m.backend,
-            .as = as,
-            .brk = img.ebss,
-            .brk_floor = img.data_base,
-            .brk_limit = aout.layout(m.arch).ustktop - aout.layout(m.arch).stack_size,
-            .trace = m.opts.trace,
+        var name_buf: [kern.ERRMAX]u8 = undefined;
+        const name = switch (j.prog) {
+            .guest => |n| n,
+            .bytes => if (j.argv.len > 0) j.argv[0] else "a.out",
         };
-        var u: vmm.Ureg = .initExec(img.arch, img.entry, img.sp, img.tos);
+        kern.setText(std.fmt.bufPrintZ(&name_buf, "{s}", .{basename(name)}) catch "a.out");
+
+        p.as = try m.backend.newAddressSpace();
+        const img = try loader.load(m.gpa, m.backend, p.as.?, bytes, j.argv, p.pid);
+        p.segs = img.segs;
+        p.tos = img.tos;
+        p.ureg = .initExec(img.arch, img.entry, img.sp, img.tos);
+        p.keepImage(bytes);
+        p.initSys();
+        return m.loop(p);
+    }
+
+    /// A forked process's thread.
+    fn childMain(p: *Proc) void {
+        const m = p.job.m;
+        kern.setPlan(&m.plan);
+        p.setKproc();
+        const st = m.loop(p) catch |e| Status{ .killed = std.fmt.bufPrint(&p.msg_buf, "hp9: {t}", .{e}) catch "hp9: error" };
+        setExits(switch (st) {
+            .exited => |t| t,
+            .killed => |t| t,
+        });
+        p.exit();
+    }
+
+    fn setExits(msg: []const u8) void {
+        var buf: [kern.ERRMAX]u8 = undefined;
+        const n = @min(msg.len, buf.len - 1);
+        @memcpy(buf[0..n], msg[0..n]);
+        buf[n] = 0;
+        kern.setExits(buf[0..n :0]);
+    }
+
+    /// The exit loop: runs the process on its vCPU and serves its exits
+    /// until it exits or dies. Runs on the process's thread.
+    fn loop(m: *Machine, p: *Proc) RunError!Status {
+        const j = p.job;
+        p.vcpu_store = m.backend.createVcpu() catch |e| switch (e) {
+            // HVF's 64 live vCPUs, until processes share a pool of them.
+            error.HypervisorFailed => return .{ .killed = "hp9: no vcpus" },
+            else => return e,
+        };
+        p.setVcpu(&p.vcpu_store);
+        const vcpu = &p.vcpu_store;
+        try vcpu.setAddressSpace(p.as.?);
+        var u = p.ureg;
         vcpu.setUreg(&u);
         while (true) {
-            if (j.timed_out.load(.acquire)) return .{ .killed = timeout_note };
+            if (j.stopping.load(.acquire)) return .{ .killed = if (j.timed_out.load(.acquire)) timeout_note else stopped_note };
             const exit = try vcpu.run();
             vcpu.getUreg(&u);
             switch (exit) {
-                .syscall => switch (syscall.dispatch(&p, &u)) {
+                .syscall => switch (syscall.dispatch(&p.sys, &u)) {
                     .ret => |r| {
                         u.setReturn(r);
                         vcpu.setUreg(&u);
                     },
-                    .exits => |s| return .{ .exited = m.keep(s) },
-                    .killed => |s| return .{ .killed = m.keep(s) },
+                    .exits => |s| {
+                        setExits(s);
+                        return .{ .exited = s };
+                    },
+                    .killed => |s| return .{ .killed = s },
+                    .rfork => |flags| {
+                        const r: i64 = if (m.fork(p, flags, &u)) |pid| pid else |_| -1;
+                        p.sys.traceRet("rfork", r);
+                        u.setReturn(@bitCast(r));
+                        vcpu.setUreg(&u);
+                    },
+                    .exec => |e| {
+                        defer e.deinit(m.gpa);
+                        if (m.exec(p, vcpu, e)) |_| {
+                            p.sys.traceRet("exec", 0);
+                            u = p.ureg;
+                        } else |_| {
+                            p.sys.traceRet("exec", -1);
+                            u.setReturn(@bitCast(@as(i64, -1)));
+                        }
+                        vcpu.setUreg(&u);
+                    },
                 },
                 .fault => |f| {
-                    if (m.opts.dump_on_fault) dumpFault(m.opts.stdio.err, &u, f, bytes);
-                    return .{ .killed = try std.fmt.bufPrint(&m.msg_buf, "sys: trap: fault {t} addr=0x{x} pc=0x{x}", .{ f.access, f.addr, u.pc() }) };
+                    // The stack grows down on demand, as 9front's does.
+                    if (f.access != .exec and p.segs.growStack(f.addr)) continue;
+                    if (m.opts.dump_on_fault) dumpFault(m.opts.stdio.err, &u, f, p.image orelse "");
+                    return .{ .killed = try std.fmt.bufPrint(&p.msg_buf, "sys: trap: fault {t} addr=0x{x} pc=0x{x}", .{ f.access, f.addr, u.pc() }) };
                 },
                 .interrupted => {},
                 .halted => return .{ .killed = "halted" },
-                .other => |code| return .{ .killed = try std.fmt.bufPrint(&m.msg_buf, "sys: trap: unexpected exit 0x{x} pc=0x{x}", .{ code, u.pc() }) },
+                .other => |code| return .{ .killed = try std.fmt.bufPrint(&p.msg_buf, "sys: trap: unexpected exit 0x{x} pc=0x{x}", .{ code, u.pc() }) },
             }
         }
+    }
+
+    /// rfork. With RF.PROC, starts a child that resumes from `u` with 0
+    /// returned, and returns its pid; without, changes the caller's groups.
+    /// On error the error string is set.
+    fn fork(m: *Machine, p: *Proc, flags: u32, u: *const vmm.Ureg) error{Failed}!u32 {
+        const flag: c_int = @bitCast(flags);
+        if (flags & kern.RF.PROC == 0) {
+            kern.rfork(flag) catch return error.Failed;
+            return 0;
+        }
+        const j = p.job;
+        const c = j.newProc() catch return failWith("no procs");
+        const cas = m.backend.newAddressSpace() catch {
+            j.dropProc(c);
+            return failWith("no procs");
+        };
+        c.as = cas;
+        c.segs = p.segs.fork(cas, flags & kern.RF.MEM != 0) catch {
+            cas.destroy();
+            j.dropProc(c);
+            return failWith("virtual memory allocation failed");
+        };
+        loader.setTosPid(cas, p.tos, c.pid);
+        c.tos = p.tos;
+        c.ureg = u.*;
+        c.ureg.setReturn(0);
+        if (p.image) |b| c.image = m.gpa.dupe(u8, b) catch null;
+        c.initSys();
+        c.sys.notify = p.sys.notify;
+        kern.fork(flag, c.pid, Proc, childMain, c) catch {
+            if (c.image) |b| m.gpa.free(b);
+            c.segs.release(cas);
+            cas.destroy();
+            j.dropProc(c);
+            return error.Failed;
+        };
+        return c.pid;
+    }
+
+    fn failWith(msg: []const u8) error{Failed} {
+        kern.setErrstr(msg);
+        return error.Failed;
+    }
+
+    const max_indir = 8;
+    const ebadexec = "exec header invalid";
+
+    /// exec, as 9front's sysexec: loads the program (following up to 8
+    /// levels of #! interpreters) into a new address space, and only then
+    /// replaces the process's memory, closes its close-on-exec fds and
+    /// resets its registers. On error the process is unchanged and the
+    /// error string is set.
+    fn exec(m: *Machine, p: *Proc, vcpu: *vmm.Vcpu, e: syscall.Exec) error{Failed}!void {
+        var arena_state: std.heap.ArenaAllocator = .init(m.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        // The last path element names the process, and is argv[0] for a script.
+        const elem = basename(e.path);
+
+        var pre: std.ArrayList([]const u8) = .empty;
+        var bytes = readFile(arena, e.path) catch |err| return execError(err);
+        var indir: usize = 0;
+        while (std.mem.startsWith(u8, bytes, "#!")) : (indir += 1) {
+            if (indir >= max_indir) return failWith(ebadexec);
+            const head = bytes[0..@min(bytes.len, 256)];
+            const nl = std.mem.indexOfScalar(u8, head, '\n') orelse return failWith(ebadexec);
+            var toks: std.ArrayList([]const u8) = .empty;
+            var it = std.mem.tokenizeAny(u8, head[2..nl], " \t\r");
+            while (it.next()) |t| toks.append(arena, t) catch return failWith("no memory");
+            if (toks.items.len < 1 or toks.items.len >= 32) return failWith(ebadexec);
+            if (indir == 0) pre.append(arena, e.path) catch return failWith("no memory");
+            pre.insertSlice(arena, 0, toks.items) catch return failWith("no memory");
+            const interp = std.fmt.allocPrintSentinel(arena, "{s}", .{toks.items[0]}, 0) catch return failWith("no memory");
+            bytes = readFile(arena, interp) catch |err| return execError(err);
+        }
+        const hdr = aout.parse(bytes) catch return failWith(ebadexec);
+        if (hdr.arch != m.arch) return failWith(ebadexec);
+
+        // For a script, as 9front builds it: the interpreters' arguments
+        // (the outermost's first) and the script's full name, with the
+        // first interpreter's name swapped for `elem`, then the caller's
+        // arguments after argv[0]. So `#!/bin/rc` running /bin/x with argv
+        // `x a` gets `x /bin/x a`.
+        var argv: std.ArrayList([]const u8) = .empty;
+        if (indir > 0) {
+            argv.append(arena, elem) catch return failWith("no memory");
+            argv.appendSlice(arena, pre.items[1..]) catch return failWith("no memory");
+            argv.appendSlice(arena, @ptrCast(e.argv[1..])) catch return failWith("no memory");
+        } else argv.appendSlice(arena, @ptrCast(e.argv)) catch return failWith("no memory");
+
+        const nas = m.backend.newAddressSpace() catch return failWith("virtual memory allocation failed");
+        const img = loader.load(m.gpa, m.backend, nas, bytes, argv.items, p.pid) catch |err| {
+            nas.destroy();
+            return failWith(switch (err) {
+                error.BadExec, error.Truncated, error.BadMagic => ebadexec,
+                else => "virtual memory allocation failed",
+            });
+        };
+        vcpu.setAddressSpace(nas) catch {
+            var segs = img.segs;
+            segs.release(nas);
+            nas.destroy();
+            return failWith("virtual memory allocation failed");
+        };
+
+        // Committed.
+        const old = p.as.?;
+        p.segs.release(old);
+        old.destroy();
+        p.as = nas;
+        p.segs = img.segs;
+        p.tos = img.tos;
+        p.sys.as = nas;
+        p.sys.notify = 0;
+        p.ureg = .initExec(img.arch, img.entry, img.sp, img.tos);
+        p.keepImage(bytes);
+        kern.closeExec();
+        var name_buf: [kern.ERRMAX]u8 = undefined;
+        kern.setText(std.fmt.bufPrintZ(&name_buf, "{s}", .{elem}) catch "a.out");
+    }
+
+    fn execError(err: RunError) error{Failed} {
+        // A failed stat or open has set the error string already.
+        return switch (err) {
+            error.NotFound => error.Failed,
+            error.OutOfMemory => failWith("no memory"),
+            else => failWith(ebadexec),
+        };
+    }
+
+    fn basename(path: []const u8) []const u8 {
+        const i = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
+        return path[i + 1 ..];
     }
 
     fn keep(m: *Machine, s: []const u8) []const u8 {
         const n = @min(s.len, m.msg_buf.len);
         @memmove(m.msg_buf[0..n], s[0..n]);
         return m.msg_buf[0..n];
+    }
+
+    /// Like `keep`, into a separate buffer, for `err_msg`.
+    fn keep2(m: *Machine, s: []const u8) []const u8 {
+        const n = @min(s.len, m.err_buf.len);
+        @memmove(m.err_buf[0..n], s[0..n]);
+        return m.err_buf[0..n];
     }
 
     fn fail(m: *Machine, comptime fmt: []const u8, args: anytype) error{NamespaceFailed} {

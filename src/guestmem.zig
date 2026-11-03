@@ -98,6 +98,30 @@ pub fn string(as: vmm.AddressSpace, va: u64, buf: []u8) Error![:0]u8 {
     return error.BadAddress;
 }
 
+/// Copies a NUL-terminated guest string of any length up to `max` bytes
+/// into new memory. Fails with BadAddress if it's unmapped before the NUL
+/// or longer than `max`.
+pub fn stringAlloc(as: vmm.AddressSpace, va: u64, gpa: std.mem.Allocator, max: usize) (Error || std.mem.Allocator.Error)![:0]u8 {
+    var n: usize = 0;
+    while (true) {
+        const avail = vmm.page_size - (va +% n) % vmm.page_size;
+        const src = as.translate(va +% n, avail) orelse return error.BadAddress;
+        if (std.mem.indexOfScalar(u8, src, 0)) |z| {
+            n += z;
+            break;
+        }
+        n += src.len;
+        if (n > max) return error.BadAddress;
+    }
+    if (n > max) return error.BadAddress;
+    const out = try gpa.allocSentinel(u8, n, 0);
+    errdefer gpa.free(out);
+    // Another thread sharing the memory may change it meanwhile; the copy
+    // is still NUL-terminated.
+    try read(as, va, out[0..n]);
+    return out;
+}
+
 /// Copies `data` out to guest memory at `va`.
 pub fn write(as: vmm.AddressSpace, va: u64, data: []const u8) Error!void {
     var src = data;

@@ -5,6 +5,11 @@
 // and rings the doorbell: a store to a page whose IPA the host never mapped,
 // which the hypervisor hands to userspace. The host advances the PC past the
 // store, so the shim then reloads the (possibly edited) Ureg and ERETs.
+// If the host set the shared page's flush word (the vCPU switched address
+// spaces, or pages were unmapped), it flushes the TLB and I-cache first.
+//
+// A vCPU's first run starts at `enter` (vectors + 0x800) at EL1, which
+// always flushes and then loads the Ureg the same way.
 //
 // Keep in sync with src/vmm/hvf.zig (shared page layout and kernel VAs).
 
@@ -14,6 +19,7 @@
 .equ UREG_TYPE,   272
 .equ SHARED_FAR,  280
 .equ SHARED_WHY,  288
+.equ SHARED_FLUSH, 296
 
 .equ WHY_EL0,     1   // synchronous exception from EL0: syscall or fault
 .equ WHY_EL1,     2   // exception inside the shim itself
@@ -51,6 +57,13 @@ vectors:
 	vector WHY_EL1
 	vector WHY_EL1
 
+	// vectors + 0x800: first entry.
+	.balign 2048
+enter:
+	mov x1, #1
+	str x1, [sp, #SHARED_FLUSH]
+	b restore
+
 save:
 	stp x2, x3, [sp, #16]
 	stp x4, x5, [sp, #32]
@@ -84,6 +97,17 @@ save:
 	add x1, x1, #0x1000
 	str x0, [x1]
 
+restore:
+	ldr x1, [sp, #SHARED_FLUSH]
+	cbz x1, 1f
+	str xzr, [sp, #SHARED_FLUSH]
+	dsb ish
+	tlbi vmalle1is
+	dsb ish
+	ic ialluis
+	dsb ish
+	isb
+1:
 	ldr x1, [sp, #UREG_SP]
 	msr sp_el0, x1
 	ldr x1, [sp, #UREG_PC]

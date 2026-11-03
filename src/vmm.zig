@@ -175,6 +175,12 @@ pub const Backend = union(Kind) {
             inline else => |p| p.allocPages(n),
         };
     }
+    /// Returns a whole allocation from `allocPages`, no longer mapped.
+    pub fn freePages(b: Backend, mem: []align(page_size) u8) void {
+        switch (b) {
+            inline else => |p| p.freePages(mem),
+        }
+    }
     pub fn newAddressSpace(b: Backend) CreateError!AddressSpace {
         return switch (b) {
             inline else => |p, k| @unionInit(AddressSpace, @tagName(k), try p.newAddressSpace()),
@@ -209,6 +215,7 @@ pub const AddressSpace = union(enum) {
         }.t } };
     }
 
+    /// Frees the space's own state; mapped pages belong to the caller.
     pub fn destroy(as: AddressSpace) void {
         switch (as) {
             .fake => {},
@@ -221,6 +228,14 @@ pub const AddressSpace = union(enum) {
             .fake => error.NotImplemented,
             inline else => |p| p.map(va, mem, perms),
         };
+    }
+    /// Removes the mapping `map` made at `va`; its pages stay allocated.
+    /// vCPUs running the space see the change from their next run.
+    pub fn unmap(as: AddressSpace, va: u64) void {
+        switch (as) {
+            .fake => {},
+            inline else => |p| p.unmap(va),
+        }
     }
     /// Host view of [va, va+len) if it lies within one mapping.
     pub fn translate(as: AddressSpace, va: u64, len: u64) ?[]u8 {

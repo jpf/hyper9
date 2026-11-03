@@ -1,7 +1,8 @@
 //! Hypervisor.framework backend (macOS, arm64).
 //!
-//! Guest-physical layout: one RAM region at ram_ipa, handed out 4K at a time
-//! by a bump allocator for user pages, page tables and shared pages alike.
+//! Guest-physical layout: one RAM region at ram_ipa, handed out in 4K pages
+//! for user pages, page tables and shared pages alike, first-fit from a list
+//! of freed ranges and otherwise from the end.
 //! User code runs at EL0 under TTBR0. The shim, the doorbell page and the
 //! per-vCPU shared pages live at fixed kernel addresses under TTBR1, which
 //! every vCPU shares.
@@ -21,20 +22,28 @@ const doorbell_ipa: u64 = 0x1000_0000; // never mapped, so stores exit to the ho
 const kva_shim: u64 = 0xFFFF_FFFF_F000_0000;
 const kva_doorbell: u64 = kva_shim + 0x1000;
 const kva_shared: u64 = kva_shim + 0x10000;
-const max_vcpus = 64;
 
 /// The per-vCPU page the shim saves into; layout is fixed by shim.S.
 const Shared = extern struct {
     ureg: Ureg,
     far: u64,
     why: u64,
+    /// Set by the host to make the shim flush the TLB and I-cache before
+    /// it returns to EL0.
+    flush: u64,
 };
 comptime {
     std.debug.assert(@offsetOf(Ureg, "sp") == 248);
     std.debug.assert(@offsetOf(Ureg, "type") == 272);
     std.debug.assert(@offsetOf(Shared, "far") == 280);
     std.debug.assert(@offsetOf(Shared, "why") == 288);
+    std.debug.assert(@offsetOf(Shared, "flush") == 296);
 }
+/// shim.S's entry point after the vectors, which restores the Ureg from the
+/// shared page and ERETs, flushing first if asked.
+const shim_enter = 0x800;
+/// EL1h with DAIF masked, for entering the shim.
+const psr_el1h: u64 = 0x3c5;
 const why_el0 = 1;
 const why_irq = 3;
 
@@ -128,11 +137,20 @@ fn pteAttrs(user: bool, perms: vmm.Perms) u64 {
 pub const Backend = struct {
     gpa: std.mem.Allocator,
     ram: []align(std.heap.page_size_min) u8,
+    /// Pages past `next` have never been handed out.
     next: usize = 0,
+    /// Freed ranges below `next`, sorted and coalesced.
+    free: std.ArrayList(Range) = .empty,
     lock: std.Io.Mutex = .init,
     io: std.Io,
     kernel_root: u64 = 0,
-    nvcpus: u32 = 0,
+    /// Serializes changes to the kernel tables (allocPages takes `lock`).
+    ktables: std.atomic.Mutex = .unlocked,
+    /// Shared-page slots in use, one bit per vCPU.
+    slots: u64 = 0,
+    next_as_id: u64 = 1,
+
+    const Range = struct { off: usize, len: usize };
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, opts: vmm.Options) vmm.CreateError!*Backend {
         if (opts.arch != .arm64) return error.WrongArch;
@@ -163,6 +181,7 @@ pub const Backend = struct {
     pub fn destroy(b: *Backend) void {
         _ = hv_vm_destroy();
         std.posix.munmap(b.ram);
+        b.free.deinit(b.gpa);
         b.gpa.destroy(b);
     }
 
@@ -174,36 +193,94 @@ pub const Backend = struct {
 
     /// Returns zeroed pages backed by guest-physical memory.
     pub fn allocPages(b: *Backend, n: usize) vmm.Error![]align(vmm.page_size) u8 {
+        const len = n * vmm.page_size;
+        if (len == 0) return error.BadAddress;
+        const off = blk: {
+            b.lock.lockUncancelable(b.io);
+            defer b.lock.unlock(b.io);
+            for (b.free.items, 0..) |*r, i| if (r.len >= len) {
+                const off = r.off;
+                r.off += len;
+                r.len -= len;
+                if (r.len == 0) _ = b.free.orderedRemove(i);
+                break :blk off;
+            };
+            if (b.next + len > b.ram.len) return error.OutOfGuestMemory;
+            b.next += len;
+            break :blk b.next - len;
+        };
+        const mem: []align(vmm.page_size) u8 = @alignCast(b.ram[off..][0..len]);
+        // Freed pages are dirty; never-used ones are already zero.
+        @memset(mem, 0);
+        return mem;
+    }
+
+    /// Returns pages from `allocPages` (all of them, or any page-aligned
+    /// part). They must no longer be mapped anywhere.
+    pub fn freePages(b: *Backend, mem: []align(vmm.page_size) u8) void {
+        if (mem.len == 0) return;
         b.lock.lockUncancelable(b.io);
         defer b.lock.unlock(b.io);
-        const len = n * vmm.page_size;
-        if (b.next + len > b.ram.len) return error.OutOfGuestMemory;
-        const mem: []align(vmm.page_size) u8 = @alignCast(b.ram[b.next..][0..len]);
-        b.next += len;
-        return mem;
+        b.freeLocked(@intFromPtr(mem.ptr) - @intFromPtr(b.ram.ptr), mem.len);
+    }
+
+    fn freeLocked(b: *Backend, off: usize, len: usize) void {
+        var i: usize = 0;
+        while (i < b.free.items.len and b.free.items[i].off < off) i += 1;
+        var r: Range = .{ .off = off, .len = len };
+        if (i < b.free.items.len and r.off + r.len == b.free.items[i].off) {
+            r.len += b.free.items[i].len;
+            _ = b.free.orderedRemove(i);
+        }
+        if (i > 0 and b.free.items[i - 1].off + b.free.items[i - 1].len == r.off) {
+            i -= 1;
+            r.off = b.free.items[i].off;
+            r.len += b.free.items[i].len;
+            _ = b.free.orderedRemove(i);
+        }
+        if (r.off + r.len == b.next) {
+            b.next = r.off;
+            return;
+        }
+        // On allocation failure the range is lost, which is only a leak.
+        b.free.insert(b.gpa, i, r) catch {};
     }
 
     pub fn newAddressSpace(b: *Backend) vmm.CreateError!*AddressSpace {
         const as = try b.gpa.create(AddressSpace);
-        as.* = .{ .backend = b, .root = try b.allocTable() };
+        errdefer b.gpa.destroy(as);
+        const id = blk: {
+            b.lock.lockUncancelable(b.io);
+            defer b.lock.unlock(b.io);
+            b.next_as_id += 1;
+            break :blk b.next_as_id;
+        };
+        as.* = .{ .backend = b, .root = try b.allocTable(), .id = id };
         return as;
     }
 
     /// Must be called on the thread that will run the vCPU.
     pub fn createVcpu(b: *Backend) vmm.CreateError!Vcpu {
-        const index = blk: {
+        const index: u6 = blk: {
             b.lock.lockUncancelable(b.io);
             defer b.lock.unlock(b.io);
-            if (b.nvcpus >= max_vcpus) return error.HypervisorFailed;
-            b.nvcpus += 1;
-            break :blk b.nvcpus - 1;
+            if (b.slots == std.math.maxInt(u64)) return error.HypervisorFailed;
+            const i: u6 = @intCast(@ctz(~b.slots));
+            b.slots |= @as(u64, 1) << i;
+            break :blk i;
         };
+        errdefer b.releaseSlot(index);
 
-        const shared_page = try b.allocPages(1);
         const shared_kva = kva_shared + @as(u64, index) * vmm.page_size;
-        try b.mapPage(b.kernel_root, shared_kva, b.ipaOf(shared_page), pteAttrs(false, .{ .write = true }));
+        const shared_page = try b.allocPages(1);
+        errdefer b.freePages(shared_page);
+        {
+            while (!b.ktables.tryLock()) std.atomic.spinLoopHint();
+            defer b.ktables.unlock();
+            try b.mapPage(b.kernel_root, shared_kva, b.ipaOf(shared_page), pteAttrs(false, .{ .write = true }));
+        }
 
-        var v: Vcpu = .{ .id = 0, .exit = undefined, .shared = @ptrCast(shared_page.ptr) };
+        var v: Vcpu = .{ .id = 0, .exit = undefined, .shared = @ptrCast(shared_page.ptr), .backend = b, .slot = index };
         try check(hv_vcpu_create(&v.id, &v.exit, null));
         errdefer _ = hv_vcpu_destroy(v.id);
         try check(hv_vcpu_set_sys_reg(v.id, SYS_VBAR_EL1, kva_shim));
@@ -214,6 +291,12 @@ pub const Backend = struct {
         try check(hv_vcpu_set_sys_reg(v.id, SYS_SP_EL1, shared_kva));
         try check(hv_vcpu_set_sys_reg(v.id, SYS_SCTLR_EL1, SCTLR));
         return v;
+    }
+
+    fn releaseSlot(b: *Backend, i: u6) void {
+        b.lock.lockUncancelable(b.io);
+        defer b.lock.unlock(b.io);
+        b.slots &= ~(@as(u64, 1) << i);
     }
 
     fn ipaOf(b: *Backend, mem: []const u8) u64 {
@@ -228,39 +311,99 @@ pub const Backend = struct {
         return b.ipaOf(try b.allocPages(1));
     }
 
+    fn freeTable(b: *Backend, ipa: u64) void {
+        b.freePages(@alignCast(b.ram[ipa - ram_ipa ..][0..vmm.page_size]));
+    }
+
+    /// The caller serializes changes to the tables under `root`.
     fn mapPage(b: *Backend, root: u64, va: u64, ipa: u64, attrs: u64) vmm.Error!void {
         var t = root;
         var shift: u6 = 39;
         while (shift > 12) : (shift -= 9) {
             const e = &b.table(t)[(va >> shift) & 511];
-            if (e.* & PTE_VALID == 0) e.* = (try b.allocTable()) | PTE_VALID;
+            if (e.* & PTE_VALID == 0) @atomicStore(u64, e, (try b.allocTable()) | PTE_VALID, .release);
             t = e.* & PTE_ADDR;
         }
-        b.table(t)[(va >> 12) & 511] = (ipa & PTE_ADDR) | attrs;
+        @atomicStore(u64, &b.table(t)[(va >> 12) & 511], (ipa & PTE_ADDR) | attrs, .release);
+    }
+
+    fn unmapPage(b: *Backend, root: u64, va: u64) void {
+        var t = root;
+        var shift: u6 = 39;
+        while (shift > 12) : (shift -= 9) {
+            const e = b.table(t)[(va >> shift) & 511];
+            if (e & PTE_VALID == 0) return;
+            t = e & PTE_ADDR;
+        }
+        @atomicStore(u64, &b.table(t)[(va >> 12) & 511], 0, .release);
+    }
+
+    /// Frees the table at `ipa` and the tables below it, not the pages
+    /// they map.
+    fn freeTables(b: *Backend, ipa: u64, level: u2) void {
+        if (level < 3) for (b.table(ipa)) |e| {
+            if (e & PTE_VALID != 0) b.freeTables(e & PTE_ADDR, level + 1);
+        };
+        b.freeTable(ipa);
     }
 };
 
 pub const AddressSpace = struct {
     backend: *Backend,
     root: u64,
+    /// Unique for the backend's life, so a vCPU can tell a new space at a
+    /// reused address from the one it last ran.
+    id: u64,
+    /// Bumped by `unmap`, so vCPUs that ran this space flush their TLBs.
+    epoch: std.atomic.Value(u64) = .init(0),
+    lock: std.atomic.Mutex = .unlocked,
     regions: std.ArrayList(Region) = .empty,
 
     const Region = struct { va: u64, mem: []u8 };
 
+    fn lockSpin(as: *AddressSpace) void {
+        while (!as.lock.tryLock()) std.atomic.spinLoopHint();
+    }
+
     /// Maps backend-allocated memory at a page-aligned user address.
     pub fn map(as: *AddressSpace, va: u64, mem: []align(vmm.page_size) u8, perms: vmm.Perms) vmm.CreateError!void {
-        if (va % vmm.page_size != 0 or mem.len % vmm.page_size != 0) return error.BadAddress;
+        if (va % vmm.page_size != 0 or mem.len % vmm.page_size != 0 or mem.len == 0) return error.BadAddress;
         const b = as.backend;
+        as.lockSpin();
+        defer as.lock.unlock();
+        for (as.regions.items) |r| {
+            if (va < r.va + r.mem.len and r.va < va + mem.len) return error.BadAddress;
+        }
+        try as.regions.ensureUnusedCapacity(b.gpa, 1);
         const ipa = b.ipaOf(mem);
         var off: u64 = 0;
         while (off < mem.len) : (off += vmm.page_size) {
-            try b.mapPage(as.root, va + off, ipa + off, pteAttrs(true, perms));
+            b.mapPage(as.root, va + off, ipa + off, pteAttrs(true, perms)) catch |e| {
+                var u: u64 = 0;
+                while (u < off) : (u += vmm.page_size) b.unmapPage(as.root, va + u);
+                return e;
+            };
         }
-        try as.regions.append(b.gpa, .{ .va = va, .mem = mem });
+        as.regions.appendAssumeCapacity(.{ .va = va, .mem = mem });
+    }
+
+    /// Removes the mapping made by `map` at `va`. The pages stay allocated.
+    pub fn unmap(as: *AddressSpace, va: u64) void {
+        as.lockSpin();
+        defer as.lock.unlock();
+        for (as.regions.items, 0..) |r, i| if (r.va == va) {
+            var off: u64 = 0;
+            while (off < r.mem.len) : (off += vmm.page_size) as.backend.unmapPage(as.root, va + off);
+            _ = as.regions.swapRemove(i);
+            _ = as.epoch.fetchAdd(1, .release);
+            return;
+        };
     }
 
     /// Host view of [va, va+len) if it lies within one mapping.
     pub fn translate(as: *AddressSpace, va: u64, len: u64) ?[]u8 {
+        as.lockSpin();
+        defer as.lock.unlock();
         for (as.regions.items) |r| {
             if (va >= r.va and va - r.va <= r.mem.len and len <= r.mem.len - (va - r.va)) {
                 return r.mem[va - r.va ..][0..len];
@@ -269,7 +412,9 @@ pub const AddressSpace = struct {
         return null;
     }
 
+    /// Frees the page tables; the mapped pages belong to the caller.
     pub fn destroy(as: *AddressSpace) void {
+        as.backend.freeTables(as.root, 0);
         as.regions.deinit(as.backend.gpa);
         as.backend.gpa.destroy(as);
     }
@@ -279,15 +424,34 @@ pub const Vcpu = struct {
     id: u64,
     exit: *HvExit,
     shared: *Shared,
+    backend: *Backend,
+    slot: u6,
     fresh: bool = true,
+    /// The address space last run, and its epoch then; a change means a
+    /// TLB flush before the next run.
+    as: ?*AddressSpace = null,
+    as_id: u64 = 0,
+    epoch: u64 = 0,
 
     pub fn destroy(v: *Vcpu) void {
         _ = hv_vcpu_destroy(v.id);
+        const b = v.backend;
+        {
+            while (!b.ktables.tryLock()) std.atomic.spinLoopHint();
+            defer b.ktables.unlock();
+            b.unmapPage(b.kernel_root, kva_shared + @as(u64, v.slot) * vmm.page_size);
+        }
+        b.freePages(@as([*]align(vmm.page_size) u8, @ptrCast(@alignCast(v.shared)))[0..vmm.page_size]);
+        b.releaseSlot(v.slot);
     }
 
     pub fn setAddressSpace(v: *Vcpu, as: *AddressSpace) vmm.Error!void {
-        // TODO(M3): ASIDs or a TLB flush once a vCPU switches between spaces.
+        if (v.as == as and v.as_id == as.id) return;
         try check(hv_vcpu_set_sys_reg(v.id, SYS_TTBR0_EL1, as.root));
+        v.as = as;
+        v.as_id = as.id;
+        v.epoch = as.epoch.load(.acquire);
+        v.shared.flush = 1;
     }
 
     pub fn getUreg(v: *Vcpu, u: *vmm.Ureg) void {
@@ -304,13 +468,16 @@ pub const Vcpu = struct {
     }
 
     pub fn run(v: *Vcpu) vmm.Error!vmm.Exit {
+        const as = v.as orelse return error.BadAddress;
+        const epoch = as.epoch.load(.acquire);
+        if (epoch != v.epoch) {
+            v.epoch = epoch;
+            v.shared.flush = 1;
+        }
         if (v.fresh) {
-            // The first entry goes straight to EL0; after that the shim reloads the Ureg.
-            const u = &v.shared.ureg;
-            for (u.r, 0..) |val, i| try check(hv_vcpu_set_reg(v.id, REG_X0 + @as(u32, @intCast(i)), val));
-            try check(hv_vcpu_set_reg(v.id, REG_PC, u.pc));
-            try check(hv_vcpu_set_reg(v.id, REG_CPSR, u.psr));
-            try check(hv_vcpu_set_sys_reg(v.id, SYS_SP_EL0, u.sp));
+            // Enter through the shim, which loads the Ureg (and flushes).
+            try check(hv_vcpu_set_reg(v.id, REG_PC, kva_shim + shim_enter));
+            try check(hv_vcpu_set_reg(v.id, REG_CPSR, psr_el1h));
             v.fresh = false;
         }
         while (true) {

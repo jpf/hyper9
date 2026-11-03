@@ -10,9 +10,14 @@ const std = @import("std");
 const vmm = @import("vmm.zig");
 const kern = @import("kern.zig");
 const gm = @import("guestmem.zig");
+const segment = @import("segment.zig");
 
 pub const Nr = enum(u64) {
     errstr = 41,
+    exec = 7,
+    rfork = 19,
+    pipe = 21,
+    await = 47,
     bind = 2,
     chdir = 3,
     close = 4,
@@ -44,21 +49,41 @@ pub const Outcome = union(enum) {
     exits: []const u8,
     /// The process dies with this note.
     killed: []const u8,
+    /// rfork with these flags; the process model does it, and traces it.
+    rfork: u32,
+    /// exec; the process model does it, and traces it. The strings are
+    /// allocated with the process's allocator, and the receiver frees them.
+    exec: Exec,
 };
+
+pub const Exec = struct {
+    path: [:0]u8,
+    argv: [][:0]u8,
+
+    pub fn deinit(e: Exec, gpa: std.mem.Allocator) void {
+        gpa.free(e.path);
+        for (e.argv) |a| gpa.free(a);
+        gpa.free(e.argv);
+    }
+};
+
+/// The most argument bytes exec accepts; the stack limits them further.
+const max_exec_args: usize = 8 << 20;
 
 /// Per-process state the syscalls need beyond the kernel's.
 pub const Process = struct {
     /// Machine-local pid, as in the trace and Tos.
     pid: u32 = 1,
+    gpa: std.mem.Allocator,
     backend: vmm.Backend,
     as: vmm.AddressSpace,
-    /// Current break and its floor, for brk_.
-    brk: u64,
-    brk_floor: u64,
-    brk_limit: u64,
+    /// Text, data and stack; brk_ moves the end of data.
+    segs: *segment.Segs,
     /// The note handler from notify; notes are delivered from M4.
     notify: u64 = 0,
     trace: ?*std.Io.Writer = null,
+    /// Serializes trace lines from the processes sharing `trace`.
+    trace_lock: ?*std.atomic.Mutex = null,
     /// Holds the exits string or note.
     msg: [kern.ERRMAX + 64]u8 = undefined,
     name_buf: [1024]u8 = undefined,
@@ -66,6 +91,28 @@ pub const Process = struct {
     /// The current call's arguments, formatted for the trace.
     targs: [256]u8 = undefined,
     targs_len: usize = 0,
+
+    /// Traces a call the process model finished (rfork and exec).
+    pub fn traceRet(p: *Process, nm: []const u8, v: i64) void {
+        const w = p.trace orelse return;
+        p.lockTrace();
+        defer p.unlockTrace();
+        const args = p.targs[0..p.targs_len];
+        if (v == -1) {
+            w.print("{d} {s}{s} = -1 '{s}'\n", .{ p.pid, nm, args, kern.errstr() }) catch {};
+        } else {
+            w.print("{d} {s}{s} = {d}\n", .{ p.pid, nm, args, v }) catch {};
+        }
+        w.flush() catch {};
+    }
+
+    fn lockTrace(p: *Process) void {
+        if (p.trace_lock) |l| while (!l.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    fn unlockTrace(p: *Process) void {
+        if (p.trace_lock) |l| l.unlock();
+    }
 
     fn note(p: *Process, comptime fmt: []const u8, args: anytype) void {
         if (p.trace == null) return;
@@ -99,11 +146,18 @@ const Args = struct {
 };
 
 pub fn dispatch(p: *Process, u: *const vmm.Ureg) Outcome {
+    // Arguments, and buffers on the stack the guest hasn't touched yet,
+    // may lie below the stack's mapped part; 9front would fault them in.
+    _ = p.segs.growStack(u.syscallArgs());
     const a: Args = .{ .as = p.as, .base = u.syscallArgs() };
     p.targs_len = 0;
     const nr: Nr = @enumFromInt(u.syscallNumber());
     const out = serve(p, nr, a) catch |e| switch (e) {
         error.BadAddress => bad_addr,
+        error.OutOfMemory => blk: {
+            kern.setErrstr("no memory");
+            break :blk fail;
+        },
     };
     if (p.trace) |w| traceCall(w, p, nr, u.syscallNumber(), out);
     return out;
@@ -113,6 +167,9 @@ fn traceCall(w: *std.Io.Writer, p: *Process, nr: Nr, raw: u64, out: Outcome) voi
     var nb: [24]u8 = undefined;
     const nm = std.enums.tagName(Nr, nr) orelse (std.fmt.bufPrint(&nb, "sys{d}", .{raw}) catch "sys?");
     const args = p.targs[0..p.targs_len];
+    if (out == .rfork or out == .exec) return;
+    p.lockTrace();
+    defer p.unlockTrace();
     switch (out) {
         .ret => |r| {
             const v: i64 = @bitCast(r);
@@ -124,12 +181,45 @@ fn traceCall(w: *std.Io.Writer, p: *Process, nr: Nr, raw: u64, out: Outcome) voi
         },
         .exits => |m| w.print("{d} exits \"{s}\"\n", .{ p.pid, m }) catch {},
         .killed => w.print("{d} {s}{s}\n", .{ p.pid, nm, args }) catch {},
+        .rfork, .exec => return,
     }
     w.flush() catch {};
 }
 
-fn serve(p: *Process, nr: Nr, a: Args) gm.Error!Outcome {
+fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Outcome {
     switch (nr) {
+        .rfork => {
+            p.note("0x{x}", .{try a.uint(0)});
+            return .{ .rfork = try a.uint(0) };
+        },
+        .exec => return execArgs(p, try a.u(0), try a.u(1)),
+        .await => {
+            // await(char *s, int n): the message, truncated and NUL-terminated
+            // as snprint leaves it.
+            const buf = try a.u(0);
+            const n = try a.uint(1);
+            var tmp: [kern.ERRMAX + 128]u8 = undefined;
+            const len = kern.await(&tmp) catch return fail;
+            if (n == 0) return ok(0);
+            const m = @min(len, n - 1, tmp.len - 1);
+            try gm.write(p.as, buf, tmp[0..m]);
+            try gm.write(p.as, buf + m, "\x00");
+            return ok(m);
+        },
+        .pipe => {
+            const fds = try a.u(0);
+            // Check the array before making the pipe, so a bad one leaks nothing.
+            if (gm.contiguous(p.as, fds, 8) == null) {
+                var probe: [8]u8 = undefined;
+                try gm.read(p.as, fds, &probe);
+            }
+            const fd = kern.pipe() catch return fail;
+            var b: [8]u8 = undefined;
+            std.mem.writeInt(i32, b[0..4], fd[0], .little);
+            std.mem.writeInt(i32, b[4..8], fd[1], .little);
+            try gm.write(p.as, fds, &b);
+            return ok(0);
+        },
         .exits => {
             const ptr = try a.u(0);
             const s = if (ptr == 0) "" else gm.string(p.as, ptr, p.msg[0..kern.ERRMAX]) catch
@@ -177,7 +267,11 @@ fn serve(p: *Process, nr: Nr, a: Args) gm.Error!Outcome {
         .pwrite => {
             p.note("{d} {d}", .{ try a.int(0), @as(u32, @truncate(try a.u(2))) });
             const fd = fdArg(try a.int(0)) orelse return badFd();
-            return io(p, fd, try a.u(1), @as(u32, @truncate(try a.u(2))), try a.vlong(3), .write);
+            const out = try io(p, fd, try a.u(1), @as(u32, @truncate(try a.u(2))), try a.vlong(3), .write);
+            // devpipe posts a note on a write to a closed pipe; with no
+            // notes until M4, it kills the process as an unhandled one would.
+            if (out == .ret and out.ret == fail.ret and kern.takeNote()) return .{ .killed = "sys: write on closed pipe" };
+            return out;
         },
         .seek => {
             // seek(vlong *ret, int fd, vlong off, int whence)
@@ -254,6 +348,36 @@ fn serve(p: *Process, nr: Nr, a: Args) gm.Error!Outcome {
         },
         _ => return .{ .killed = "sys: bad sys call" },
     }
+}
+
+/// Copies exec's file name and argv out of guest memory.
+fn execArgs(p: *Process, file: u64, argp: u64) (gm.Error || std.mem.Allocator.Error)!Outcome {
+    const path = try gm.stringAlloc(p.as, file, p.gpa, 1024);
+    errdefer p.gpa.free(path);
+    p.note("\"{s}\"", .{path});
+    var argv: std.ArrayList([:0]u8) = .empty;
+    errdefer {
+        for (argv.items) |s| p.gpa.free(s);
+        argv.deinit(p.gpa);
+    }
+    var total: usize = 0;
+    while (true) {
+        const ptr = try gm.readU64(p.as, argp + 8 * argv.items.len);
+        if (ptr == 0) break;
+        const s = try gm.stringAlloc(p.as, ptr, p.gpa, max_exec_args - total);
+        total += s.len + 1;
+        argv.append(p.gpa, s) catch |e| {
+            p.gpa.free(s);
+            return e;
+        };
+    }
+    if (argv.items.len == 0) {
+        p.gpa.free(path);
+        argv.deinit(p.gpa);
+        kern.setErrstr("bad arg in system call");
+        return fail;
+    }
+    return .{ .exec = .{ .path = path, .argv = try argv.toOwnedSlice(p.gpa) } };
 }
 
 fn truncated(p: *Process, ptr: u64) []const u8 {
@@ -347,24 +471,13 @@ fn ioSplit(p: *Process, fd: u31, buf: u64, len: u32, off: i64, comptime dir: Dir
 }
 
 fn brk(p: *Process, addr: u64) gm.Error!Outcome {
-    if (addr == 0) return ok(p.brk);
-    if (addr < p.brk_floor or addr > p.brk_limit) {
-        kern.setErrstr("virtual memory allocation failed");
+    if (addr == 0) return ok(p.segs.brkTop());
+    p.segs.brk(addr) catch |e| {
+        kern.setErrstr(switch (e) {
+            error.NoVmem => "virtual memory allocation failed",
+            error.InUse => "device or object already in use",
+        });
         return fail;
-    }
-    const want = std.mem.alignForward(u64, addr, vmm.page_size);
-    if (want > p.brk) {
-        const mem = p.backend.allocPages((want - p.brk) / vmm.page_size) catch {
-            kern.setErrstr("virtual memory allocation failed");
-            return fail;
-        };
-        p.as.map(p.brk, mem, .{ .write = true }) catch {
-            kern.setErrstr("virtual memory allocation failed");
-            return fail;
-        };
-        p.brk = want;
-    }
-    // Shrinking keeps the pages mapped; 9front frees them, but nothing
-    // observable depends on that.
+    };
     return ok(0);
 }

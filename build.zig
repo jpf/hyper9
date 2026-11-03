@@ -282,7 +282,7 @@ pub fn build(b: *std.Build) void {
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "devtab.c", "devhcons.c", "devenv.c", "fscheck.c" },
+        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "fscheck.c" },
         .flags = flags,
     });
     for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
