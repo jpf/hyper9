@@ -10,7 +10,7 @@ installed for building: cross-compile hp9 on the host and copy it in.
 | `linux` | `zig build -Demu=unicorn -Dtarget=aarch64-linux-musl` |
 | `linux-amd64` | `zig build -Demu=unicorn -Dtarget=x86_64-linux-musl` |
 | `macos` | `zig build -Demu=unicorn` |
-| `windows` | `zig build -Demu=unicorn -Dtarget=aarch64-windows` (Unicorn from source; needs kern for Windows to run programs) |
+| `windows` | `zig build -Demu=unicorn -Dtarget=aarch64-windows` (Unicorn from source) |
 
 Use `--prefix zig-out/<os>` to keep the builds apart.
 
@@ -37,6 +37,7 @@ scripts/lima/vm push linux zig-out/linux/bin/hp9 zig-out/fixtures/hello  # into 
 scripts/lima/vm shell linux ./hp9/hp9 --backend emu ./hp9/hello
 scripts/lima/vm push-root linux             # 9front root tree into ~/hp9/root
 scripts/lima/vm shell linux ./hp9/hp9 --root hp9/root /bin/cat /lib/namespace
+scripts/lima/vm shell windows 'cd hp9 && hp9.exe --root root /bin/cat /lib/namespace'
 scripts/lima/vm down linux
 ```
 

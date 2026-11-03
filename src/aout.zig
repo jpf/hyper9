@@ -94,6 +94,57 @@ pub fn writeTextHeader(out: *[header_size]u8, arch: Arch, text_len: usize) void 
     });
 }
 
+pub const Symbol = struct { name: []const u8, value: u64 };
+
+/// The text symbol containing `addr`, from the a.out's symbol table: the
+/// `T`, `t`, `L` or `l` symbol with the highest value not above `addr`.
+pub fn symbolize(bytes: []const u8, addr: u64) ?Symbol {
+    const h = parse(bytes) catch return null;
+    const start = header_size + @as(usize, h.text) + h.data;
+    if (start + h.syms > bytes.len) return null;
+    const tab = bytes[start..][0..h.syms];
+    var best: ?Symbol = null;
+    var i: usize = 0;
+    // Entries are a 64-bit big-endian value, a type byte with 0x80 set and
+    // a NUL-terminated name; z and Z names are 16-bit pairs ended by 0 0.
+    while (i + 9 < tab.len) {
+        const value = std.mem.readInt(u64, tab[i..][0..8], .big);
+        const ty = tab[i + 8] & 0x7f;
+        i += 9;
+        const name_start = i;
+        if (ty == 'z' or ty == 'Z') {
+            while (i + 1 < tab.len and (tab[i] != 0 or tab[i + 1] != 0)) i += 2;
+            i += 2;
+            continue;
+        }
+        while (i < tab.len and tab[i] != 0) i += 1;
+        const name = tab[name_start..i];
+        i += 1;
+        switch (ty) {
+            'T', 't', 'L', 'l' => if (value <= addr and (best == null or value > best.?.value)) {
+                best = .{ .name = name, .value = value };
+            },
+            else => {},
+        }
+    }
+    return best;
+}
+
+test "symbolize" {
+    var buf: [header_size + 4 + 44]u8 = @splat(0);
+    writeHeader(buf[0..header_size], .{ .arch = .arm64, .text = 4, .data = 0, .bss = 0, .syms = 44, .spsz = 0, .pcsz = 0, .entry = 0x10028 });
+    var p: usize = header_size + 4;
+    for ([_]struct { u64, u8, []const u8 }{ .{ 0x10028, 'T', "main" }, .{ 0x10100, 't', "helper" }, .{ 0x20000, 'D', "data" } }) |e| {
+        std.mem.writeInt(u64, buf[p..][0..8], e[0], .big);
+        buf[p + 8] = e[1] | 0x80;
+        @memcpy(buf[p + 9 ..][0..e[2].len], e[2]);
+        p += 9 + e[2].len + 1;
+    }
+    try std.testing.expectEqualStrings("main", symbolize(&buf, 0x10030).?.name);
+    try std.testing.expectEqualStrings("helper", symbolize(&buf, 0x10200).?.name);
+    try std.testing.expectEqual(@as(?Symbol, null), symbolize(&buf, 0x100));
+}
+
 test "magic values" {
     try std.testing.expectEqual(@as(u32, 0x8C47), R_MAGIC);
     try std.testing.expectEqual(@as(u32, 0x8A97), S_MAGIC);

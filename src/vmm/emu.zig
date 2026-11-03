@@ -50,12 +50,17 @@ pub const Backend = struct {
     arch: vmm.Arch,
     lock: std.Io.Mutex = .init,
     allocs: std.ArrayList([]align(vmm.page_size) u8) = .empty,
+    /// Bytes handed out, against the cap in `limit`.
+    used: u64 = 0,
+    limit: u64,
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, opts: vmm.Options) vmm.CreateError!*Backend {
         // Fail here, not at the first vCPU, if Unicorn lacks the architecture.
         _ = uc.uc_close(try open(opts.arch));
         const b = try gpa.create(Backend);
-        b.* = .{ .gpa = gpa, .io = io, .arch = opts.arch };
+        const limit = opts.memory orelse vmm.default_memory;
+        if (limit > vmm.max_memory) return error.OutOfGuestMemory;
+        b.* = .{ .gpa = gpa, .io = io, .arch = opts.arch, .limit = limit };
         return b;
     }
 
@@ -72,6 +77,18 @@ pub const Backend = struct {
 
     /// Returns zeroed pages.
     pub fn allocPages(b: *Backend, n: usize) vmm.Error![]align(vmm.page_size) u8 {
+        {
+            b.lock.lockUncancelable(b.io);
+            defer b.lock.unlock(b.io);
+            const len = n * vmm.page_size;
+            if (b.used + len > b.limit) return error.OutOfGuestMemory;
+            b.used += len;
+        }
+        errdefer {
+            b.lock.lockUncancelable(b.io);
+            b.used -= n * vmm.page_size;
+            b.lock.unlock(b.io);
+        }
         const mem = std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(vmm.page_size), n * vmm.page_size) catch
             return error.OutOfGuestMemory;
         // Fresh pages from the OS are zero, but Zig's allocators fill new

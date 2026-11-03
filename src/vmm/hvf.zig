@@ -15,7 +15,6 @@ const Ureg = arm64.Ureg;
 const shim_code = @embedFile("shim_arm64");
 
 const ram_ipa: u64 = 0x8000_0000;
-const ram_size: usize = 1 << 30;
 const doorbell_ipa: u64 = 0x1000_0000; // never mapped, so stores exit to the host
 
 // shim.S finds the doorbell at the page after the vectors.
@@ -140,6 +139,10 @@ pub const Backend = struct {
         try check(hv_vm_create(null));
         errdefer _ = hv_vm_destroy();
 
+        const want = opts.memory orelse vmm.default_memory;
+        if (want > vmm.max_memory) return error.OutOfGuestMemory;
+        const ram_size = std.mem.alignForward(usize, @intCast(want), vmm.page_size);
+        if (ram_size < 16 * vmm.page_size) return error.OutOfGuestMemory;
         const ram = std.posix.mmap(null, ram_size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0) catch
             return error.OutOfGuestMemory;
         errdefer std.posix.munmap(ram);

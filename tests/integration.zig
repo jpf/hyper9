@@ -179,3 +179,181 @@ test "the host cwd is the guest's cwd" {
     defer pwd.deinit();
     try std.testing.expectEqualStrings("/mnt/term/cwd\n", pwd.out);
 }
+
+/// A scratch host directory, resolved, for cwd and policy tests.
+const Scratch = struct {
+    tmp: std.testing.TmpDir,
+    path: []const u8,
+    buf: [std.Io.Dir.max_path_bytes]u8 = undefined,
+
+    fn init(s: *Scratch) !void {
+        s.tmp = std.testing.tmpDir(.{});
+        const n = try s.tmp.dir.realPath(std.testing.io, &s.buf);
+        s.path = s.buf[0..n];
+    }
+    fn deinit(s: *Scratch) void {
+        s.tmp.cleanup();
+    }
+    fn exists(s: *Scratch, name: []const u8) bool {
+        s.tmp.dir.access(std.testing.io, name, .{}) catch return false;
+        return true;
+    }
+};
+
+test "tight profile: writing to the cwd fails (M2 demo)" {
+    const e = try env();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const r = try run(e, &.{ "--cwd", s.path, "--profile=tight", "--rc", "echo x > /mnt/term/cwd/f" });
+    defer r.deinit();
+    try std.testing.expectEqual(1, r.code);
+    try std.testing.expect(!s.exists("f"));
+}
+
+test "default profile: the cwd is writable and the root isn't" {
+    const e = try env();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    // rc can't fork until M3, so files are made with touch.
+    const r = try run(e, &.{ "--cwd", s.path, "touch", "f" });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(s.exists("f"));
+    const ro = try run(e, &.{ "--cwd", s.path, "touch", "/lib/hp9-test" });
+    defer ro.deinit();
+    try std.testing.expectEqual(1, ro.code);
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(e.root, "lib/hp9-test"), .{}) catch return;
+    return error.RootWasWritten;
+}
+
+test "--sandbox DIR is writable" {
+    const e = try env();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const r = try run(e, &.{ "--sandbox", s.path, "touch", "f" });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(s.exists("f"));
+}
+
+test "--writable under a read-only cwd" {
+    const e = try env();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.createDirPath(std.testing.io, "out");
+    var p: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const out = try std.fmt.bufPrint(&p, "{s}/out", .{s.path});
+    const r = try run(e, &.{ "--cwd", s.path, "--profile=tight", "--writable", out, "touch", "out/f" });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(s.exists("out/f"));
+    const g = try run(e, &.{ "--cwd", s.path, "--profile=tight", "--writable", out, "touch", "g" });
+    defer g.deinit();
+    try std.testing.expectEqual(1, g.code);
+    try std.testing.expect(!s.exists("g"));
+}
+
+test "--read-deny hides a path, and symlinks can't escape" {
+    const e = try env();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".env", .data = "secret\n" });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ok", .data = "ok\n" });
+    var p: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const deny = try std.fmt.bufPrint(&p, "{s}/.env", .{s.path});
+    const r = try run(e, &.{ "--cwd", s.path, "--read-deny", deny, "ls" });
+    defer r.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "ok\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, ".env") == null);
+
+    // A symlink out of the cwd, to a file in no bound tree.
+    var other: Scratch = undefined;
+    try other.init();
+    defer other.deinit();
+    try other.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "secret", .data = "secret\n" });
+    var lp: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try s.tmp.dir.symLink(std.testing.io, try std.fmt.bufPrint(&lp, "{s}/secret", .{other.path}), "link", .{});
+    const l = try run(e, &.{ "--cwd", s.path, "cat", "link" });
+    defer l.deinit();
+    try std.testing.expectEqual(1, l.code);
+    try std.testing.expectEqualStrings("", l.out);
+}
+
+test "masked devices can't be attached" {
+    const e = try env();
+    const r = try run(e, &.{ "ls", "#U/" });
+    defer r.deinit();
+    try std.testing.expectEqual(1, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "mount/attach disallowed") != null);
+    const n = try run(e, &.{ "--profile=tight", "ls", "#I" });
+    defer n.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, n.err, "mount/attach disallowed") != null);
+}
+
+test "--print shows the plan and doesn't run" {
+    const e = try env();
+    const r = try run(e, &.{ "--print", "--profile=tight", "--memory", "512m", "--timeout", "1m", "no-such-program" });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "profile:  tight\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "net.disable") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "memory=512M timeout=1m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "devmask:  #C #I #U\n") != null);
+}
+
+test "--strict refuses what this build can't enforce" {
+    const e = try env();
+    const r = try run(e, &.{ "--strict", "--write=overlay", "echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(2, r.code);
+    const ok = try run(e, &.{ "--strict", "--profile=tight", "echo", "ok" });
+    defer ok.deinit();
+    try std.testing.expectEqual(0, ok.code);
+}
+
+test "--memory caps guest memory" {
+    const e = try env();
+    const r = try run(e, &.{ "--memory", "8m", "echo", "x" });
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    const ok = try run(e, &.{ "--memory", "64m", "echo", "x" });
+    defer ok.deinit();
+    try std.testing.expectEqual(0, ok.code);
+}
+
+test "--timeout stops the program" {
+    const e = try env();
+    const r = try run(e, &.{ "--timeout", "200ms", "sleep", "10" });
+    defer r.deinit();
+    try std.testing.expectEqual(1, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "hp9: timeout") != null);
+}
+
+test "renames and case can't get around the rules" {
+    const e = try env();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.createDirPath(std.testing.io, "sub");
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "sub/secret", .data = "secret\n" });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".env", .data = "secret\n" });
+    var p1: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var p2: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const deny1 = try std.fmt.bufPrint(&p1, "{s}/sub/secret", .{s.path});
+    const deny2 = try std.fmt.bufPrint(&p2, "{s}/.env", .{s.path});
+    const mv = try run(e, &.{ "--cwd", s.path, "--read-deny", deny1, "mv", "sub", "sub2" });
+    defer mv.deinit();
+    try std.testing.expectEqual(1, mv.code);
+    try std.testing.expect(s.exists("sub/secret"));
+    // On case-insensitive hosts .ENV is .env; creating it mustn't truncate it.
+    const tc = try run(e, &.{ "--cwd", s.path, "--read-deny", deny2, "touch", ".ENV" });
+    defer tc.deinit();
+    const data = try s.tmp.dir.readFileAlloc(std.testing.io, ".env", gpa, .limited(64));
+    defer gpa.free(data);
+    try std.testing.expectEqualStrings("secret\n", data);
+}

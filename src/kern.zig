@@ -9,8 +9,9 @@
 
 const std = @import("std");
 const build_options = @import("build_options");
+const policy = @import("policy.zig");
 
-/// False where kern isn't built (Windows until M2's Windows work).
+/// False where kern isn't built (a checkout without drawterm).
 pub const available = build_options.kern;
 
 pub const Error = error{ KernUnavailable, Kern, OutOfMemory };
@@ -45,6 +46,13 @@ const c_stub = struct {
         return "none";
     }
     fn hp9_kern_devmask(_: [*:0]const u8) void {}
+    fn hp9_kern_self() ?*anyopaque {
+        return null;
+    }
+    fn hp9_kern_interrupt(_: ?*anyopaque) void {}
+    fn hp9_kern_sleep(_: c_long) c_int {
+        return -1;
+    }
     var no_err: [ERRMAX:0]u8 = @splat(0);
     fn hp9_kern_errstr() [*:0]u8 {
         return &no_err;
@@ -103,6 +111,9 @@ const c_real = struct {
     extern fn hp9_kern_pid() c_ulong;
     extern fn hp9_kern_user() [*:0]const u8;
     extern fn hp9_kern_devmask(devs: [*:0]const u8) void;
+    extern fn hp9_kern_self() ?*anyopaque;
+    extern fn hp9_kern_interrupt(p: ?*anyopaque) void;
+    extern fn hp9_kern_sleep(ms: c_long) c_int;
     extern fn hp9_kern_errstr() [*:0]u8;
     extern fn hp9_fd2path(fd: c_int, buf: [*]u8, n: c_uint) c_int;
     extern fn sysopen(name: [*:0]const u8, mode: c_int) c_int;
@@ -177,6 +188,33 @@ pub fn pid() u32 {
 /// `#U`) in the calling Proc's namespace. Existing binds keep working.
 pub fn devmask(devs: [*:0]const u8) void {
     c.hp9_kern_devmask(devs);
+}
+
+/// The calling kernel process, for `interrupt`.
+pub const Proc = opaque {};
+
+pub fn self() *Proc {
+    return @ptrCast(c.hp9_kern_self().?);
+}
+
+/// Makes the process's current or next blocking kernel call fail with
+/// "interrupted". The caller must know the process hasn't exited.
+pub fn interrupt(p: *Proc) void {
+    c.hp9_kern_interrupt(p);
+}
+
+/// Sleeps for `ms` milliseconds, or until the process is interrupted.
+pub fn sleep(ms: i64) Error!void {
+    _ = try check(c.hp9_kern_sleep(@intCast(std.math.clamp(ms, std.math.minInt(c_long), std.math.maxInt(c_long)))));
+}
+
+/// The sandbox plan devfs checks for the calling thread's process (see
+/// src/kern/fscheck.c). Each guest process runs on its own thread, so the
+/// plan is per thread; kernel threads without one aren't restricted.
+threadlocal var fs_plan: ?*const policy.Plan = null;
+
+pub fn setPlan(p: ?*const policy.Plan) void {
+    fs_plan = p;
 }
 
 /// The calling Proc's error string after a failed call.
@@ -315,7 +353,19 @@ comptime {
     if (available) {
         @export(&hp9_cons_read, .{ .name = "hp9_cons_read" });
         @export(&hp9_cons_write, .{ .name = "hp9_cons_write" });
+        @export(&hp9_policy_active, .{ .name = "hp9_policy_active" });
+        @export(&hp9_policy_check, .{ .name = "hp9_policy_check" });
     }
+}
+
+fn hp9_policy_active() callconv(.c) c_int {
+    return @intFromBool(fs_plan != null);
+}
+
+fn hp9_policy_check(path: [*]const u8, len: c_long, op: c_int) callconv(.c) c_int {
+    const p = fs_plan orelse return 0;
+    const o = std.enums.fromInt(policy.Op, op) orelse return @intFromEnum(policy.Verdict.hidden);
+    return @intFromEnum(p.check(path[0..@intCast(len)], o));
 }
 
 fn hp9_cons_read(id: c_ulong, buf: [*]u8, n: c_long) callconv(.c) c_long {

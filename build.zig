@@ -3,17 +3,19 @@ const unicorn_src = @import("build/unicorn.zig");
 
 const drawterm = "third_party/drawterm";
 
-// drawterm's kern/Makefile OFILES for OS=posix, AUDIO=none, without devtab.c
-// and devenv.c (src/kern/ has our own).
+// drawterm's kern/Makefile OFILES with AUDIO=none, without devtab.c and
+// devenv.c (src/kern/ has our own), plus the OS files below.
 const kern_sources = [_][]const u8{
-    "alloc.c",       "allocb.c",        "chan.c",        "data.c",    "dev.c",
-    "devaudio.c",    "devaudio-none.c", "devcmd.c",      "devcons.c", "devdraw.c",
-    "devfs-posix.c", "devip.c",         "devip-posix.c", "devkbd.c",  "devlfd-posix.c",
-    "devmnt.c",      "devmouse.c",      "devpipe.c",     "devroot.c", "devssl.c",
-    "devtls.c",      "error.c",         "parse.c",       "pgrp.c",    "procinit.c",
-    "rwlock.c",      "sleep.c",         "stub.c",        "sysfile.c", "qio.c",
-    "qlock.c",       "term.c",          "waserror.c",    "posix.c",
+    "alloc.c",    "allocb.c",        "chan.c",   "data.c",     "dev.c",
+    "devaudio.c", "devaudio-none.c", "devcmd.c", "devcons.c",  "devdraw.c",
+    "devip.c",    "devkbd.c",        "devmnt.c", "devmouse.c", "devpipe.c",
+    "devroot.c",  "devssl.c",        "devtls.c", "error.c",    "parse.c",
+    "pgrp.c",     "procinit.c",      "rwlock.c", "sleep.c",    "stub.c",
+    "sysfile.c",  "qio.c",           "qlock.c",  "term.c",     "waserror.c",
 };
+// OS=posix (Make.unix), and OS=win32 with FS=fs-win32 (Make.win64).
+const kern_posix = [_][]const u8{ "devfs-posix.c", "devip-posix.c", "devlfd-posix.c", "posix.c" };
+const kern_win32 = [_][]const u8{ "devfs-win32.c", "devip-win32.c", "devlfd-win32.c", "win32.c" };
 
 /// The drawterm libraries kern needs, with each Makefile's OFILES. The GUI,
 /// exportfs, libauth and drawterm's own main/cpu code are left out.
@@ -80,8 +82,11 @@ const kern_libs = [_]struct { dir: []const u8, files: []const []const u8 }{
         "defont.c",   "drawrepl.c", "fmt.c",     "icossin.c",      "icossin2.c",
         "rectclip.c", "rgb.c",      "warp.c",    "mkwarp.c",
     } },
-    .{ .dir = "posix-port", .files = &.{ "getcallerpc.c", "tas.c" } },
 };
+
+// posix-port's getcallerpc and tas are compiler builtins, so Windows uses
+// them too (drawterm's win32 builds take them from per-CPU assembly).
+const kern_port = [_][]const u8{ "getcallerpc.c", "tas.c" };
 
 const kern_flags = [_][]const u8{
     "-Wall",
@@ -89,6 +94,8 @@ const kern_flags = [_][]const u8{
     "-D_THREAD_SAFE",
     "-fno-sanitize=undefined",
 };
+// Make.win64's CFLAGS.
+const kern_flags_win32 = kern_flags ++ [_][]const u8{ "-DWINDOWS", "-DUNICODE" };
 
 /// Zig's own macOS SDK detection runs xcodebuild, which fails in some
 /// environments; SDKROOT (set by scripts/env.sh) is used when present.
@@ -226,20 +233,37 @@ pub fn build(b: *std.Build) void {
     kern.root_module.addIncludePath(b.path(drawterm));
     kern.root_module.addIncludePath(b.path(drawterm ++ "/include"));
     kern.root_module.addIncludePath(b.path(drawterm ++ "/kern"));
+    kern.root_module.addIncludePath(b.path("src/kern")); // fscheck.h, for devfs
+    const flags: []const []const u8 = if (os == .windows) &kern_flags_win32 else &kern_flags;
     kern.root_module.addCSourceFiles(.{
         .root = b.path(drawterm ++ "/kern"),
         .files = &kern_sources,
-        .flags = &kern_flags,
+        .flags = flags,
+    });
+    kern.root_module.addCSourceFiles(.{
+        .root = b.path(drawterm ++ "/kern"),
+        .files = if (os == .windows) &kern_win32 else &kern_posix,
+        .flags = flags,
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "devtab.c", "devhcons.c", "devenv.c" },
-        .flags = &kern_flags,
+        .files = &.{ "glue.c", "devtab.c", "devhcons.c", "devenv.c", "fscheck.c" },
+        .flags = flags,
     });
     for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
         .root = b.path(b.pathJoin(&.{ drawterm, l.dir })),
         .files = l.files,
-        .flags = &kern_flags,
+        .flags = flags,
+    });
+    if (os == .windows) {
+        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"glue-win32.c"}, .flags = flags });
+        kern.root_module.linkSystemLibrary("ws2_32", .{});
+        kern.root_module.linkSystemLibrary("advapi32", .{});
+    }
+    kern.root_module.addCSourceFiles(.{
+        .root = b.path(drawterm ++ "/posix-port"),
+        .files = &kern_port,
+        .flags = flags,
     });
     const kern_step = b.step("kern", "Compile drawterm's kern");
     const have_drawterm = if (b.build_root.handle.access(b.graph.io, drawterm ++ "/kern/sysfile.c", .{})) true else |_| false;
@@ -247,15 +271,10 @@ pub fn build(b: *std.Build) void {
         const fail = b.addFail(drawterm ++ " is missing; run scripts/vendor-drawterm.sh");
         kern.step.dependOn(&fail.step);
     }
-    // TODO(M2): build kern for Windows (drawterm's Make.win64 configuration).
-    const build_kern = have_drawterm and os != .windows;
-    if (os == .windows) {
-        kern_step.dependOn(&b.addFail("kern doesn't build for Windows yet (M2)").step);
-    } else {
-        kern_step.dependOn(&kern.step);
-        // Everything that imports the hp9 module links kern.
-        mod.linkLibrary(kern);
-    }
+    const build_kern = have_drawterm;
+    kern_step.dependOn(&kern.step);
+    // Everything that imports the hp9 module links kern.
+    mod.linkLibrary(kern);
 
     const options = b.addOptions();
     options.addOption(Emu, "emu", emu);
@@ -343,7 +362,19 @@ pub fn build(b: *std.Build) void {
     const m2 = b.addSystemCommand(&.{ hp9_bin, "--root", root, "/bin/cat", "/lib/namespace" });
     m2.expectStdOutEqual(b.build_root.handle.readFileAlloc(b.graph.io, b.pathJoin(&.{ root, "lib/namespace" }), b.allocator, .limited(1 << 20)) catch "(no root tree; run scripts/mkroot.py)");
     m2.step.dependOn(signed_step);
-    b.step("m2", "Run the M2 demo: hp9 /bin/cat /lib/namespace (needs a root tree)").dependOn(&m2.step);
+    const m2_step = b.step("m2", "Run the M2 demo: hp9 /bin/cat /lib/namespace, and a write under --profile=tight fails (needs a root tree)");
+    m2_step.dependOn(&m2.step);
+    // The tight profile's cwd is read-only, so rc's redirection fails. The
+    // cwd is a fresh directory, so nothing is left behind if it doesn't.
+    const m2_cwd = b.addWriteFiles();
+    _ = m2_cwd.add(".keep", "");
+    const m2_tight = b.addSystemCommand(&.{ hp9_bin, "--root", root, "--profile=tight", "--cwd" });
+    m2_tight.addDirectoryArg(m2_cwd.getDirectory());
+    m2_tight.addArgs(&.{ "--rc", "echo x > /mnt/term/cwd/f" });
+    m2_tight.expectExitCode(1);
+    m2_tight.expectStdErrMatch("can't create");
+    m2_tight.step.dependOn(signed_step);
+    m2_step.dependOn(&m2_tight.step);
 
     // Runs real binaries through the hp9 CLI; skipped without a root tree.
     const integration_tests = b.addTest(.{ .root_module = b.createModule(.{

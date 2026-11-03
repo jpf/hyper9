@@ -15,6 +15,7 @@
 #include	"dat.h"
 #include	"fns.h"
 #include	"error.h"
+#include	"fscheck.h"	/* hp9: sandbox hooks */
 
 typedef	struct Ufsinfo	Ufsinfo;
 struct Ufsinfo
@@ -98,7 +99,7 @@ fswalk1(Chan *c, char *name)
 
 	uif = c->aux;
 	path = catpath(uif->path, name);
-	if(stat(path, &stbuf) < 0){
+	if(hp9_fs_check(path, HP9_FSWALK) < 0 || stat(path, &stbuf) < 0){
 		free(path);
 		return 0;
 	}
@@ -136,6 +137,12 @@ fswalk(Chan *c, Chan *nc, char **name, int nname)
 		wq->clone = nil;
 	}
 	wq->nqid = i;
+	/* hp9: as devwalk does, so namec tries the rest of a union. */
+	if(i == 0 && nname > 0){
+		free(wq);
+		kstrcpy(up->errstr, Enonexist, ERRMAX);
+		return nil;
+	}
 	return wq;
 }
 	
@@ -176,6 +183,9 @@ fsopen(Chan *c, int mode)
 	omode = openmode(mode);
 
 	uif = c->aux;
+	hp9_fs_allow(uif->path, omode == OREAD && !(mode&OTRUNC) ? HP9_FSREAD : HP9_FSWRITE);
+	if(mode & ORCLOSE)
+		hp9_fs_allow(uif->path, HP9_FSREMOVE);
 	if(c->qid.type & QTDIR) {
 		if(omode != OREAD)
 			error(Eperm);
@@ -216,6 +226,7 @@ fscreate(Chan *c, char *name, int mode, ulong perm)
 	}
 	fd = -1;
 	dir = NULL;
+	hp9_fs_allow(path, HP9_FSCREATE);
 	if(perm & DMDIR) {
 		if(omode != OREAD)
 			error(Eperm);
@@ -364,6 +375,7 @@ fsremove(Chan *c)
 		nexterror();
 	}
 	uif = c->aux;
+	hp9_fs_allow(uif->path, HP9_FSREMOVE);
 	if(c->qid.type & QTDIR)
 		n = rmdir(uif->path);
 	else
@@ -393,6 +405,7 @@ fswstat(Chan *c, uchar *buf, int n)
 		error(Ebadstat);
 	
 	uif = c->aux;
+	hp9_fs_allow(uif->path, HP9_FSWRITE);
 	if(stat(uif->path, &stbuf) < 0)
 		error(strerror(errno));
 
@@ -428,6 +441,8 @@ fswstat(Chan *c, uchar *buf, int n)
 			free(newpath);
 			nexterror();
 		}
+		hp9_fs_allow(newpath, HP9_FSCREATE);
+		hp9_fs_allow(uif->path, HP9_FSRENAME);
 		if(stat(newpath, &stbuf) >= 0)
 			error(Eexist);
 		if(rename(uif->path, newpath) < 0)
@@ -554,6 +569,10 @@ fsdirread(Chan *c, uchar *va, int count, ulong offset)
 
 		d.name = de;
 		p = catpath(uif->path, de);
+		if(hp9_fs_check(p, HP9_FSWALK) < 0){
+			free(p);
+			continue;
+		}
 		if(stat(p, &stbuf) < 0) {
 			/* fprint(2, "dir: bad path %s\n", path); */
 			/* but continue... probably a bad symlink */

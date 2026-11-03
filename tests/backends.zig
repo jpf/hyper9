@@ -194,3 +194,86 @@ test "kick interrupts a running vcpu arm64" {
 test "kick interrupts a running vcpu amd64" {
     try expectKick(.amd64, &[_]u8{ 0xeb, 0xfe }); // jmp .
 }
+
+/// Runs `bytes` as a machine with `pol` on every backend that can, and
+/// returns the statuses.
+fn runPolicy(arch: aout.Arch, bytes: []const u8, pol: hp9.Policy, want: []const u8) !void {
+    const gpa = std.testing.allocator;
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        var m = hp9.Machine.init(gpa, std.testing.io, .{
+            .backend = kind,
+            .arch = arch,
+            .policy = pol,
+            .stdio = .{ .out = &out.writer, .err = &out.writer },
+        }) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
+            else => return e,
+        };
+        defer m.deinit();
+        const status = try m.run(.{ .bytes = bytes }, &.{"t"});
+        errdefer std.debug.print("backend {t}, {t} binary\n", .{ kind, arch });
+        try std.testing.expectEqualStrings(want, switch (status) {
+            .exited => |s| s,
+            .killed => |s| s,
+        });
+        try std.testing.expect(!m.stuck);
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+test "a timeout stops a spinning process arm64" {
+    const bytes = try image(std.testing.allocator, .arm64, &words(&.{0x14000000})); // b .
+    defer std.testing.allocator.free(bytes);
+    try runPolicy(.arm64, bytes, .{ .timeout_ns = 100 * std.time.ns_per_ms }, "hp9: timeout");
+}
+
+test "a timeout stops a spinning process amd64" {
+    const bytes = try image(std.testing.allocator, .amd64, &[_]u8{ 0xeb, 0xfe }); // jmp .
+    defer std.testing.allocator.free(bytes);
+    try runPolicy(.amd64, bytes, .{ .timeout_ns = 100 * std.time.ns_per_ms }, "hp9: timeout");
+}
+
+test "a timeout interrupts sleep arm64" {
+    // sleep(100000), then spin.
+    const code = words(&.{
+        0xd10083ff, // sub  sp, sp, #32
+        0xd290d401, // mov  x1, #0x86a0
+        0xf2a00021, // movk x1, #1, lsl #16
+        0xf90007e1, // str  x1, [sp, #8]
+        0xd2800220, // mov  x0, #17   SLEEP
+        0xd4000001, // svc  #0
+        0x14000000, // b    .
+    });
+    const img = try image(std.testing.allocator, .arm64, &code);
+    defer std.testing.allocator.free(img);
+    try runPolicy(.arm64, img, .{ .timeout_ns = 100 * std.time.ns_per_ms }, "hp9: timeout");
+}
+
+test "the memory cap is exact" {
+    const bytes = try image(std.testing.allocator, .arm64, &hello.arm64_text);
+    defer std.testing.allocator.free(bytes);
+    // The 16 MiB stack alone doesn't fit in 8 MiB.
+    const gpa = std.testing.allocator;
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        var m = hp9.Machine.init(gpa, std.testing.io, .{
+            .backend = kind,
+            .arch = .arm64,
+            .policy = .{ .memory = 8 << 20 },
+            .stdio = .{ .out = &out.writer, .err = &out.writer },
+        }) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
+            else => return e,
+        };
+        defer m.deinit();
+        try std.testing.expectError(error.OutOfGuestMemory, m.run(.{ .bytes = bytes }, &.{"hello"}));
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}

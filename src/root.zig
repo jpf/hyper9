@@ -8,6 +8,8 @@ pub const Machine = @import("machine.zig").Machine;
 pub const Status = @import("machine.zig").Status;
 pub const Program = @import("machine.zig").Program;
 pub const EnvVar = @import("machine.zig").EnvVar;
+pub const policy = @import("policy.zig");
+pub const Policy = policy.Policy;
 pub const guestmem = @import("guestmem.zig");
 pub const syscall = @import("syscall.zig");
 
@@ -18,4 +20,5 @@ test {
     _ = kern;
     _ = guestmem;
     _ = syscall;
+    _ = policy;
 }

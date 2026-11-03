@@ -16,7 +16,9 @@
 #include <cursor.h>
 #include "screen.h"
 
+#ifndef WINDOWS
 #include <pwd.h>
+#endif
 
 char *argv0;
 extern ulong kerndate;
@@ -42,6 +44,10 @@ void *auth_allocrpc(int afd) { USED(afd); werrstr("no factotum"); return nil; }
 void auth_freerpc(void *rpc) { USED(rpc); }
 int auth_rpc(void *rpc, char *verb, void *a, int n) { USED(rpc, verb, a, n); return -1; }
 
+#ifdef WINDOWS
+extern char *hp9_hostuser(void);	/* glue-win32.c */
+#define hostuser hp9_hostuser
+#else
 static char*
 hostuser(void)
 {
@@ -54,6 +60,8 @@ hostuser(void)
 	strecpy(user, user+sizeof user, pw->pw_name);
 	return user;
 }
+#endif
+
 
 /*
  * Boots the kernel. The calling thread becomes the kernel's first Proc for
@@ -170,6 +178,46 @@ void
 hp9_kern_devmask(char *devs)
 {
 	devmask(up->pgrp, 0, devs);
+}
+
+/* The calling Proc, and interrupting one (for timeouts). */
+void*
+hp9_kern_self(void)
+{
+	return up;
+}
+
+void
+hp9_kern_interrupt(void *p)
+{
+	procinterrupt(p);
+}
+
+/*
+ * sleep(ms): drawterm has no tsleep, so this sleeps in short slices and
+ * stops early when the Proc is interrupted. Returns 0, or -1 with
+ * "interrupted" as the error string.
+ */
+int
+hp9_kern_sleep(long ms)
+{
+	long slice;
+
+	if(ms <= 0){
+		osyield();
+		return 0;
+	}
+	while(ms > 0){
+		if(up->notepending){
+			up->notepending = 0;
+			kstrcpy(up->syserrstr, Eintr, ERRMAX);
+			return -1;
+		}
+		slice = ms < 20 ? ms : 20;
+		osmsleep(slice);
+		ms -= slice;
+	}
+	return 0;
 }
 
 /* The current Proc's error string, for the Zig side. */

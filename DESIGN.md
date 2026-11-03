@@ -151,7 +151,7 @@ Each guest architecture gets a few hundred lines of assembly that run in guest k
 4. The stack is \[USTKTOP − 16 MiB, USTKTOP). A zeroed Tos sits at the very top. Below it go the argument strings, then the argv array, then argc at SP.
 5. Tos fields: the host fills `pid` and `cyclefreq` and keeps `kcycles`/`pcycles` current; the profiling pointers stay zero.
 
-**Syscall table.** 9front's `libc/9syscall/sys.h` defines numbers 0–53; 48 and 49 are unused. The underscore entries (`_READ`, `_WRITE`, `_STAT`, `_NSEC` and so on) are old compatibility calls that current libc doesn't use. v1 implements only the current calls; the others post "sys: bad sys call", as the real kernel does for unknown calls. Time comes from `/dev/bintime`, not a syscall.
+**Syscall table.** 9front's `libc/9syscall/sys.h` defines numbers 0–53; 48 and 49 are unused. The underscore entries (`_READ`, `_WRITE`, `_STAT`, `_NSEC` and so on) are old compatibility calls that current libc doesn't use. v1 implements only the current calls; the others post "sys: bad sys call", as the real kernel does for unknown calls. Time comes from `/dev/bintime`, not a syscall. The exception is `_NSEC`, added in M5 for Go (see Go compatibility).
 
 **Reference:** hyper-linux's `src/shim.S` (648 lines, Apache-2.0) already covers EL1 vectors, MMU setup and W^X page splitting on HVF. Read it before writing ours, and keep its license notice on anything we borrow.
 
@@ -230,6 +230,30 @@ The host's working directory is bound at the guest's `/mnt/term/cwd` and set as 
 
 **Graphics (`--gfx`):** opens one host window through drawterm's GUI backend (Cocoa/Metal, X11 or Wayland, Win32) and serves `/dev/draw`, `/dev/mouse` and `/dev/kbd`, plus snarf mapped to the host clipboard. One screen per machine: running rio gives the full desktop. A seamless mode, where each rio window becomes a host window, is a later project.
 
+## Go compatibility
+
+Go's `GOOS=plan9` binaries are a target from M5. Go has ports for `plan9/386`, `plan9/amd64` and `plan9/arm`, but not `plan9/arm64`, so on arm64 hosts Go binaries run as amd64 under the emulator (`--backend emu`) until someone ports Go to plan9/arm64. These notes are from Go 1.25's `runtime/os_plan9.go`, `runtime/sys_plan9_amd64.s` and `syscall/syscall_plan9.go`.
+
+**What the runtime needs**
+
+| Need | Used for | Milestone |
+| --- | --- | --- |
+| AX holds the Tos pointer at entry | `_rt0_amd64_plan9` saves it in `_tos`; g lives in `_privates` on the stack, not in FS, so there's no TLS setup | Done (M1) |
+| `open`, `pread`, `pwrite`, `seek`, `close`, `dup`, `errstr`, `exits`, `brk_`, `sleep` | Basic I/O, the heap, `osyield` | M2 |
+| `rfork(RFPROC\|RFMEM\|RFNOWAIT)` | One Plan 9 process per M (OS thread) | M3 |
+| `notify` / `noted`, `/proc/n/note` | `sigtramp` turns notes into panics; the runtime posts notes to its own Ms | M4 |
+| `semacquire`, `tsemacquire`, `semrelease` | `semasleep`/`semawakeup`, so every lock and park | M5 |
+| `/dev/bintime`, 4 words, nanoseconds | `nanotime` and `walltime` (below) | M5 |
+| `_NSEC` (53) | `syscall.Gettimeofday` only; the runtime doesn't use it | M5 |
+| `/env`, `/dev/random` | `os.Getenv`, `crypto/rand` | `/env` at M2; `/dev/random` comes from drawterm's devcons |
+| `/dev/sysstat`, `/dev/swap` | CPU count and page size; the runtime falls back to 1 CPU and 4 KiB if they're missing | Optional |
+
+**Time.** The runtime opens `/dev/bintime` at startup, moves it to fd 18, and `pread`s it for every clock read. It asks for four big-endian 64-bit words: nanoseconds since the epoch, ticks, tick frequency and monotonic nanoseconds. If the read returns only three, it uses the wall-clock word as the monotonic clock. drawterm's `readbintime` in `kern/devcons.c` has two problems: it computes the time as `seconds()*1000000000`, so the clock only moves once a second, and it returns at most three words. Under it, Go's timers, `time.Sleep`, timeouts and the scheduler's clock would all be off by up to a second, and the monotonic clock would follow host wall-clock changes. 9front's libc `nsec()` reads the same file, so native programs see whole seconds too. The fix is to serve `bintime` from our console device (`src/kern/devhcons.c`), bound over `/dev` like `cons`, with 9front's four-word layout: wall time in nanoseconds, ticks and frequency from the host's monotonic clock, and monotonic nanoseconds. The vendored tree stays unmodified.
+
+**`_NSEC`.** 9front still implements `_NSEC` for binary compatibility (`sys_nsec` in `port/sysproc.c`), returning the time in the return register on 64-bit machines. Go's `syscall.nsec` reads the return value and only falls back to the pointer argument if it's 0. hp9 implements it the same way, from the same clock as `bintime`. The other underscore calls stay unimplemented.
+
+**Demo:** a Go program built with `GOOS=plan9 GOARCH=amd64` that starts goroutines, sleeps for 100 ms and prints the elapsed time runs under `hp9 --backend emu`, and the elapsed time it prints is at least 100 ms and under 200 ms.
+
 ## Security, debugging and testing
 
 **Security stance.** The hypervisor isolates guest memory and the CPU, and every guest syscall is served by drawterm's kernel rather than the host's, so the guest never reaches host syscalls, ioctls or the host environment directly. The namespace decides what a guest can reach on the host. Identity: hostowner is the host user's name; devfs maps the host's file ownership onto Plan 9 user strings.
@@ -254,9 +278,11 @@ Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths
 | `fs.write.ephemeral` | A ramfs union-bound with `bind -c` over writable paths; new files go to the ramfs and vanish on exit | M5 |
 | `fs.write.overlay` | A copy-on-write overlay device, shared with image-backed roots | M10 |
 
-**Vendor hooks.** The policy lives in Zig. drawterm calls it through two leaf functions, following seam rule 3: `hp9_fs_check(root, path, op)` in devfs (read-only attaches, read-deny) and `hp9_net_check(op, addr, port)` in devip. Both return an int and never raise kernel errors themselves.
+**Vendor hooks.** The policy lives in Zig. drawterm calls it through leaf functions, following seam rule 3. devfs-posix and devfs-win32 call `hp9_fs_check(path, op)` (in `src/kern/fscheck.c`) before each walk, open, create, remove, wstat and directory entry. It resolves the host path and asks the Zig leaf `hp9_policy_check` for a verdict: allowed, hidden (the walk fails, or the entry is left out of the listing) or read-only ("permission denied"). The machine's compiled plan is set per host thread, because each guest process runs on its own thread. From M5, `hp9_net_check(op, addr, port)` in devip does the same for the network. The leaves return an int and never raise kernel errors themselves.
 
-**Path resolution.** devfs-posix follows symlinks with `stat`, so a symlink inside a bound tree can point anywhere on the host. M2 resolves every devfs path beneath its bound root (`openat2` with `RESOLVE_BENEATH` on Linux, a resolved-path prefix check elsewhere) before policy checks apply. Hardlinks under writable paths still alias host files outside them; the plan reports that as a caveat.
+**Access rules.** The plan's rules are the root, the cwd, `/tmp`, each `--readable` and `--writable` path and each `--read-deny` path, all as resolved host paths. A deny rule covering a path wins. Otherwise the longest allow rule covering the path decides between read-only and read-write. Ancestors of allowed paths can be walked and listed but not changed, so `/mnt/term/<path>` works when the host's `/` is unioned after the tree's `/mnt/term`. Anything else is hidden. Bind-level read-only (no `MCREATE`) is a second, coarser check.
+
+**Path resolution.** devfs-posix follows symlinks with `stat`, so a symlink inside a bound tree can point anywhere on the host. Every devfs path is resolved (`realpath`; on Windows the final path of an opened handle, which follows symlinks and junctions and refuses UNC and device paths) and the resolved path is checked against the access rules, on every host. Create, remove and rename act on the name rather than a link's target, so an existing entry is checked by its own canonical name without following it. On macOS that's `F_GETPATH` on an `O_SYMLINK` open, and on Windows the final path of a reparse-point open, so another case, an 8.3 short name or a trailing dot can't dodge a rule on a case-insensitive file system. A new name is appended to its resolved parent. A create over an existing symlink also checks the link's target for writing. Renaming a directory that has any rule strictly beneath it is refused ("permission denied"), because it would move those paths out from under their rules. The check and the host call aren't atomic, so a host process renaming paths at the same time can race it; the plan reports that, and hardlinks under writable paths, as caveats.
 
 **Default profile.** With no sandbox flags the guest can work in the host cwd and nothing else:
 
@@ -269,11 +295,11 @@ Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths
 | Network | Full until M5, then outbound only (`--net=enable` for servers) |
 | Host commands (`#C`) | Masked |
 | Environment | Only the default guest variables plus `--env` |
-| Memory | The guest-physical region size (a few GiB) |
+| Memory | The guest-physical region size (1 GiB; `--memory` sets it, up to 32 GiB) |
 | Processes, CPU, timeout | Unlimited, so interactive sessions and long builds aren't cut off |
 | Terminal | `cons` and `consctl` only; no host ioctls such as `TIOCSTI` |
 
-`--profile=tight` differs in four ways: the cwd is read-only, `#I` is masked, `/tmp` isn't writable until M5 and is then a private ramfs, and a default timeout applies. `--sandbox DIR` is the tight profile with only DIR bound, read-write, as the cwd; the host cwd isn't bound.
+`--profile=tight` differs in four ways: the cwd is read-only, `#I` is masked, `/tmp` isn't writable until M5 and is then a private ramfs, and a default timeout of 10 minutes applies. `--sandbox DIR` is the tight profile with only DIR bound, read-write, as the cwd; the host cwd isn't bound.
 
 **Plan output.** `--print` compiles the policy and exits without running. The namespace is printed in `newns` format, so from M3 it can be saved and replayed with `--ns`:
 
@@ -281,18 +307,30 @@ Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths
 $ hp9 --print --profile=tight --writable ./out --memory 512m --timeout 1m mk
 profile:  tight
 enforces: env.scrub fs.read.scope fs.write.scope ipc.restrict kernel.isolation net.disable proc.timeout res.memory
-limits:   memory=512M timeout=1m
-devmask:  #C #I
+limits:   write=scope net=disable memory=512M timeout=1m
+devmask:  #C #I #U
 namespace:
-  bind '#U/Users/me/hp9root' /                       ro
-  bind '#U/Users/me/src/proj' /mnt/term/cwd          ro
-  bind '#U/Users/me/src/proj/out' /mnt/term/cwd/out  rw
-  bind '#c' /dev; bind '#p' /proc; bind '#s' /srv; bind '#d' /fd
+  bind '#U/Users/me/hp9root' /                             ro
+  bind '#c' /dev
+  bind -b '#y<id>' /dev
+  bind -c '#e' /env
+  bind '#|' /fd
+  bind '/arm64/bin' /bin
+  bind -a '/rc/bin' /bin
+  bind '#U/Users/me/src/proj' /mnt/term/cwd                ro
+  bind -c '#U/Users/me/src/proj/out' /mnt/term/cwd/out     rw
+access:
+  ro   /Users/me/hp9root
+  ro   /Users/me/src/proj
+  rw   /Users/me/src/proj/out
 caveats:
   - hardlinks under writable paths can modify host files outside them
   - writes to writable paths are not capped (no res.disk)
+  - paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check
   - the hp9 process itself is not host-sandboxed
 ```
+
+Requested capabilities the build can't enforce yet are listed on an `unenforced:` line, and the setting falls back to the safer choice: `--write=ephemeral` and `--write=overlay` deny writes, and `--net=outbound` leaves the network as it is until M5. `--strict` refuses them with exit 2 instead.
 
 **Examples**
 
@@ -317,10 +355,20 @@ The guest is contained, but the hp9 process runs drawterm's C kernel with the ho
 
 This is future work. Each backend milestone records research notes so it can be built later:
 
-- **M2 (macOS):** whether `sandbox_init` with a generated SBPL profile can be applied after `hv_vm_create` and still allow HVF calls, and which profile rules that needs.
+- **M2 (macOS):** whether `sandbox_init` with a generated SBPL profile can be applied after `hv_vm_create` and still allow HVF calls, and which profile rules that needs. See the research note below.
 - **M7 (macOS):** which Mach and WindowServer lookups `--gfx` needs under Seatbelt.
 - **M8 (Linux):** Landlock for paths and TCP ports plus seccomp, with `/dev/kvm` already open; the syscalls `KVM_RUN` and vCPU threads need; the Landlock ABI each target distro ships.
 - **M9 (Windows):** whether an AppContainer or restricted token can still use WHP.
+
+**Research note: Seatbelt with HVF (M2).** Tested on macOS 15.8.1 on an M3 Max with a small C program, ad-hoc signed with the hypervisor entitlement. It calls `hv_vm_create` and `hv_vm_map` on 16 MiB of guest RAM, then applies a profile with `sandbox_init_with_parameters`. That call is exported from libsystem_sandbox but not declared in `<sandbox.h>`, so it needs its own prototype. The profile was:
+
+```scheme
+(version 1)
+(deny default)
+(allow file-read* (subpath (param "ALLOWED")))
+```
+
+After that it creates a vCPU on each of two new pthreads, runs them to an `hvc #0`, maps and unmaps a second region, and opens files. Everything HVF worked under `(deny default)` with no other rules: `hv_vcpu_create` on new threads, `hv_vcpu_run` (exit reason exception, syndrome `0x5a000000`), `hv_vm_map`/`hv_vm_unmap` of new memory and `hv_vm_destroy`. Thread creation needed no rule either. HVF needs no `iokit-open` or `mach-lookup` rule, because the VM and vCPUs are reached through the process's existing hypervisor handle, which is allowed by the entitlement rather than by the sandbox. Applying the same profile *before* `hv_vm_create` also worked, so ordering isn't forced by HVF. File rules behaved as expected, with one catch: `ALLOWED` must be the resolved path (`/private/var/...`, not `/var/...`), because the sandbox matches resolved paths. Reads inside it worked, writes there and reads elsewhere (`/etc/hosts`) failed with EPERM, and the process kept running. `sandbox_init*` fails with EPERM when the process is already sandboxed, so hostjail has to treat that as "already contained" or fail closed under `--strict`. For `src/hostjail.zig`, the plan is a generated `(deny default)` profile listing the resolved root, cwd and `--readable`/`--writable` paths (read or read-write), `/dev/null`, the TTY, and `network-outbound` only when the policy allows the network. It's applied after the backend and root setup, and before the first guest instruction runs.
 
 ### Debugging
 
@@ -371,7 +419,7 @@ hp9 [hp9-flags]                       # interactive rc if stdin is a TTY, otherw
 | `--root DIR\|tcp!host!port\|/path.sock` | M2, M10 | The root tree. If omitted, use `$HP9ROOT`, then the default install location (`.local/9front/root` in development builds until there's an installer) |
 | `--env name=value` (repeatable) | M2 | Sets a guest environment variable. The host environment isn't imported. |
 | `--cwd PATH` | M2 | The guest cwd. Defaults to `/mnt/term/cwd`, the host cwd bound into the guest |
-| `--rc 'cmd'` | M3 | See program resolution |
+| `--rc 'cmd'` | M2 | See program resolution. rc can't fork until M3, so only commands without pipes or subprocesses work |
 | `--ns file` | M3 | See program resolution |
 | `--gfx` | M7 | Opens a host window and serves `/dev/draw`, `/dev/mouse` and `/dev/kbd` |
 | `--profile default\|tight` | M2 | Sets the sandbox defaults (see Sandbox policy). Explicit flags override it. |
@@ -450,7 +498,7 @@ Each milestone ends with a demo command that must pass. M0 targets macOS arm64. 
 3. **M2, one process:** syscalls go through drawterm's `sys*` wrappers; the host-tree root and the terminal work. Unicorn built from source for Windows, and kern for Windows, as a parallel track that joins once the device table and console device settle (see the M2 changelog). Sandbox policy core: profiles, the namespace builder and device mask, devfs read-only, read-deny and beneath-root path resolution, the memory cap, a hard timeout, `--print` and `--strict`. Research note on Seatbelt with HVF. Demo: `hp9 /bin/cat /lib/namespace`, `hp9 --profile=tight --rc 'echo x > /mnt/term/cwd/f'` fails, plus the M1 demo on Windows.
 4. **M3, trees:** rfork, exec, await, devdup and pipes. Process and CPU caps; `--print` namespaces replay with `--ns`. Demo: `hp9 --rc 'ls /bin | wc -l'`.
 5. **M4, notes and /proc:** notify/noted, interrupt on Ctrl-C, devproc. `--timeout` posts `hangup` before teardown. Demo: an interactive rc session where `kill` and `ps` work.
-6. **M5, servers:** devsrv, rendezvous and semaphores, segattach. `net.outbound` becomes the default, plus `--net-allow` and `--write=ephemeral`; `/tmp` becomes a private ramfs. Demo: ramfs posts to /srv and is mounted; factotum runs; `aux/listen1` fails under the default profile.
+6. **M5, servers:** devsrv, rendezvous and semaphores, segattach. `net.outbound` becomes the default, plus `--net-allow` and `--write=ephemeral`; `/tmp` becomes a private ramfs. Go compatibility: `/dev/bintime` with nanosecond and monotonic time, and `_NSEC` (see Go compatibility). Demo: ramfs posts to /srv and is mounted; factotum runs; `aux/listen1` fails under the default profile; the Go demo passes.
 7. **M6, self-host:** the compilers, linkers and mk run (installing into the read-only root needs `--writable "$HP9ROOT"`). Demo: rebuild `/sys/src/cmd/ls` inside, and the rebuilt binary runs.
 8. **M7, graphics:** `--gfx` with devdraw. Research note on Seatbelt with `--gfx`. Demo: rio and acme run in a host window.
 9. **M8, Linux:** KVM backend; arm64 first, then the amd64 shim on x86\_64. Research note on Landlock and seccomp with KVM. Demo: M0 to M7 pass in CI on KVM.
@@ -495,6 +543,16 @@ Record design changes as they are made using `- YYYY-MM-DD: <design change> (rea
 - 2026-11-02: The guest's fd 2 is opened on `/dev/stderr` from the machine's console device, which writes to `Stdio.err`, so guest error output reaches the host's stderr as it does for native programs. 9front has no such file (fd 2 is `/dev/cons` there).
 - 2026-11-02: drawterm's `_sysfd2path` passes an uninitialised length and has no `sys*` wrapper, so `src/kern/glue.c` has `hp9_fd2path` instead, rather than fixing the vendored tree.
 - 2026-11-02: Host self-sandboxing of the hp9 process (Seatbelt, Landlock/seccomp, AppContainer) is deferred to after M10; M2, M7, M8 and M9 each record a research note for their host (keeps the backend milestones focused while gathering what the later work needs).
+- 2026-11-03: devfs checks the *resolved* host path against the plan's access rules on every host, instead of `openat2(RESOLVE_BENEATH)` on Linux and a prefix check elsewhere. One `realpath` (on Windows, the handle's final path) plus a Zig rule lookup covers symlink escapes, `--read-deny`, read-only paths and `/mnt/term` ancestors in one place, and works the same in devfs-posix and devfs-win32. The cost is a check-then-use race against concurrent host renames, which the plan lists as a caveat. (`openat2` would mean rewriting devfs-posix around directory fds, and has no Darwin or Windows equivalent.)
+- 2026-11-03: The vendored devfs-posix.c and devfs-win32.c carry hp9's sandbox hooks, one call per operation plus a header (`src/kern/fscheck.h`), so the vendor tree is no longer unmodified. They also return nil from a walk that matches no name, as devwalk does, so a union bind such as the host's `/` after the tree's `/mnt/term` falls through to the next member. Without that, `/mnt/term/<host path>` wouldn't resolve. (devfs has no other seam, and the hooks are small enough to merge across upstream updates.)
+- 2026-11-03: Policy paths outside the root and cwd appear at `/mnt/term/<host path>` through one `bind -a '#U/' /mnt/term`. The access rules hide everything but the bound paths and their ancestors, instead of binding each path's parent directories. Paths inside the root or cwd are bound over their place there, so `--writable ./out` under a read-only cwd is `/mnt/term/cwd/out`. (One union keeps the namespace short, and the rules have to filter it anyway.)
+- 2026-11-03: `#U` is masked after the namespace is built unless `--host-fs`, as the boot sequence describes. `--host-fs` adds the host's `/` read-only at `/mnt/term`, and `--writable` still decides what's writable. Without a `--writable`, `--write=none` and the tight profile's defaults make no host path writable. `/tmp` is the host temp dir, read-write, in the default profile only. (Read-write `--host-fs` would make every other flag moot.)
+- 2026-11-03: Unenforceable modes (`--write=ephemeral|overlay`, `--net=outbound`) fall back to the safer choice and are listed as `unenforced` in the plan, rather than failing without `--strict`. Writes are denied for the write modes, and the network is left as it is for outbound, since M2 can't half-enable it. (isobox's model: run with what can be enforced, and let `--strict` refuse.)
+- 2026-11-03: `res.memory` sizes the backend's guest-physical region: HVF maps exactly `--memory` bytes (default 1 GiB, at most 32 GiB) and the emulator counts pages against the same cap. Page tables and per-vCPU pages count too, so the cap is exact. A program that doesn't fit exits 125 (`OutOfGuestMemory`), not with a guest note. (There's no guest allocator to fail softly until segments come in M3.)
+- 2026-11-03: `proc.timeout`'s hard teardown kicks the vCPU and interrupts the Proc (`procinterrupt`), and the process is killed with `hp9: timeout` at its next exit. A process stuck in a host call that can't be interrupted, such as a console read on the host's stdin, gets a 500 ms grace period. After that `Machine.run` returns anyway and marks the machine `stuck`, leaking its resources rather than freeing memory a kernel thread still uses, and the CLI exits at once. `sleep` is served (drawterm has no `tsleep`, so it sleeps in 20 ms slices and checks for a pending note), which gives tests an interruptible blocking call. (M4's `hangup` note and grace period replace this.)
+- 2026-11-03: `--rc` arrives in M2 rather than M3, since the M2 demo uses it for a redirection. Until rfork and exec it runs only commands that need no subprocess. `--trace=FILE` writes the trace to a file. (The demo is a redirection, which rc does in-process.)
+- 2026-11-03: kern builds for Windows with drawterm's Make.win64 files (`devfs-win32`, `devip-win32`, `devlfd-win32`, `win32.c`) and `-DWINDOWS -DUNICODE`. It also uses posix-port's `getcallerpc` and `tas`, which are compiler builtins, and a `src/kern/glue-win32.c` for the host user and drawterm's unused `mymain`. On Windows, host paths go to `#U` and the plan in devfs-win32's form, `/C:/Users/...`, and `.\` and `..\` programs are host paths like `./` and `../`. hp9.exe runs the M1 and M2 demos on the emulator in the Windows arm64 VM. (`<windows.h>` clashes with draw.h, hence a separate file.)
+- 2026-11-02: Go `plan9/amd64` binaries become an M5 target, with a new Go compatibility section. `/dev/bintime` is served by hp9's console device with nanosecond wall time and a fourth monotonic word, replacing drawterm's whole-second, three-word version, and `_NSEC` is implemented as 9front does for binary compatibility. All other underscore calls still post "bad sys call". (Go reads every clock from `/dev/bintime`, so drawterm's version would give it one-second timers. `syscall.Gettimeofday` uses `_NSEC`. M5 is the first milestone with everything Go's runtime needs: rfork from M3, notes and `/proc` from M4, and semaphores.)
 
 #### M3
 

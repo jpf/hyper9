@@ -18,6 +18,7 @@ pub const Nr = enum(u64) {
     close = 4,
     dup = 5,
     exits = 8,
+    sleep = 17,
     open = 14,
     create = 22,
     fd2path = 23,
@@ -236,6 +237,10 @@ fn serve(p: *Process, nr: Nr, a: Args) gm.Error!Outcome {
             else
                 kern.fwstat(fdArg(try a.int(0)) orelse return badFd(), tmp[0..len]) catch return fail;
             return ok(n);
+        },
+        .sleep => {
+            p.note("{d}", .{try a.int(0)});
+            return result0(kern.sleep(try a.int(0)));
         },
         .notify => {
             p.notify = try a.u(0);

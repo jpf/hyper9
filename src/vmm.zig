@@ -59,7 +59,15 @@ pub const CreateError = Error || std.mem.Allocator.Error;
 
 pub const Options = struct {
     arch: Arch,
+    /// Cap on the guest memory the backend hands out, page tables included;
+    /// null means the backend's default region size.
+    memory: ?u64 = null,
 };
+
+/// The guest memory region when no cap is given.
+pub const default_memory: u64 = 1 << 30;
+/// The largest cap: HVF's default 36-bit IPA space, less the low 2 GiB.
+pub const max_memory: u64 = 32 << 30;
 
 pub const page_size = 4096;
 

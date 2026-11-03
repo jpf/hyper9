@@ -10,6 +10,7 @@
 #include	"error.h"
 
 #include	<libsec.h>	/* for sha1 in pathhash() */
+#include	"fscheck.h"	/* hp9: sandbox hooks */
 
 typedef struct DIR	DIR;
 typedef	struct Ufsinfo	Ufsinfo;
@@ -262,6 +263,10 @@ fswalk1(Chan *c, char *name)
 	
 	uif = c->aux;
 	p = catpath(uif->path, name, nil);
+	if(hp9_fs_checkw(p, HP9_FSWALK) < 0){
+		free(p);
+		return 0;
+	}
 	switch(pathtype(p)){
 	case TPATH_VOLUME:
 		if(!checkvolume(p)){
@@ -308,6 +313,12 @@ fswalk(Chan *c, Chan *nc, char **name, int nname)
 		wq->clone = nil;
 	}
 	wq->nqid = i;
+	/* hp9: as devwalk does, so namec tries the rest of a union. */
+	if(i == 0 && nname > 0){
+		free(wq);
+		kstrcpy(up->errstr, Enonexist, ERRMAX);
+		return nil;
+	}
 	return wq;
 }
 	
@@ -337,6 +348,9 @@ fsopen(Chan *c, int mode)
 	omode = openmode(mode);
 
 	uif = c->aux;
+	hp9_fs_allow(uif->path, omode == OREAD && !(mode&OTRUNC) ? HP9_FSREAD : HP9_FSWRITE);
+	if(mode & ORCLOSE)
+		hp9_fs_allow(uif->path, HP9_FSREMOVE);
 	if(c->qid.type & QTDIR){
 		DIR *d;
 
@@ -409,6 +423,7 @@ fscreate(Chan *c, char *name, int mode, ulong perm)
 	}
 	d = NULL;
 	h = INVALID_HANDLE_VALUE;
+	hp9_fs_allow(newpath, HP9_FSCREATE);
 	if(perm & DMDIR) {
 		wchar_t *p;
 
@@ -569,6 +584,7 @@ fsremove(Chan *c)
 		nexterror();
 	}
 	uif = c->aux;
+	hp9_fs_allow(uif->path, HP9_FSREMOVE);
 	if(c->qid.type & QTDIR){
 		if(!RemoveDirectory(uif->path))
 			oserror();
@@ -592,6 +608,7 @@ fswstat(Chan *c, uchar *buf, int n)
 	uif = c->aux;
 	if(pathtype(uif->path) != TPATH_FILE)
 		error(Ebadstat);
+	hp9_fs_allow(uif->path, HP9_FSWRITE);
 	if(~d.atime != 0 || ~d.mtime != 0){
 		FILETIME ta, *pta = NULL;
 		FILETIME tm, *ptm = NULL;
@@ -644,6 +661,8 @@ fswstat(Chan *c, uchar *buf, int n)
 			nexterror();
 		}
 		if(wcscmp(uif->path, newpath)!=0){
+			hp9_fs_allow(newpath, HP9_FSCREATE);
+			hp9_fs_allow(uif->path, HP9_FSRENAME);
 			if(!MoveFile(uif->path, newpath))
 				oserror();
 		}
@@ -753,13 +772,18 @@ fsdirread(Chan *c, uchar *va, int count, vlong offset)
 		if(de[0]==0 || isdots(de))
 			continue;
 		d.name = de;
-		if(t == TPATH_ROOT){
+		if(t == TPATH_ROOT)
 			p = catpath(uif->path, nil, uif->dir->drivep);
-			wfdtodir(p, &d, nil);
-		} else {
+		else
 			p = catpath(uif->path, nil, uif->dir->wfd.cFileName);
-			wfdtodir(p, &d, &uif->dir->wfd);
+		if(hp9_fs_checkw(p, HP9_FSWALK) < 0){
+			free(p);
+			continue;
 		}
+		if(t == TPATH_ROOT)
+			wfdtodir(p, &d, nil);
+		else
+			wfdtodir(p, &d, &uif->dir->wfd);
 		free(p);
 		d.type = 'U';
 		d.dev = c->dev;
