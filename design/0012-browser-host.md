@@ -171,7 +171,7 @@ The GDT, IDT and TSS are shared by every vCPU, since only one runs at a time. Th
 
 ## Rationale
 
-**Why v86 rather than waiting for the interpreter.** v86 is mature and already compiles x86 to wasm, which is the fastest way to run guest code in a browser. It needs no new CPU work, only a backend, a shim and glue. The [zig-interpreter](zig-interpreter.md) is complementary: once it exists it can run arm64 binaries on the web host from the same root tree, and v86 stays for x86. Neither proposal depends on the other.
+**Why v86 rather than waiting for the interpreter.** v86 is mature and already compiles x86 to wasm, which is the fastest way to run guest code in a browser. It needs no new CPU work, only a backend, a shim and glue. The [zig-interpreter](0019-zig-interpreter.md) is complementary: once it exists it can run arm64 binaries on the web host from the same root tree, and v86 stays for x86. Neither proposal depends on the other.
 
 **Why 386.** v86 has no long mode, so amd64 isn't possible on it. 9front still builds and releases 386, and its compilers are the same family as 7c and 6c.
 
@@ -250,4 +250,4 @@ Nothing in the page is reachable except through those imports.
 - **Graphics.** [gfx](0015-gfx.md) on a canvas, through devdraw, would be its own proposal.
 - **Coroutine stack size.** 256 KiB is a guess. Kernel paths with large frames may need more, and memory for many processes adds up, since wasm memory never shrinks.
 - **Time.** `Tos.cyclefreq` and `kcycles` on the web host, and whether `/dev/bintime` can be finer than devcons's one second here ([go-compat](0007-go-compat.md)).
-- **arm64 on the web host.** Once [zig-interpreter](zig-interpreter.md) exists, the web host can run arm64 binaries on it. The question is whether the browser then gets an arm64 root, or both.
+- **arm64 on the web host.** Once [zig-interpreter](0019-zig-interpreter.md) exists, the web host can run arm64 binaries on it. The question is whether the browser then gets an arm64 root, or both.

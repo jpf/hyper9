@@ -34,7 +34,7 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 | Language | Zig, latest stable (0.16.x as of writing) | Change versions only when we hit a blocking bug. drawterm's C is compiled with `zig cc`. |
 | Terminal | Text mode on the host TTY; graphics behind a flag is proposed ([gfx](design/0015-gfx.md)) | consctl `rawon`; the interrupt key posts an `interrupt` note |
 | Guest exit mechanism | MMIO doorbell (`OUT` on x86) | Works the same on all three hypervisors |
-| Emulator | A user-mode emulator backend: Unicorn; a native Zig interpreter is proposed ([zig-interpreter](design/zig-interpreter.md)) | For development and CI on hosts and VMs without a usable hypervisor |
+| Emulator | A user-mode emulator backend: Unicorn; a native Zig interpreter is proposed ([zig-interpreter](design/0019-zig-interpreter.md)) | For development and CI on hosts and VMs without a usable hypervisor |
 
 ## Architecture
 

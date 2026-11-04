@@ -89,7 +89,7 @@ Programs that died with "sys: bad sys call" when a lock was contended, or as soo
 
 One kernel thread is added per host process, for the timer kproc. It's started at boot and idles on a condition variable.
 
-On the Unicorn emulator, the kernel's compare-and-swap is atomic on the host. Guest exclusives on a word that another process's engine is also using are only as atomic as Unicorn makes them, which is already true of `_tas` locks between `RFMEM` processes there; [zig-interpreter](zig-interpreter.md) makes guest atomics hold across engines. HVF runs the guest on the host's own cores, so host and guest atomics on the same memory are coherent.
+On the Unicorn emulator, the kernel's compare-and-swap is atomic on the host. Guest exclusives on a word that another process's engine is also using are only as atomic as Unicorn makes them, which is already true of `_tas` locks between `RFMEM` processes there; [zig-interpreter](0019-zig-interpreter.md) makes guest atomics hold across engines. HVF runs the guest on the host's own cores, so host and guest atomics on the same memory are coherent.
 
 ## Security
 
@@ -128,4 +128,4 @@ Each case runs on every backend in `H9_TEST_BACKENDS` with the same output. The 
 
 ## Open issues
 
-- Whether Unicorn performs guest `LDXR`/`STXR` as host compare-and-swaps. If it doesn't, cases that mix guest atomics with kernel semaphores between `RFMEM` processes may be flaky on the emulator until [zig-interpreter](zig-interpreter.md) lands.
+- Whether Unicorn performs guest `LDXR`/`STXR` as host compare-and-swaps. If it doesn't, cases that mix guest atomics with kernel semaphores between `RFMEM` processes may be flaky on the emulator until [zig-interpreter](0019-zig-interpreter.md) lands.
