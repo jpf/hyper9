@@ -27,8 +27,8 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [browser-host](design/0012-browser-host.md) | draft | needs i386 | A browser host on wasm, with v86 |
 | [9p-roots](design/0013-9p-roots.md) | draft | needs semaphores | 9P roots |
 | [image-roots](design/0014-image-roots.md) | draft | needs devsrv, 9p-roots | Disk-image roots |
+| [gfx](design/0015-gfx.md) | draft | needs devsrv | Graphics (--gfx) |
 | [ci](design/ci.md) | draft |  | Continuous integration |
-| [gfx](design/gfx.md) | draft | needs devsrv | Graphics (--gfx) |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-sandbox](design/host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
 | [kvm](design/kvm.md) | draft |  | KVM backend |
@@ -56,8 +56,8 @@ flowchart LR
   p_browser_host["#35;12 browser-host<br/>draft"]:::draft
   p_9p_roots["#35;13 9p-roots<br/>draft"]:::draft
   p_image_roots["#35;14 image-roots<br/>draft"]:::draft
+  p_gfx["#35;15 gfx<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
-  p_gfx["gfx<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
   p_kvm["kvm<br/>draft"]:::draft

@@ -20,7 +20,7 @@ Guest file servers can post themselves and be mounted:
 - **`#s`:** devsrv, ported from 9front, bound at `/srv`. Each machine gets its own registry, so machines in one host process can't see each other's services.
 - **Syscalls:** `mount`, `unmount` and `fauth` are served, through drawterm's existing `sysmount`, `sysunmount` and devmnt's `mntauth`.
 
-With [semaphores](semaphores.md), which serves the `rendezvous` that every lib9p server uses at startup, `ramfs`, `factotum`, `plumber`, `srv` and `srvfs` run. rio's `/srv` and `/mnt/wsys`, which [gfx](gfx.md) needs, work the same way.
+With [semaphores](semaphores.md), which serves the `rendezvous` that every lib9p server uses at startup, `ramfs`, `factotum`, `plumber`, `srv` and `srvfs` run. rio's `/srv` and `/mnt/wsys`, which [gfx](0015-gfx.md) needs, work the same way.
 
 ## Background
 

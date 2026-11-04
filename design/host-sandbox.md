@@ -23,7 +23,7 @@ The guest is contained, but the h9 process runs drawterm's C kernel with the hos
 This is future work. Each backend proposal records a research note so this can be built later:
 
 - **macOS (done, below):** whether `sandbox_init` with a generated SBPL profile can be applied after `hv_vm_create` and still allow HVF calls, and which profile rules that needs. See the research note below.
-- **macOS, [gfx](gfx.md):** which Mach and WindowServer lookups `--gfx` needs under Seatbelt.
+- **macOS, [gfx](0015-gfx.md):** which Mach and WindowServer lookups `--gfx` needs under Seatbelt.
 - **Linux, [kvm](kvm.md):** Landlock for paths and TCP ports plus seccomp, with `/dev/kvm` already open; the syscalls `KVM_RUN` and vCPU threads need; the Landlock ABI each target distro ships.
 - **Windows, [whp](whp.md):** whether an AppContainer or restricted token can still use WHP.
 

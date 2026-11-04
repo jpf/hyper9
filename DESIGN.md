@@ -32,7 +32,7 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 | Root filesystem | Direct host tree | 9P mounts (remote servers, cwfs or gefs as guests) are proposed ([9p-roots](design/0013-9p-roots.md), [image-roots](design/0014-image-roots.md)); devmnt already exists |
 | Toolchain inside | The 9front compilers (7c/6c, 7l/6l, mk) must run | It's a goal ([self-host](design/0010-self-host.md)), and a source of test binaries |
 | Language | Zig, latest stable (0.16.x as of writing) | Change versions only when we hit a blocking bug. drawterm's C is compiled with `zig cc`. |
-| Terminal | Text mode on the host TTY; graphics behind a flag is proposed ([gfx](design/gfx.md)) | consctl `rawon`; the interrupt key posts an `interrupt` note |
+| Terminal | Text mode on the host TTY; graphics behind a flag is proposed ([gfx](design/0015-gfx.md)) | consctl `rawon`; the interrupt key posts an `interrupt` note |
 | Guest exit mechanism | MMIO doorbell (`OUT` on x86) | Works the same on all three hypervisors |
 | Emulator | A user-mode emulator backend: Unicorn; a native Zig interpreter is proposed ([zig-interpreter](design/zig-interpreter.md)) | For development and CI on hosts and VMs without a usable hypervisor |
 

@@ -247,7 +247,7 @@ Nothing in the page is reachable except through those imports.
 - **Browsers without JSPI.** Firefox until it ships JSPI by default, and Safari until 27. An Asyncify build is the fallback. It needs measuring for size and speed, and deciding whether it's shipped or only documented.
 - **Delivering the root.** A 386 root is large to load up front. Files could be fetched on demand through `Suspending` WASI calls, cached in OPFS, or served by Wanix. Once [9p-roots](0013-9p-roots.md) exists, a 9P root over a WebSocket or a MessagePort is another option.
 - **Network.** None, at first. A WebSocket relay or Wanix's network could back devip later, as a separate proposal.
-- **Graphics.** [gfx](gfx.md) on a canvas, through devdraw, would be its own proposal.
+- **Graphics.** [gfx](0015-gfx.md) on a canvas, through devdraw, would be its own proposal.
 - **Coroutine stack size.** 256 KiB is a guess. Kernel paths with large frames may need more, and memory for many processes adds up, since wasm memory never shrinks.
 - **Time.** `Tos.cyclefreq` and `kcycles` on the web host, and whether `/dev/bintime` can be finer than devcons's one second here ([go-compat](0007-go-compat.md)).
 - **arm64 on the web host.** Once [zig-interpreter](zig-interpreter.md) exists, the web host can run arm64 binaries on it. The question is whether the browser then gets an arm64 root, or both.

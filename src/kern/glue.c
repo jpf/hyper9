@@ -23,7 +23,7 @@
 char *argv0;
 extern ulong kerndate;
 
-/* No GUI until --gfx (design/gfx.md): devdraw, devmouse and snarf see no screen. */
+/* No GUI until --gfx (design/0015-gfx.md): devdraw, devmouse and snarf see no screen. */
 Memimage *gscreen;
 void screeninit(void) {}
 void screensize(Rectangle r, ulong chan) { USED(r, chan); }
