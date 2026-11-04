@@ -23,7 +23,7 @@ This was part of milestone M10 in DESIGN.md, before milestones became proposals 
 
 1. **Direct host tree:** a directory served through `#U`.
 2. **9P mount:** `--root tcp!host!564` (or a unix socket path) dials and mounts through devmnt. Covers remote file servers and u9fs.
-3. **Disk image:** [image-roots](image-roots.md).
+3. **Disk image:** [image-roots](0014-image-roots.md).
 
 ### h9 today
 

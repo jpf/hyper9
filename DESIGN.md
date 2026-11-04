@@ -29,7 +29,7 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 | --- | --- | --- |
 | Product shape | A library plus a thin CLI; each invocation is one machine | One machine can hold a whole process tree. Keep the machine API free of CLI-global state. |
 | Plan 9 flavour | 9front only, at a pinned release | One syscall table and one a.out format per architecture |
-| Root filesystem | Direct host tree | 9P mounts (remote servers, cwfs or gefs as guests) are proposed ([9p-roots](design/0013-9p-roots.md), [image-roots](design/image-roots.md)); devmnt already exists |
+| Root filesystem | Direct host tree | 9P mounts (remote servers, cwfs or gefs as guests) are proposed ([9p-roots](design/0013-9p-roots.md), [image-roots](design/0014-image-roots.md)); devmnt already exists |
 | Toolchain inside | The 9front compilers (7c/6c, 7l/6l, mk) must run | It's a goal ([self-host](design/0010-self-host.md)), and a source of test binaries |
 | Language | Zig, latest stable (0.16.x as of writing) | Change versions only when we hit a blocking bug. drawterm's C is compiled with `zig cc`. |
 | Terminal | Text mode on the host TTY; graphics behind a flag is proposed ([gfx](design/gfx.md)) | consctl `rawon`; the interrupt key posts an `interrupt` note |
@@ -211,7 +211,7 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 
 ## Filesystem, boot and I/O
 
-**Root filesystem.** A directory holding an extracted 9front root, served through `#U` (devfs-posix or devfs-win32). This is the fastest path: no 9P round trips. Roots served over 9P and from disk images are proposed ([9p-roots](design/0013-9p-roots.md), [image-roots](design/image-roots.md)).
+**Root filesystem.** A directory holding an extracted 9front root, served through `#U` (devfs-posix or devfs-win32). This is the fastest path: no 9P round trips. Roots served over 9P and from disk images are proposed ([9p-roots](design/0013-9p-roots.md), [image-roots](design/0014-image-roots.md)).
 
 **Boot sequence**
 

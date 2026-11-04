@@ -63,7 +63,7 @@ The namespace builder makes the overlay right after the root itself, before ever
   ...
 ```
  
-- **Any root:** the lower tree is whatever `/` is at that point: a host tree from `#U`, a [9P root](0013-9p-roots.md)'s mount, or an [image root](image-roots.md)'s mount. So writes to a 9P root don't reach its server, and writes to an image root stay above its file server.
+- **Any root:** the lower tree is whatever `/` is at that point: a host tree from `#U`, a [9P root](0013-9p-roots.md)'s mount, or an [image root](0014-image-roots.md)'s mount. So writes to a 9P root don't reach its server, and writes to an image root stay above its file server.
 - **Binds over the root still work.** `/dev`, `/bin`, `/mnt/term/cwd` and the rest are bound onto directories reached through the overlay. A directory that's only in the lower tree keeps its lower qid, and so does a directory marker, which is what a lower directory becomes when its children change, so the mount table keeps matching it. Only a copied-up file gets a new qid, and nothing is bound onto files of the root.
 - **Writable paths inside the root** (`--writable "$H9ROOT"/usr/glenda`) are bound from `#U` over the overlay, so writes there go to the host, as the longest rule decides today.
 - **`$home`.** If the root has no `/usr/$user`, the builder creates it in the overlay, so a guest's home directory exists and is writable, and vanishes with the run.
