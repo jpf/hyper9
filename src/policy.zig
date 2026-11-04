@@ -18,7 +18,7 @@ pub const WriteMode = enum {
     scope,
     /// Discard all writes on exit (design/0006-ephemeral-writes.md; not enforced yet).
     ephemeral,
-    /// Copy-on-write over the root (design/overlay.md; not enforced yet).
+    /// Copy-on-write over the root (design/0011-overlay.md; not enforced yet).
     overlay,
 };
 

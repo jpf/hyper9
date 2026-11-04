@@ -23,7 +23,8 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [devsrv](design/0008-devsrv.md) | draft | needs semaphores | devsrv, /srv and mount |
 | [i386](design/0009-i386.md) | draft |  | 386 binaries |
 | [self-host](design/0010-self-host.md) | draft |  | Self-hosting |
-| [9p-roots](design/9p-roots.md) | draft |  | 9P roots |
+| [overlay](design/0011-overlay.md) | draft | needs ephemeral-writes | Copy-on-write overlay as the root's default |
+| [9p-roots](design/9p-roots.md) | draft | needs semaphores | 9P roots |
 | [browser-host](design/browser-host.md) | draft | needs i386 | A browser host on wasm, with v86 |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [gfx](design/gfx.md) | draft | needs devsrv | Graphics (--gfx) |
@@ -32,8 +33,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [image-roots](design/image-roots.md) | draft | needs devsrv, 9p-roots | Disk-image roots |
 | [kvm](design/kvm.md) | draft |  | KVM backend |
 | [linux-personality](design/linux-personality.md) | draft |  | Linux personality |
-| [overlay](design/overlay.md) | draft | needs ephemeral-writes | Copy-on-write overlay as the root's default |
-| [whp](design/whp.md) | draft |  | WHP backend |
+| [whp](design/whp.md) | draft | needs kvm | WHP backend |
 | [zig-interpreter](design/zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
 
 ```mermaid
@@ -52,6 +52,7 @@ flowchart LR
   p_devsrv["#35;8 devsrv<br/>draft"]:::draft
   p_i386["#35;9 i386<br/>draft"]:::draft
   p_self_host["#35;10 self-host<br/>draft"]:::draft
+  p_overlay["#35;11 overlay<br/>draft"]:::draft
   p_9p_roots["9p-roots<br/>draft"]:::draft
   p_browser_host["browser-host<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
@@ -61,18 +62,19 @@ flowchart LR
   p_image_roots["image-roots<br/>draft"]:::draft
   p_kvm["kvm<br/>draft"]:::draft
   p_linux_personality["linux-personality<br/>draft"]:::draft
-  p_overlay["overlay<br/>draft"]:::draft
   p_whp["whp<br/>draft"]:::draft
   p_zig_interpreter["zig-interpreter<br/>draft"]:::draft
   p_semaphores --> p_go_compat
   p_semaphores --> p_devsrv
+  p_ephemeral_writes --> p_overlay
+  p_semaphores --> p_9p_roots
   p_i386 --> p_browser_host
   p_devsrv --> p_gfx
   p_kvm --> p_host_sandbox
   p_whp --> p_host_sandbox
   p_devsrv --> p_image_roots
   p_9p_roots --> p_image_roots
-  p_ephemeral_writes --> p_overlay
+  p_kvm --> p_whp
 ```
 
 <!-- design:end -->

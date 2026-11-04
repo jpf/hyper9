@@ -17,7 +17,7 @@ Nov 4, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 Enforce `--write=ephemeral` with a copy-on-write overlay device, `#O`, in h9's own kernel code. Under it, every path the plan would make writable is an overlay: reads come from the host tree, while creates, writes, removes and renames land in memory and are gone when the machine ends. The host tree is never written.
 
-The same device over the root tree's empty `/tmp` gives every machine a private in-memory `/tmp`, replacing the host's temp directory. Overlay memory, data and bookkeeping both, counts against `--memory`. [overlay](overlay.md) can then put the same device over the root.
+The same device over the root tree's empty `/tmp` gives every machine a private in-memory `/tmp`, replacing the host's temp directory. Overlay memory, data and bookkeeping both, counts against `--memory`. [overlay](0011-overlay.md) can then put the same device over the root.
 
 ## Background
 
@@ -116,7 +116,7 @@ So the guest's own memory and its ephemeral files share one cap, `--memory`, exa
 
 - **What becomes an overlay:** every path the plan would bind read-write under `scope` is bound instead as an overlay over its `#U` chan. That's the cwd, and each `--writable` path, including a writable path inside a read-only cwd.
 - **The tight profile:** under `ephemeral`, its cwd is an overlay as well. The reason it's read-only under `scope`, keeping the host's files safe from the guest, doesn't apply when nothing reaches the host.
-- **The root** stays read-only unless it's a `--writable` path. Putting an overlay over the root by default is [overlay](overlay.md)'s.
+- **The root** stays read-only unless it's a `--writable` path. Putting an overlay over the root by default is [overlay](0011-overlay.md)'s.
 - **Host access:** the overlaid host paths go into the plan's access rules as read-only, since the device never writes its lower tree. devfs then refuses any write that reaches it by another route.
 - **`enforces:`** gains `fs.write.ephemeral`, and `--strict` accepts `ephemeral`.
 
@@ -161,7 +161,7 @@ caveats:
 
 **Copy-up, not a union.** A union sends every operation on an existing name to the member that has it, so it can't keep writes off the host without refusing them (see Background). A copy-up overlay is what Linux's overlayfs and Docker's layers do, for the same reason.
 
-**A kernel device, not a guest ramfs.** A device needs no `mount` syscall, no process per machine, and no 9P round trip per operation. It can count its memory against the machine's cap through the page allocator, where a guest ramfs would count against it as ordinary heap but only as far as its own process can grow. It also gives [overlay](overlay.md) the device it needs for the root and image-backed roots.
+**A kernel device, not a guest ramfs.** A device needs no `mount` syscall, no process per machine, and no 9P round trip per operation. It can count its memory against the machine's cap through the page allocator, where a guest ramfs would count against it as ordinary heap but only as far as its own process can grow. It also gives [overlay](0011-overlay.md) the device it needs for the root and image-backed roots.
 
 **In C, in `src/kern/`.** A device is chans, qids, walks and `waserror`, which is drawterm's world. Zig on the inside would cross the seam on every operation and break seam rule 1 at every lower-device call that can raise. h9's devproc and devhcons are C for the same reason, with Zig leaves for what Zig owns: here, the pages.
 
