@@ -415,6 +415,10 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_cmd.addArgs(args);
     b.step("run", "Run h9").dependOn(&run_cmd.step);
 
+    // Fixed paths, not the install prefix, so `--prefix /usr/local clean` can't remove it.
+    const clean_cmd = b.addSystemCommand(&.{ "rm", "-rf", b.pathFromRoot("zig-out"), b.pathFromRoot(".zig-cache") });
+    b.step("clean", "Remove zig-out and .zig-cache").dependOn(&clean_cmd.step);
+
     // M0/M1 fixtures: hand-assembled hello a.outs for arm64 and amd64.
     const mkhello = b.addExecutable(.{
         .name = "mkhello",

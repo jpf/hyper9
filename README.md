@@ -26,7 +26,7 @@ in the design for the full scope and demo of each.
 Requires Zig 0.16.x and Xcode (for the macOS SDK and `codesign`).
 
 ```sh
-. scripts/env.sh               # Zig cache and tools live in .local/ (gitignored)
+. scripts/env.sh               # Zig cache and tools live in .local/ (gitignored); puts zig-out/bin (h9) on PATH
 ./scripts/fetch.sh             # reference sources (9front at the pinned release), 9front arm64 image, prebuilt and patched-source Unicorn into .local/
 ./scripts/mkroot.py            # extracts the 9front root tree into .local/9front/root (~1 min, ~250 MB)
 ```
@@ -56,6 +56,7 @@ zig build m2       # M2 demos: h9 /bin/cat /lib/namespace, and a write under --p
 zig build m3       # M3 demo, h9 --rc 'ls /bin | wc -l', and the M3 integration cases
 zig build m4       # M4 demo (kill and ps in an interactive rc, on a pty) and the M4 integration cases
 zig build integration  # real 9front binaries from the root tree through the h9 CLI
+zig build clean    # removes zig-out and .zig-cache (not the fetched .local tree)
 ```
 
 The M2 to M4 demos and the integration tests use the root tree from
