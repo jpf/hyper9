@@ -4,7 +4,7 @@ title: Disk-image roots
 status: draft
 created: 2026-11-03
 authors: [progrium]
-depends: [8, 9p-roots]
+depends: [8, 13]
 areas: [cli, kern, sandbox]
 ---
  
@@ -14,7 +14,7 @@ Nov 4, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
  
 ## Abstract
  
-`--root` takes a raw 9front disk image. h9 serves the image to the guest as a disk, `#S`, partitions it with 9front's own `diskparts`, and runs 9front's file server for it (gefs, cwfs or hjfs) as a guest process, from the host root tree. The server posts itself to `/srv`, and h9 mounts it at `/`, as [9p-roots](9p-roots.md) mounts a server, before the program runs. Writes the file server makes land in memory unless the image is `--writable`, so the image is never changed by default.
+`--root` takes a raw 9front disk image. h9 serves the image to the guest as a disk, `#S`, partitions it with 9front's own `diskparts`, and runs 9front's file server for it (gefs, cwfs or hjfs) as a guest process, from the host root tree. The server posts itself to `/srv`, and h9 mounts it at `/`, as [9p-roots](0013-9p-roots.md) mounts a server, before the program runs. Writes the file server makes land in memory unless the image is `--writable`, so the image is never changed by default.
  
 ## Background
  
@@ -35,13 +35,13 @@ The pinned release's arm64 image, which `scripts/fetch.sh` downloads and `script
  
 - **No disk device.** There's no `#S`, and devfs can only serve a host file as a file, without partitions.
 - **No posting or mounting from the guest** until [devsrv](0008-devsrv.md).
-- **[9p-roots](9p-roots.md)** makes `--root` a union and mounts a 9P connection at `/` before the plan's other binds. A posted service is a 9P connection.
+- **[9p-roots](0013-9p-roots.md)** makes `--root` a union and mounts a 9P connection at `/` before the plan's other binds. A posted service is a 9P connection.
 - **The file servers** are in the root tree: `/arm64/bin/gefs`, `cwfs64x` and `hjfs`. They use `semacquire`, `rendezvous` and many procs, which is why [semaphores](0003-semaphores.md), and through it devsrv, come first.
 ## Proposal
  
 ### `--root IMAGE`
  
-`--root` (and `$H9ROOT`) accept a host path to a regular file as a raw disk image. [9p-roots](9p-roots.md)'s reading of `--root` gains that case: a directory is a host tree, a socket is a 9P root, and a regular file is an image. `Machine.Options.Root` gains `image: []const u8`, an absolute and resolved host path.
+`--root` (and `$H9ROOT`) accept a host path to a regular file as a raw disk image. [9p-roots](0013-9p-roots.md)'s reading of `--root` gains that case: a directory is a host tree, a socket is a 9P root, and a regular file is an image. `Machine.Options.Root` gains `image: []const u8`, an absolute and resolved host path.
  
 | Flag | Meaning |
 | --- | --- |
@@ -124,7 +124,7 @@ The `boot:` section isn't part of the namespace, so `--ns` doesn't replay it. A 
  
 **A fresh namespace for the program.** The boot namespace has the raw disk and the boot tree. Starting the program from a clean Pgrp with the device mask set means it sees only the image's tree and the usual devices, as a 9front system does after `bootrc`.
  
-**Refusing `--write=none`,** as [9p-roots](9p-roots.md) does: the server has to write, and `none` promises that nothing is written.
+**Refusing `--write=none`,** as [9p-roots](0013-9p-roots.md) does: the server has to write, and `none` promises that nothing is written.
  
 ## Compatibility
  

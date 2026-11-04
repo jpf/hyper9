@@ -245,7 +245,7 @@ Nothing in the page is reachable except through those imports.
 
 - **The memory layout.** It's not yet checked whether the prebuilt `v86.wasm`'s data, stack and allocator leave room for a second module on its memory. If not, v86 is built from source with `--import-memory` and a fixed base, which puts cargo in the build.
 - **Browsers without JSPI.** Firefox until it ships JSPI by default, and Safari until 27. An Asyncify build is the fallback. It needs measuring for size and speed, and deciding whether it's shipped or only documented.
-- **Delivering the root.** A 386 root is large to load up front. Files could be fetched on demand through `Suspending` WASI calls, cached in OPFS, or served by Wanix. Once [9p-roots](9p-roots.md) exists, a 9P root over a WebSocket or a MessagePort is another option.
+- **Delivering the root.** A 386 root is large to load up front. Files could be fetched on demand through `Suspending` WASI calls, cached in OPFS, or served by Wanix. Once [9p-roots](0013-9p-roots.md) exists, a 9P root over a WebSocket or a MessagePort is another option.
 - **Network.** None, at first. A WebSocket relay or Wanix's network could back devip later, as a separate proposal.
 - **Graphics.** [gfx](gfx.md) on a canvas, through devdraw, would be its own proposal.
 - **Coroutine stack size.** 256 KiB is a guess. Kernel paths with large frames may need more, and memory for many processes adds up, since wasm memory never shrinks.
