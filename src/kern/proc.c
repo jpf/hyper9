@@ -16,6 +16,10 @@
  * Each record belongs to a machine (Hmach): note groups and postnotepg
  * never reach another machine's processes.
  *
+ * devproc.c (#p) reads and changes records through the hp9_* functions
+ * declared in hproc.h; a lookup by pid only finds processes in the
+ * caller's machine.
+ *
  * Records are reference counted: the table holds one for the process's
  * life, and each child holds one on its parent's record, so a child that
  * outlives its parent never touches freed memory. A parent that exits
@@ -28,102 +32,7 @@
 #include "fns.h"
 #include "error.h"
 
-enum
-{
-	RFNAMEG		= (1<<0),
-	RFENVG		= (1<<1),
-	RFFDG		= (1<<2),
-	RFNOTEG		= (1<<3),
-	RFPROC		= (1<<4),
-	RFMEM		= (1<<5),
-	RFNOWAIT	= (1<<6),
-	RFCNAMEG	= (1<<10),
-	RFCENVG		= (1<<11),
-	RFCFDG		= (1<<12),
-	RFREND		= (1<<13),
-	RFNOMNT		= (1<<14),
-
-	Maxwait		= 128,	/* wait records a parent keeps, as 9front */
-	PROCHASH	= 64,
-	TEXTLEN		= 64,
-	NNOTE		= 5,	/* queued notes, as 9front */
-};
-
-/* hp9_kern_popnote's results. */
-enum
-{
-	Nnone,		/* no note to act on */
-	Nhandle,	/* enter the handler with the note */
-	Nkill,		/* die with the note as the exit status */
-	Nkilldebug,	/* the same, and print "suicide: note" first */
-};
-
-/* devenv.c */
-extern void	*hp9_egrpnew(void);
-extern void	*hp9_egrpcopy(void*);
-extern void	hp9_egrpincref(void*);
-extern void	hp9_egrpclose(void*);
-
-typedef struct Hwait Hwait;
-typedef struct Hproc Hproc;
-typedef struct Hmach Hmach;
-typedef struct Hnote Hnote;
-
-/* A machine: the processes descended from one hp9_kern_spawn. */
-struct Hmach
-{
-	Ref	ref;		/* one per record */
-	Lock	lk;
-	ulong	nextnoteid;
-};
-
-/* 9front's Note. One note posted to a group is shared by its queues. */
-struct Hnote
-{
-	Ref	ref;
-	int	flag;		/* NUser, NExit or NDebug */
-	char	msg[ERRMAX];
-};
-
-struct Hwait
-{
-	Hwait	*next;
-	ulong	pid;
-	ulong	time[3];	/* user, sys, real, in ms */
-	char	msg[ERRMAX];
-};
-
-struct Hproc
-{
-	Ref	ref;
-	Proc	*p;
-	Hproc	*hash;		/* table chain */
-
-	ulong	pid;		/* machine-local */
-	char	text[TEXTLEN];
-	ulong	start;		/* ticks() at creation, for the real time */
-	char	exitstr[ERRMAX];
-	void	*egrp;		/* devenv.c's HEgrp */
-	void	*aux;		/* the Zig process */
-	Hmach	*mach;
-
-	Lock	nlk;		/* guards the note fields below */
-	ulong	noteid;
-	int	notify;		/* has a note handler */
-	int	notified;	/* in the handler */
-	int	nnote;
-	Hnote	*note[NNOTE];
-	Hnote	*lastnote;	/* the note being handled, or that killed it */
-
-	Hproc	*parent;	/* nil with RFNOWAIT or for a machine's first process */
-	Lock	exl;		/* guards the fields below */
-	int	dead;		/* exited; children leave no wait records */
-	int	nchild;
-	int	nwait;
-	Hwait	*waitq;
-	QLock	qwaitr;		/* one waiter at a time */
-	Rendez	waitr;
-};
+#include "hproc.h"
 
 static Lock tablk;
 static Hproc *table[PROCHASH];
@@ -456,6 +365,160 @@ hp9_kern_postmach(void *v, int all, char *msg, int flag)
 	return count;
 }
 
+/* For devproc.c (hproc.h). */
+
+void	(*hp9_procstatus)(void*, char*, int, ulong*);
+
+Hproc*
+hp9_uphproc(void)
+{
+	return uphproc();
+}
+
+/* The process with machine-local pid in machine m, with a reference, or nil. */
+Hproc*
+hp9_pidlookup(Hmach *m, ulong pid)
+{
+	Hproc *h;
+	int i;
+
+	h = nil;
+	lock(&tablk);
+	for(i = 0; h == nil && i < PROCHASH; i++)
+		for(h = table[i]; h != nil; h = h->hash)
+			if(h->mach == m && h->pid == pid)
+				break;
+	if(h != nil)
+		incref(&h->ref);
+	unlock(&tablk);
+	return h;
+}
+
+void
+hp9_putproc(Hproc *h)
+{
+	putproc(h);
+}
+
+/*
+ * The pids in machine m, in ascending order: fills up to n of them into
+ * pids and returns how many it filled.
+ */
+int
+hp9_pids(Hmach *m, ulong *pids, int n)
+{
+	Hproc *h;
+	int i, count;
+
+	count = 0;
+	lock(&tablk);
+	for(i = 0; i < PROCHASH; i++)
+		for(h = table[i]; h != nil; h = h->hash)
+			if(h->mach == m && h->pid != 0){
+				if(count < n)
+					pids[count] = h->pid;
+				count++;
+			}
+	unlock(&tablk);
+	if(count > n)
+		count = n;
+	for(i = 1; i < count; i++){
+		ulong v;
+		int j;
+
+		v = pids[i];
+		for(j = i; j > 0 && pids[j-1] > v; j--)
+			pids[j] = pids[j-1];
+		pids[j] = v;
+	}
+	return count;
+}
+
+Hnote*
+hp9_mknote(char *msg, int flag)
+{
+	return mknote(msg, flag);
+}
+
+void
+hp9_freenote(Hnote *n)
+{
+	freenote(n);
+}
+
+int
+hp9_pushnote(Hproc *h, Hnote *n)
+{
+	return pushnote(h, n);
+}
+
+void
+hp9_postnotepg(Hmach *m, ulong noteid, char *msg, int flag)
+{
+	postnotepg(m, noteid, msg, flag);
+}
+
+/*
+ * Moves h into note group noteid, which some process in its machine must
+ * be in already (9front's changenoteid, where users can't differ).
+ * Returns 0, or -1 if there's no such group.
+ */
+int
+hp9_setnoteid(Hproc *h, ulong noteid)
+{
+	Hproc *q;
+	int i, found;
+
+	found = 0;
+	lock(&tablk);
+	for(i = 0; !found && i < PROCHASH; i++)
+		for(q = table[i]; q != nil; q = q->hash)
+			if(q->mach == h->mach && q->noteid == noteid){
+				found = 1;
+				break;
+			}
+	if(found)
+		h->noteid = noteid;
+	unlock(&tablk);
+	return found ? 0 : -1;
+}
+
+/*
+ * 9front's killproc for ctl kill: the process dies with "Killed" at its
+ * next note delivery, whether or not it has a handler.
+ */
+void
+hp9_killproc(Hproc *h)
+{
+	lock(&h->nlk);
+	if(h->p != nil){
+		h->killed = 1;
+		procinterrupt(h->p);
+		if(h->aux != nil && hp9_notekick != nil)
+			hp9_notekick(h->aux);
+	}
+	unlock(&h->nlk);
+}
+
+/*
+ * Records exec's argv for /proc/n/args: n bytes of NUL-terminated strings,
+ * which the caller has cut to ARGSLEN at a character boundary.
+ */
+void
+hp9_kern_setargs(char *args, int n)
+{
+	Hproc *h;
+
+	h = lookup(up);
+	if(h == nil || n < 0 || n > ARGSLEN)
+		return;
+	lock(&h->alk);
+	memmove(h->args, args, n);
+	h->nargs = n;
+	h->setargs = 0;
+	unlock(&h->alk);
+}
+
 /* Posts a note to every process but the caller in its machine's note group noteid. */
 void
 hp9_kern_postnotepg(ulong noteid, char *msg, int flag)
@@ -498,7 +561,7 @@ hp9_kern_notepending(void)
 	Hproc *h;
 
 	h = lookup(up);
-	return h != nil && h->nnote > 0;
+	return h != nil && (h->nnote > 0 || h->killed);
 }
 
 /*
@@ -521,6 +584,11 @@ hp9_kern_popnote(char *msg, uvlong pc)
 		return Nnone;
 	up->notepending = 0;
 	lock(&h->nlk);
+	if(h->killed){
+		unlock(&h->nlk);
+		kstrcpy(msg, "Killed", ERRMAX);
+		return Nkill;
+	}
 	if(h->nnote == 0 || (h->notified && h->note[0]->flag == NUser)){
 		unlock(&h->nlk);
 		return Nnone;
@@ -706,6 +774,12 @@ fgrpclose(Fgrp *f)
 }
 #define closefgrp fgrpclose
 
+void
+hp9_fgrpclose(Fgrp *f)
+{
+	fgrpclose(f);
+}
+
 /* Code using RFNOMNT expects to block all but these devices. */
 static char nomntdevs[] = "|decp";
 
@@ -879,6 +953,7 @@ hp9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 	if(h == nil)
 		error(Enomem);
 	h->pid = pid;
+	h->ppid = ph->pid;
 	h->mach = ph->mach;
 	incref(&h->mach->ref);
 	h->notify = ph->notify;
@@ -948,6 +1023,45 @@ hp9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 	return 0;
 }
 
+/* Swap the caller's groups under h->debug, for devproc's readers. */
+static void
+swapfgrp(Hproc *h, Fgrp *f)
+{
+	qlock(&h->debug);
+	up->fgrp = f;
+	qunlock(&h->debug);
+}
+
+static void
+swappgrp(Hproc *h, Pgrp *pg)
+{
+	qlock(&h->debug);
+	up->pgrp = pg;
+	qunlock(&h->debug);
+}
+
+/* chdir, as drawterm's syschdir, with dot swapped under the record's debug lock. */
+int
+hp9_kern_chdir(char *name)
+{
+	Hproc *h;
+	Chan *c, *old;
+
+	if(waserror())
+		return syserr();
+	c = namec(name, Atodir, 0, 0);
+	poperror();
+	h = lookup(up);
+	if(h != nil)
+		qlock(&h->debug);
+	old = up->dot;
+	up->dot = c;
+	if(h != nil)
+		qunlock(&h->debug);
+	cclose(old);
+	return 0;
+}
+
 /*
  * rfork without RFPROC: changes the caller's own groups (9front's
  * sysrfork). Returns 0, or -1 with the error string set.
@@ -977,11 +1091,11 @@ hp9_kern_rfork(int flag)
 	if(waserror()){
 		if(up->fgrp != ofg){
 			closefgrp(up->fgrp);
-			up->fgrp = ofg;
+			swapfgrp(h, ofg);
 		}
 		if(up->pgrp != opg){
 			closepgrp(up->pgrp);
-			up->pgrp = opg;
+			swappgrp(h, opg);
 		}
 		if(up->rgrp != org){
 			closergrp(up->rgrp);
@@ -997,14 +1111,14 @@ hp9_kern_rfork(int flag)
 	/* File descriptors */
 	if(flag & (RFFDG|RFCFDG)){
 		if(flag & RFFDG)
-			up->fgrp = dupfgrp(ofg);
+			swapfgrp(h, dupfgrp(ofg));
 		else
-			up->fgrp = dupfgrp(nil);
+			swapfgrp(h, dupfgrp(nil));
 	}
 
 	/* Process group */
 	if(flag & (RFNAMEG|RFCNAMEG)){
-		up->pgrp = newpgrp();
+		swappgrp(h, newpgrp());
 		pgrpcpy(up->pgrp, opg, flag);
 	}
 
@@ -1062,11 +1176,14 @@ hp9_kern_exit(void)
 	}
 	leave(h);
 	/* Notes posted from now on are dropped; the Proc goes with pexit. */
+	qlock(&h->debug);
 	lock(&h->nlk);
 	h->p = nil;
 	h->aux = nil;
+	h->killed = 0;
 	freenotes(h);
 	unlock(&h->nlk);
+	qunlock(&h->debug);
 
 	ph = h->parent;
 	if(ph != nil){
@@ -1094,9 +1211,10 @@ hp9_kern_exit(void)
 		putproc(ph);
 	}
 
-	/* Prevent my children from leaving waits. */
+	/* Prevent my children from leaving waits; wake /proc/n/wait readers. */
 	lock(&h->exl);
 	h->dead = 1;
+	wakeup(&h->waitr);
 	h->nchild = h->nwait = 0;
 	while((w = h->waitq) != nil){
 		h->waitq = w->next;

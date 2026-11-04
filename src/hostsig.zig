@@ -220,6 +220,9 @@ const Windows = struct {
     lock: std.atomic.Mutex = .unlocked,
 
     fn init(s: *Windows, _: *Host) void {
+        // A process inherits "ignore Ctrl-C" from its parent (OpenSSH sets
+        // it, for one), as POSIX inherits a blocked signal mask.
+        _ = SetConsoleCtrlHandler(null, .FALSE);
         s.installed = SetConsoleCtrlHandler(handler, .TRUE).toBool();
     }
 

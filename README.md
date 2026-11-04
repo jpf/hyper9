@@ -12,7 +12,7 @@ in the design for the full scope and demo of each.
 - [x] **M1, emulator:** Unicorn backend for arm64 and amd64
 - [x] **M2, one process:** syscalls through drawterm's kern, host-tree root, terminal, sandbox policy core, Windows build
 - [x] **M3, trees:** rfork, exec, await, devdup and pipes; process and CPU caps
-- [ ] **M4, notes and /proc:** notify/noted, Ctrl-C interrupts, devproc
+- [x] **M4, notes and /proc:** notify/noted, Ctrl-C, hangup and raw mode, devproc
 - [ ] **M5, servers:** devsrv, rendezvous, semaphores, segattach, outbound network, Go compatibility
 - [ ] **M6, self-host:** compilers, linkers and mk run inside
 - [ ] **M7, graphics:** `--gfx` with devdraw; rio and acme in a host window
@@ -54,15 +54,16 @@ zig build kern     # compiles drawterm's kern and the libraries it uses
 zig build m1       # M0 demo: hp9 ./hello must print "hello" (plus the M1 demo with -Demu=unicorn)
 zig build m2       # M2 demos: hp9 /bin/cat /lib/namespace, and a write under --profile=tight fails
 zig build m3       # M3 demo, hp9 --rc 'ls /bin | wc -l', and the M3 integration cases
-zig build m4       # M4 demo (kill and ps in an interactive rc, on a pty) and the M4 cases; fails until M4 is done
+zig build m4       # M4 demo (kill and ps in an interactive rc, on a pty) and the M4 integration cases
 zig build integration  # real 9front binaries from the root tree through the hp9 CLI
 ```
 
 The M2 to M4 demos and the integration tests use the root tree from
 `scripts/mkroot.py`, or `-Droot=DIR`. The integration tests skip when there's
-no tree. Cases for the milestone in progress are named `M4: ...` and so on, and
+no tree. Cases for the milestone in progress are named `M5: ...` and so on, and
 skip in `zig build integration` and `zig build test`. Cases for a finished
-milestone are tagged `(M3)` and so on; `zig build m3` runs the M3 ones.
+milestone are tagged `(M4)` and so on; `zig build m3` and `zig build m4` run
+those milestones' cases.
 Interactive cases run hp9 on a terminal the test creates
 ([tests/term.zig](tests/term.zig): a pty, or ConPTY on Windows), so they need
 no human and no `ssh -t`.
@@ -158,6 +159,13 @@ process without one dies with the note as its status, so a write to a closed
 pipe ends the writer with `sys: write on closed pipe pc=...`, and a fault or
 bad syscall can be caught.
 
+`/proc` lists the machine's own processes by their machine-local pids, as
+on 9front, so `ps` and `kill` work: `kill sleep | rc` posts a `kill` note
+to each sleep. Each process has `args`, `ctl` (`kill`, `close`, `closefiles`),
+`fd`, `note`, `noteid`, `notepg`, `ns`, `ppid`, `status` and `wait`; the CPU
+times in `status` read 0 for now, and `ns` shows the host paths of bound
+host trees.
+
 At the terminal, Ctrl-C posts `interrupt` to the foreground note group (rc
 abandons the command and prompts again); a second Ctrl-C within a second
 stops the machine. Closing the terminal or SIGTERM posts `hangup` to every
@@ -245,7 +253,7 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 | `src/machine.zig` | one machine: builds its namespace, runs a process and serves its syscalls |
 | `src/consin.zig` | a machine run's console input: the reader thread a guest's console read waits on, so notes can interrupt it |
 | `src/policy.zig` | the sandbox policy: profiles, the compiled plan, `--print` and the access rules devfs checks |
-| `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; boot and spawn (`glue.c`), our device table, the machine console `#y`, devenv ported from 9front, and the devfs policy hooks (`fscheck.c`) |
+| `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; boot and spawn (`glue.c`), process records and notes (`proc.c`), our device table, the machine console `#y`, devenv and devproc ported from 9front, and the devfs policy hooks (`fscheck.c`) |
 | `src/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |
 | `src/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
 | `src/aout.zig` | a.out parser and arch layouts |

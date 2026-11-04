@@ -138,9 +138,10 @@ const c_stub = struct {
     fn sysunmount(_: ?[*:0]const u8, _: [*:0]const u8) c_int {
         return -1;
     }
-    fn syschdir(_: [*:0]const u8) c_int {
+    fn hp9_kern_chdir(_: [*:0]const u8) c_int {
         return -1;
     }
+    fn hp9_kern_setargs(_: [*]const u8, _: c_int) void {}
     fn sysdup(_: c_int, _: c_int) c_int {
         return -1;
     }
@@ -206,7 +207,9 @@ const c_real = struct {
     extern fn sysbind(old: [*:0]const u8, new: [*:0]const u8, flag: c_int) c_int;
     extern fn sysmount(fd: c_int, afd: c_int, new: [*:0]const u8, flag: c_int, spec: [*:0]const u8) c_int;
     extern fn sysunmount(old: ?[*:0]const u8, new: [*:0]const u8) c_int;
-    extern fn syschdir(name: [*:0]const u8) c_int;
+    extern fn hp9_kern_chdir(name: [*:0]const u8) c_int;
+    extern fn hp9_kern_setargs(args: [*]const u8, n: c_int) void;
+    extern var hp9_procstatus: ?*const fn (?*anyopaque, [*]u8, c_int, *c_ulong) callconv(.c) void;
     extern fn sysdup(fd0: c_int, fd1: c_int) c_int;
     extern fn sysstat(name: [*:0]const u8, buf: [*]u8, n: c_int) c_int;
     extern fn sysfstat(fd: c_int, buf: [*]u8, n: c_int) c_int;
@@ -339,6 +342,42 @@ pub fn closeExec() void {
 /// while `aux` is set; it must not post notes or block.
 pub fn setNoteKick(f: *const fn (?*anyopaque) callconv(.c) void) void {
     if (available) c.hp9_notekick = f;
+}
+
+/// Sets the hook /proc/n/status calls, with the process's `aux`, for its
+/// state (into a buffer of the given size) and its memory in KiB. It runs
+/// on the reading thread with the target's note lock held, and only while
+/// `aux` is set; it must not block or make kernel calls.
+pub fn setProcStatus(f: *const fn (?*anyopaque, [*]u8, c_int, *c_ulong) callconv(.c) void) void {
+    if (available) c.hp9_procstatus = f;
+}
+
+/// The most of exec's argv /proc/n/args keeps, as 9front's exec.
+pub const args_max = 128;
+
+/// Records exec's argv for /proc/n/args: the strings NUL-terminated and
+/// run together, cut to `args_max` bytes at a character boundary.
+pub fn setArgs(argv: []const []const u8) void {
+    var buf: [args_max]u8 = undefined;
+    var n: usize = 0;
+    for (argv) |a| {
+        if (n + a.len + 1 > buf.len) {
+            // As 9front: keep what fits, ending at a UTF-8 boundary.
+            var k = buf.len - 1 - n;
+            if (k > a.len) k = a.len;
+            while (k > 0 and k < a.len and (a[k] & 0xc0) == 0x80) k -= 1;
+            @memcpy(buf[n..][0..k], a[0..k]);
+            n += k;
+            buf[n] = 0;
+            n += 1;
+            break;
+        }
+        @memcpy(buf[n..][0..a.len], a);
+        n += a.len;
+        buf[n] = 0;
+        n += 1;
+    }
+    c.hp9_kern_setargs(&buf, @intCast(n));
 }
 
 /// Who posted a note (9front's NUser, NExit, NDebug). A note that isn't
@@ -572,8 +611,9 @@ pub fn unmount(old: ?[*:0]const u8, new: [*:0]const u8) Error!void {
     _ = try check(c.sysunmount(old, new));
 }
 
+/// chdir, swapping dot so /proc/n readers never see it freed.
 pub fn chdir(name: [*:0]const u8) Error!void {
-    _ = try check(c.syschdir(name));
+    _ = try check(c.hp9_kern_chdir(name));
 }
 
 pub fn dup(fd0: u31, fd1: i32) Error!u31 {
@@ -1004,4 +1044,135 @@ test "notes queue per process, reach note groups and stay in their machine" {
     try std.testing.expectEqual(NoteAction.kill, t.acts[0]);
     try std.testing.expectEqualStrings("die", std.mem.sliceTo(&t.got[1], 0));
     try std.testing.expectEqual(NoteAction.kill, t.acts[1]);
+}
+
+test "#p lists and serves only the caller's machine, by machine-local pid" {
+    if (!available) return error.SkipZigTest;
+    const T = struct {
+        const Self = @This();
+        err: ?anyerror = null,
+        where: []const u8 = "",
+        ready: std.atomic.Value(u32) = .init(0),
+        go: std.atomic.Value(bool) = .init(false),
+        done: std.atomic.Value(u32) = .init(0),
+        lists: [2][64]u8 = undefined,
+        list_lens: [2]usize = .{ 0, 0 },
+        args: [64]u8 = undefined,
+        args_len: usize = 0,
+        killed: [64]u8 = undefined,
+        killed_len: usize = 0,
+
+        const Child = struct {
+            fn run(t: *Self) void {
+                // Waits to be killed through ctl.
+                while (true) {
+                    var msg: [ERRMAX]u8 = undefined;
+                    if (popNote(&msg, 0) == .kill) {
+                        const s = std.mem.sliceTo(&msg, 0);
+                        @memcpy(t.killed[0..s.len], s);
+                        t.killed_len = s.len;
+                        setExits("killed");
+                        return;
+                    }
+                    sleep(5) catch {};
+                }
+            }
+        };
+
+        fn machine(t: *Self, i: usize) void {
+            defer _ = t.done.fetchAdd(1, .release);
+            t.body(i) catch |e| {
+                t.err = e;
+            };
+        }
+
+        fn readAll(path: [*:0]const u8, buf: []u8) !usize {
+            const fd = try open(path, OREAD);
+            defer close(fd) catch {};
+            var n: usize = 0;
+            while (n < buf.len) {
+                const k = try pread(fd, buf[n..], @intCast(n));
+                if (k == 0) break;
+                n += k;
+            }
+            return n;
+        }
+
+        fn body(t: *Self, i: usize) !void {
+            setGuestPid(1);
+            try bind("#p", "/", MREPL);
+            setArgs(&.{ "prog", "a b", "c" });
+            if (i == 0) {
+                t.where = "fork";
+                try fork(RF.PROC, 2, Self, Child.run, t);
+            }
+            _ = t.ready.fetchAdd(1, .release);
+            while (!t.go.load(.acquire)) std.Thread.yield() catch {};
+
+            // The directory: machine 0 has 1 and 2, machine 1 only 1.
+            t.where = "list";
+            const d = try open("/", OREAD);
+            defer close(d) catch {};
+            var buf: [4096]u8 = undefined;
+            var off: usize = 0;
+            while (true) {
+                const n = try pread(d, &buf, 0);
+                if (n == 0) break;
+                var j: usize = 0;
+                while (j + 2 <= n) {
+                    const sz = std.mem.readInt(u16, buf[j..][0..2], .little) + 2;
+                    // The name: after size[2] type[2] dev[4] qid[13] mode[4] atime[4] mtime[4] length[8].
+                    const nl = std.mem.readInt(u16, buf[j + 41 ..][0..2], .little);
+                    const name = buf[j + 43 ..][0..nl];
+                    @memcpy(t.lists[i][off..][0..name.len], name);
+                    off += name.len;
+                    t.lists[i][off] = ' ';
+                    off += 1;
+                    j += sz;
+                }
+            }
+            t.list_lens[i] = off;
+
+            if (i == 1) {
+                // Machine 0's pid 2 isn't visible here.
+                t.where = "other machine";
+                if (open("/2/status", OREAD)) |_| return error.SawOtherMachine else |_| {}
+                return;
+            }
+            t.where = "args";
+            t.args_len = try readAll("/1/args", &t.args);
+            t.where = "kill";
+            const ctl = try open("/2/ctl", OWRITE);
+            defer close(ctl) catch {};
+            _ = try pwrite(ctl, "kill", 0);
+            var w: [128]u8 = undefined;
+            _ = try await(&w);
+        }
+    };
+    var t: T = .{};
+    var m0: struct { t: *T } = .{ .t = &t };
+    var m1: struct { t: *T } = .{ .t = &t };
+    const M0 = struct {
+        fn run(a: *@TypeOf(m0)) void {
+            a.t.machine(0);
+        }
+    };
+    const M1 = struct {
+        fn run(a: *@TypeOf(m1)) void {
+            a.t.machine(1);
+        }
+    };
+    try spawn("m0", @TypeOf(m0), M0.run, &m0);
+    try spawn("m1", @TypeOf(m1), M1.run, &m1);
+    while (t.ready.load(.acquire) < 2) std.Thread.yield() catch {};
+    t.go.store(true, .release);
+    while (t.done.load(.acquire) < 2) std.Thread.yield() catch {};
+    if (t.err) |e| {
+        std.debug.print("failed in {s}\n", .{t.where});
+        return e;
+    }
+    try std.testing.expectEqualStrings("1 2 ", t.lists[0][0..t.list_lens[0]]);
+    try std.testing.expectEqualStrings("1 ", t.lists[1][0..t.list_lens[1]]);
+    try std.testing.expectEqualStrings("prog 'a b' c", t.args[0..t.args_len]);
+    try std.testing.expectEqualStrings("Killed", t.killed[0..t.killed_len]);
 }

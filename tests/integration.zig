@@ -9,10 +9,10 @@
 //! `zig build install-tests` builds this file for another target, and
 //! `scripts/lima/vm test` runs it in a test VM with the same variables.
 //!
-//! Cases named "M4: ..." (and so on) are for a milestone in progress. They
+//! Cases named "M5: ..." (and so on) are for a milestone in progress. They
 //! call `pending`, which skips them unless HP9_TEST_PENDING is set; when
 //! the milestone is done, drop the prefix and the call. Cases for a done
-//! milestone are tagged "(M3)" and the like, so `zig build m3` can select
+//! milestone are tagged "(M4)" and the like, so `zig build m4` can select
 //! them.
 //!
 //! Interactive cases run hp9 on a terminal from tests/term.zig. Their
@@ -634,8 +634,7 @@ test "--timeout stops a console read on a terminal at once (M4)" {
     }
 }
 
-test "M4: kill and ps work in an interactive rc (M4 demo)" {
-    try pending();
+test "kill and ps work in an interactive rc (M4 demo)" {
     const e = try env();
     var it = backendList(e);
     while (it.next()) |backend| {
@@ -754,8 +753,7 @@ test "SIGTERM posts hangup (M4)" {
     }
 }
 
-test "M4: a note handler catches a note and the process continues" {
-    try pending();
+test "a note handler catches a note and the process continues (M4)" {
     const e = try env();
     const r = try run(e, &.{ "--timeout", "20s", "--rc", "fn sighup { echo caught }; echo hangup >/proc/$pid/note; echo after" });
     defer r.deinit();
@@ -763,8 +761,7 @@ test "M4: a note handler catches a note and the process continues" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "M4: an unhandled note kills the process with the note as its status" {
-    try pending();
+test "an unhandled note kills the process with the note as its status (M4)" {
     const e = try env();
     const r = try run(e, &.{ "--timeout", "20s", "--rc", "sleep 1000 & echo die >/proc/$apid/note; wait $apid; echo $status" });
     defer r.deinit();
@@ -781,8 +778,7 @@ test "--timeout posts hangup before tearing down (M4)" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "got hangup") != null);
 }
 
-test "M4: /proc/n/ctl kill stops a process" {
-    try pending();
+test "/proc/n/ctl kill stops a process (M4)" {
     const e = try env();
     const r = try run(e, &.{ "--timeout", "20s", "--rc", "sleep 1000 & echo kill >/proc/$apid/ctl; wait; echo done" });
     defer r.deinit();
@@ -790,8 +786,7 @@ test "M4: /proc/n/ctl kill stops a process" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "M4: notepg reaches the note group and not a new one" {
-    try pending();
+test "notepg reaches the note group and not a new one (M4)" {
     const e = try env();
     // The block in braces makes its own note group (rfork s), so the
     // hangup posted to rc's group doesn't reach it; sleep 1000 is in rc's.
@@ -800,12 +795,13 @@ test "M4: notepg reaches the note group and not a new one" {
     try std.testing.expectEqualStrings("survived\ndone\n", r.out);
 }
 
-test "M4: /proc/n has status, fd, ns and args" {
-    try pending();
+test "/proc/n has status, fd, ns and args (M4)" {
     const e = try env();
-    const st = try run(e, &.{ "--rc", "cat /proc/$pid/status" });
+    // The times differ between runs, so only name, user and state; and
+    // with awk last, cat isn't exec'd in place of rc.
+    const st = try run(e, &.{ "--rc", "cat /proc/$pid/status | awk '{print $1, ($2 == ENVIRON[\"user\"]), $3}'" });
     defer st.deinit();
-    try std.testing.expect(std.mem.startsWith(u8, st.out, "rc "));
+    try std.testing.expectEqualStrings("rc 1 Await\n", st.out);
     const fd = try run(e, &.{ "--rc", "cat /proc/$pid/fd" });
     defer fd.deinit();
     try std.testing.expect(std.mem.startsWith(u8, fd.out, "/mnt/term/cwd\n"));

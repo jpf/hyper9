@@ -274,6 +274,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     try binds.append(arena, .{ .from = "#y", .to = "/dev", .flag = .before, .console = true });
     try binds.append(arena, .{ .from = "#e", .to = "/env", .create = true, .optional = true });
     try binds.append(arena, .{ .from = "#d", .to = "/fd", .optional = true });
+    try binds.append(arena, .{ .from = "#p", .to = "/proc", .optional = true });
     if (net != .disable) try binds.append(arena, .{ .from = "#I", .to = "/net", .optional = true });
     if (in.root != null) {
         try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "/{t}/bin", .{in.arch}), .to = "/bin", .optional = true });
@@ -369,6 +370,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     if (net != .disable) try caveats.append(arena, "the network is not restricted until M5");
     if (pol.host_cmd) try caveats.append(arena, "#C runs host commands with the host user's rights");
     if (pol.host_fs) try caveats.append(arena, "--host-fs exposes the whole host filesystem");
+    try caveats.append(arena, "/proc/n/ns shows the host paths of bound host trees");
     try caveats.append(arena, "the hp9 process itself is not host-sandboxed");
 
     return .{

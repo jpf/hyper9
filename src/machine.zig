@@ -230,6 +230,7 @@ pub const Machine = struct {
         job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = null, .out = m.opts.stdio.out, .err = m.opts.stdio.err, .raw = m.opts.stdio.raw }, .pool = pool };
         job.pool.gpa = m.gpa;
         kern.setNoteKick(Proc.noteKick);
+        kern.setProcStatus(Proc.status);
         job.m = &job.mc;
         job.mc.err_msg = "";
         job.con_id = kern.addConsole(&job.con) catch |e| {
@@ -484,6 +485,34 @@ pub const Machine = struct {
         /// The FP/SIMD state when the handler was entered, which noted
         /// restores (9front's fpunotify and fpunoted).
         note_extra: ?vmm.Extra = null,
+        /// For /proc/n/status: the syscall being served plus 1, or 0 while
+        /// running guest code, and the mapped memory in KiB.
+        in_sys: std.atomic.Value(u64) = .init(0),
+        mem_kb: std.atomic.Value(u64) = .init(0),
+
+        fn noteMem(p: *Proc) void {
+            var n: u64 = 0;
+            inline for (.{ "text", "data", "stack" }) |f| if (@field(p.segs, f)) |seg| {
+                n += seg.top - seg.base;
+            };
+            p.mem_kb.store(n / 1024, .release);
+        }
+
+        /// The kernel's hook for /proc/n/status: the state, as 9front's
+        /// psstate (the syscall's name, capitalized, or Running), and the
+        /// memory. Runs on the reading thread.
+        fn status(aux: ?*anyopaque, buf: [*]u8, n: c_int, mem: *c_ulong) callconv(.c) void {
+            const p: *Proc = @ptrCast(@alignCast(aux orelse return));
+            mem.* = @intCast(p.mem_kb.load(.acquire));
+            const out = buf[0..@intCast(n)];
+            const nr = p.in_sys.load(.acquire);
+            var name: []const u8 = "Running";
+            if (nr != 0) name = std.enums.tagName(syscall.Nr, @enumFromInt(nr - 1)) orelse "Syscall";
+            const len = @min(name.len, out.len - 1);
+            @memcpy(out[0..len], name[0..len]);
+            if (nr != 0 and len > 0) out[0] = std.ascii.toUpper(out[0]);
+            out[len] = 0;
+        }
 
         fn setKproc(p: *Proc) void {
             {
@@ -635,6 +664,8 @@ pub const Machine = struct {
         p.extra = .initExec(img.arch);
         p.keepImage(bytes);
         p.initSys();
+        p.noteMem();
+        kern.setArgs(j.argv);
         return m.loop(p);
     }
 
@@ -681,7 +712,13 @@ pub const Machine = struct {
             const exit = try vcpu.run();
             vcpu.getUreg(&u);
             switch (exit) {
-                .syscall => switch (syscall.dispatch(&p.sys, &u)) {
+                .syscall => switch (blk: {
+                    p.in_sys.store(u.syscallNumber() +% 1, .release);
+                    defer p.in_sys.store(0, .release);
+                    const out = syscall.dispatch(&p.sys, &u);
+                    p.noteMem();
+                    break :blk out;
+                }) {
                     .ret => |r| {
                         u.setReturn(r);
                         vcpu.setUreg(&u);
@@ -715,7 +752,10 @@ pub const Machine = struct {
                 },
                 .fault => |f| {
                     // The stack grows down on demand, as 9front's does.
-                    if (f.access != .exec and p.segs.growStack(f.addr)) continue;
+                    if (f.access != .exec and p.segs.growStack(f.addr)) {
+                        p.noteMem();
+                        continue;
+                    }
                     if (m.opts.dump_on_fault) dumpFault(m.opts.stdio.err, &u, f, p.image orelse "");
                     // 9front's faultnote; popnote adds the pc. If the note
                     // can't be queued, the fault would only repeat.
@@ -854,6 +894,7 @@ pub const Machine = struct {
         c.extra = p.extra;
         if (p.image) |b| c.image = m.gpa.dupe(u8, b) catch null;
         c.initSys();
+        c.noteMem();
         // The handler is inherited; queued notes and handler state aren't.
         c.sys.notify = p.sys.notify;
         // The child may run, exit and free itself before kern.fork returns.
@@ -949,6 +990,8 @@ pub const Machine = struct {
         p.ureg = .initExec(img.arch, img.entry, img.sp, img.tos);
         p.extra = .initExec(img.arch);
         p.keepImage(bytes);
+        p.noteMem();
+        kern.setArgs(argv.items);
         kern.closeExec();
         var name_buf: [kern.ERRMAX]u8 = undefined;
         kern.setText(std.fmt.bufPrintZ(&name_buf, "{s}", .{elem}) catch "a.out");

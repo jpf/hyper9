@@ -105,7 +105,7 @@ const kern_flags_win32 = kern_flags ++ [_][]const u8{ "-DWINDOWS", "-DUNICODE" }
 /// environments; SDKROOT (set by scripts/env.sh) is used when present.
 /// Runs tests/integration.zig against the hp9 binary. `filters` selects
 /// cases by name; with `pending`, cases for a milestone not yet done (named
-/// "M4: ..." and so on) run instead of skipping.
+/// "M5: ..." and so on) run instead of skipping.
 fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, hp9_bin: []const u8, root: []const u8, backends: []const u8, pending: bool) *std.Build.Step.Run {
     const run = b.addRunArtifact(integrationTests(b, b.graph.host, optimize, filters));
     run.setEnvironmentVariable("HP9_TEST_BIN", hp9_bin);
@@ -330,7 +330,7 @@ pub fn build(b: *std.Build) void {
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "fscheck.c" },
+        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "fscheck.c" },
         .flags = flags,
     });
     for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
@@ -338,6 +338,11 @@ pub fn build(b: *std.Build) void {
         .files = l.files,
         .flags = flags,
     });
+    // Zig's bundled musl memccpy is broken; see src/kern/memccpy.c.
+    if (target.result.abi.isMusl()) {
+        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"memccpy.c"}, .flags = flags });
+        kern.root_module.addCMacro("memccpy", "hp9_memccpy");
+    }
     if (os == .windows) {
         kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"glue-win32.c"}, .flags = flags });
         kern.root_module.linkSystemLibrary("ws2_32", .{});
@@ -484,7 +489,7 @@ pub fn build(b: *std.Build) void {
     const backend_list = if (backends.items.len > 0) backends.items else "auto";
 
     // Runs real binaries through the hp9 CLI; skipped without a root tree.
-    // Cases for the milestone in progress ("M4: ...") skip here until it's
+    // Cases for the milestone in progress ("M5: ...") skip here until it's
     // done. zig build m3 runs the M3 cases, tagged "(M3" in their names.
     const run_integration = addIntegration(b, optimize, &.{}, hp9_bin, root, backend_list, false);
     run_integration.step.dependOn(signed_step);
@@ -494,10 +499,10 @@ pub fn build(b: *std.Build) void {
     m3_step.dependOn(&run_m3_cases.step);
 
     // The M4 demo is an interactive rc where kill and ps work. It runs on a
-    // pty (ConPTY on Windows) from tests/term.zig, as the "M4: ..." cases
-    // do, so zig build m4 is those cases. It fails until M4 is done.
+    // pty (ConPTY on Windows) from tests/term.zig, as the other M4 cases,
+    // tagged "(M4" in their names, do, so zig build m4 is those cases.
     const m4_step = b.step("m4", "Run the M4 demo (kill and ps in an interactive rc, on a pty) and the M4 integration cases (needs a root tree)");
-    const run_m4_cases = addIntegration(b, optimize, &.{"M4: "}, hp9_bin, root, backend_list, true);
+    const run_m4_cases = addIntegration(b, optimize, &.{"(M4"}, hp9_bin, root, backend_list, false);
     run_m4_cases.step.dependOn(signed_step);
     m4_step.dependOn(&run_m4_cases.step);
 
