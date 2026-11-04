@@ -4,7 +4,7 @@ title: Host self-sandboxing
 status: draft
 created: 2026-11-03
 authors: [progrium]
-depends: [kvm, whp]
+depends: [16, whp]
 areas: [sandbox]
 ---
 
@@ -24,7 +24,7 @@ This is future work. Each backend proposal records a research note so this can b
 
 - **macOS (done, below):** whether `sandbox_init` with a generated SBPL profile can be applied after `hv_vm_create` and still allow HVF calls, and which profile rules that needs. See the research note below.
 - **macOS, [gfx](0015-gfx.md):** which Mach and WindowServer lookups `--gfx` needs under Seatbelt.
-- **Linux, [kvm](kvm.md):** Landlock for paths and TCP ports plus seccomp, with `/dev/kvm` already open; the syscalls `KVM_RUN` and vCPU threads need; the Landlock ABI each target distro ships.
+- **Linux, [kvm](0016-kvm.md):** Landlock for paths and TCP ports plus seccomp, with `/dev/kvm` already open; the syscalls `KVM_RUN` and vCPU threads need; the Landlock ABI each target distro ships.
 - **Windows, [whp](whp.md):** whether an AppContainer or restricted token can still use WHP.
 
 **Research note: Seatbelt with HVF.** Tested on macOS 15.8.1 on an M3 Max with a small C program, ad-hoc signed with the hypervisor entitlement. It calls `hv_vm_create` and `hv_vm_map` on 16 MiB of guest RAM, then applies a profile with `sandbox_init_with_parameters`. That call is exported from libsystem_sandbox but not declared in `<sandbox.h>`, so it needs its own prototype. The profile was:

@@ -30,7 +30,7 @@ The CLI also maps an `exits` string that's a plain decimal number from 1 to 255 
 
 This was part of milestone M5 ("servers") in DESIGN.md, before milestones became proposals ([#1](0001-proposals.md)). DESIGN.md's Go compatibility section, which moved here, was written from Go 1.25. This proposal is checked against Go 1.27.3, the current release, and its `runtime/os_plan9.go`, `runtime/sys_plan9_amd64.s`, `syscall/syscall_plan9.go`, `syscall/exec_plan9.go`, `os/sys_plan9.go` and `os/exec_plan9.go`.
 
-Go has ports for `plan9/386`, `plan9/amd64` and `plan9/arm`, but not `plan9/arm64`. HVF runs arm64 only, so a Go binary on an arm64 Mac runs as amd64 on the emulator (`--backend emu`, Unicorn). On Linux x86\_64 it runs on the emulator too, until [kvm](kvm.md) gives it hardware.
+Go has ports for `plan9/386`, `plan9/amd64` and `plan9/arm`, but not `plan9/arm64`. HVF runs arm64 only, so a Go binary on an arm64 Mac runs as amd64 on the emulator (`--backend emu`, Unicorn). On Linux x86\_64 it runs on the emulator too, until [kvm](0016-kvm.md) gives it hardware.
 
 ### What the runtime does
 

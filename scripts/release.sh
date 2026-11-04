@@ -20,7 +20,7 @@ set -euo pipefail
 cd "$H9_ROOT"
 
 # Targets for each asset. h9 has a hypervisor backend only on macOS until
-# KVM and WHP are built (design/kvm.md, design/whp.md); h9-emu runs
+# KVM and WHP are built (design/0016-kvm.md, design/whp.md); h9-emu runs
 # everywhere Unicorn builds.
 H9_TARGETS="aarch64-macos"
 EMU_TARGETS="aarch64-macos aarch64-linux-musl x86_64-linux-musl aarch64-windows-gnu"

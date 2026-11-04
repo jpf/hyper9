@@ -28,10 +28,10 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [9p-roots](design/0013-9p-roots.md) | draft | needs semaphores | 9P roots |
 | [image-roots](design/0014-image-roots.md) | draft | needs devsrv, 9p-roots | Disk-image roots |
 | [gfx](design/0015-gfx.md) | draft | needs devsrv | Graphics (--gfx) |
+| [kvm](design/0016-kvm.md) | draft |  | KVM backend |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-sandbox](design/host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
-| [kvm](design/kvm.md) | draft |  | KVM backend |
 | [linux-personality](design/linux-personality.md) | draft |  | Linux personality |
 | [whp](design/whp.md) | draft | needs kvm | WHP backend |
 | [zig-interpreter](design/zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
@@ -57,10 +57,10 @@ flowchart LR
   p_9p_roots["#35;13 9p-roots<br/>draft"]:::draft
   p_image_roots["#35;14 image-roots<br/>draft"]:::draft
   p_gfx["#35;15 gfx<br/>draft"]:::draft
+  p_kvm["#35;16 kvm<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
-  p_kvm["kvm<br/>draft"]:::draft
   p_linux_personality["linux-personality<br/>draft"]:::draft
   p_whp["whp<br/>draft"]:::draft
   p_zig_interpreter["zig-interpreter<br/>draft"]:::draft

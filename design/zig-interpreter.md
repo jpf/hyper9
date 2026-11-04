@@ -26,7 +26,7 @@ The emulator's speed was measured against HVF: about 5× slower for arm64 comput
 
 What Unicorn costs today:
 
-- **Licensing.** It's GPLv2, so the emulator lives behind `-Demu=unicorn` and ships only as the separate `h9-emu` binary with its corresponding source. The MIT `h9` has no fallback: on a host without a supported hypervisor (Linux and Windows until [kvm](kvm.md) and [whp](whp.md)), it exits 125.
+- **Licensing.** It's GPLv2, so the emulator lives behind `-Demu=unicorn` and ships only as the separate `h9-emu` binary with its corresponding source. The MIT `h9` has no fallback: on a host without a supported hypervisor (Linux and Windows until [kvm](0016-kvm.md) and [whp](whp.md)), it exits 125.
 - **Build.** Prebuilt `libunicorn.a` exists only for macOS arm64 and linux-musl arm64 and x86\_64; Windows builds QEMU's tree from source through `build/unicorn.zig`.
 - **Workarounds.** A 32 MiB TCG buffer per engine, because Windows commits QEMU's default 1 GiB against the pagefile; our own `__clear_cache`, because Zig's compiler-rt one misses a `dsb ish` and Linux arm64 guests ran stale translated code; and a kick that repeats `uc_emu_stop` until the run sees it, because `uc_emu_start` clears a stop that lands just before it.
 - **Per-process weight.** About 1.3 MiB and 0.3 ms per engine, and a TB flush whenever an address space changes.
