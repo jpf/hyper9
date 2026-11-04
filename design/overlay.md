@@ -4,7 +4,7 @@ title: Copy-on-write overlay as the root's default
 status: draft
 created: 2026-11-03
 authors: [progrium]
-depends: [ephemeral-writes]
+depends: [6]
 areas: [sandbox, cli, kern]
 ---
 

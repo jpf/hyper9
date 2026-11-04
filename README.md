@@ -18,11 +18,11 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [semaphores](design/0003-semaphores.md) | draft |  | rendezvous and semaphores |
 | [segattach](design/0004-segattach.md) | draft |  | segattach and shared segments |
 | [net-policy](design/0005-net-policy.md) | draft |  | Outbound-only network by default, and --net-allow |
+| [ephemeral-writes](design/0006-ephemeral-writes.md) | draft |  | Ephemeral writes and a private /tmp |
 | [9p-roots](design/9p-roots.md) | draft |  | 9P roots |
 | [browser-host](design/browser-host.md) | draft | needs i386 | A browser host on wasm, with v86 |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [devsrv](design/devsrv.md) | draft |  | devsrv and /srv |
-| [ephemeral-writes](design/ephemeral-writes.md) | draft |  | Ephemeral writes and a private /tmp |
 | [gfx](design/gfx.md) | draft | needs devsrv | Graphics (--gfx) |
 | [go-compat](design/go-compat.md) | draft | needs semaphores | Go compatibility |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
@@ -47,11 +47,11 @@ flowchart LR
   p_semaphores["#35;3 semaphores<br/>draft"]:::draft
   p_segattach["#35;4 segattach<br/>draft"]:::draft
   p_net_policy["#35;5 net-policy<br/>draft"]:::draft
+  p_ephemeral_writes["#35;6 ephemeral-writes<br/>draft"]:::draft
   p_9p_roots["9p-roots<br/>draft"]:::draft
   p_browser_host["browser-host<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
   p_devsrv["devsrv<br/>draft"]:::draft
-  p_ephemeral_writes["ephemeral-writes<br/>draft"]:::draft
   p_gfx["gfx<br/>draft"]:::draft
   p_go_compat["go-compat<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft

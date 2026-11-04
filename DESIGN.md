@@ -368,7 +368,7 @@ h9 --version | --check | --help      # tool functions; -h alone is --help
 | `--readable PATH` (repeatable) | Binds a host path read-only at `/mnt/term/PATH` |
 | `--writable PATH` (repeatable) | Binds a host path read-write; under the cwd it overrides a read-only cwd |
 | `--read-deny PATH` (repeatable) | Hides a host path inside a bound tree |
-| `--write none\|scope\|ephemeral\|overlay` | Deny writes, or persist only writable paths. `ephemeral` and `overlay` are accepted but not enforced yet, and deny writes ([ephemeral-writes](design/ephemeral-writes.md), [overlay](design/overlay.md)) |
+| `--write none\|scope\|ephemeral\|overlay` | Deny writes, or persist only writable paths. `ephemeral` and `overlay` are accepted but not enforced yet, and deny writes ([ephemeral-writes](design/0006-ephemeral-writes.md), [overlay](design/overlay.md)) |
 | `--net disable\|outbound\|enable` | Network policy. `outbound` is accepted but not enforced yet, and leaves the network as it is ([net-policy](design/0005-net-policy.md)) |
 | `--memory SIZE` | Caps guest memory (`512m`, `2g`) |
 | `--pids N`, `--cpus N` | Caps processes and concurrently running vCPUs |

@@ -16,7 +16,7 @@ pub const WriteMode = enum {
     none,
     /// Persist writes to the writable paths only.
     scope,
-    /// Discard all writes on exit (design/ephemeral-writes.md; not enforced yet).
+    /// Discard all writes on exit (design/0006-ephemeral-writes.md; not enforced yet).
     ephemeral,
     /// Copy-on-write over the root (design/overlay.md; not enforced yet).
     overlay,
@@ -61,7 +61,7 @@ pub const Policy = struct {
     /// Leave devcmd (`#C`) unmasked.
     host_cmd: bool = false,
     /// The host temp dir, bound at /tmp (a private ramfs is proposed in
-    /// design/ephemeral-writes.md).
+    /// design/0006-ephemeral-writes.md).
     tmp: ?[]const u8 = null,
 };
 
@@ -282,7 +282,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         try binds.append(arena, .{ .from = "/rc/bin", .to = "/bin", .flag = .after, .optional = true });
     }
 
-    // The host temp dir (design/ephemeral-writes.md proposes a ramfs); the tight profile leaves the
+    // The host temp dir (design/0006-ephemeral-writes.md proposes a ramfs); the tight profile leaves the
     // root's read-only /tmp instead.
     if (in.root != null and tmp_rw) if (pol.tmp) |tmp| {
         try rules.append(arena, .{ .path = tmp, .kind = .allow_rw });
