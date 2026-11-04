@@ -35,3 +35,4 @@ devmnt, drawterm's 9P client, is already built in. Program lookup already goes t
 ## Open issues
 
 - How the sandbox policy treats a dialed root, since it's reached through the network rather than `#U`.
+- **Posting from the host.** An embedder could post a host-served 9P connection into a machine's `/srv` before the program starts, for example a host directory served by a 9P server rather than devfs. That's a `Machine.Options` addition. [devsrv](0008-devsrv.md)'s `h9_srvpost` takes a channel rather than a guest fd for this. Posts made before `--ns` replay would also let `mount /srv/x …` lines in a namespace file work.

@@ -62,6 +62,7 @@ So the compilers, linkers and mk need no syscall that h9 lacks, and no dependenc
 
 - Building in the cwd against the read-only root, which needs nothing extra: `h9 mk` in a copy of a source directory.
 - Rebuilding the userland in place: `h9 --writable "$H9ROOT" --rc 'cd /sys/src && mk install'`, on a root built with `--src`. The README recommends a copy of the root for this (`cp -cR` makes an APFS clone on macOS in about a second), because it replaces the root's binaries.
+- Cross-building for amd64: `objtype=amd64 mk libs` once in `/sys/src` on such a writable copy, then `objtype=amd64 mk` as usual. The pinned arm64 root has no `/amd64/lib`, and building it takes about 9 s.
 
 No new flag binds source; `--readable` and `--ns` already can.
 
@@ -80,6 +81,8 @@ devproc gains 9front's debugging files. They're served from h9's process records
 | `segment` | 9front's format: `%-6s %c%c %8p %8p %4ld` per segment (`Text`, `Data`, `Stack`, plus extras from [segattach](0004-segattach.md) once it lands). libmach's `stacktop` reads the first line, so `Stack` comes first, as in 9front's slot order. | Not allowed. |
 
 `/proc/n/segment` is also in segattach's proposal. Whichever lands first serves it, and the other only adds its rows.
+
+**Code caches.** A `mem` write to an executable page has to reach the guest's next instruction fetch. acid rewrites the same text addresses repeatedly: each `step` plants breakpoints at the following instructions and then restores them. Only the first write to shared text changes the address space (the copy). Later writes to the now-private copy don't, so the address space gains a `codeChanged(va, len)` call, which devproc makes after every write to an executable page. emu then drops its translated blocks before the next run, as `sync` does after a remap. hvf sets `shared.flush`, so the shim invalidates the I-cache before the next entry.
 
 **Stopping.** A process can be stopped at four points: entering a syscall, returning from one, delivering a note, and exiting the guest on a breakpoint or fault. A stopped process parks on its own kernel thread, in a drawterm `sleep` on its record. It holds no pooled vCPU and no `--cpus` slot, like a process blocked in a syscall. Its Ureg and Extra are copied to the record when it stops and loaded back when it resumes, so readers on other threads never touch a vCPU. `ctl` gains:
 
@@ -109,7 +112,13 @@ The integration tests use the root tree, which normally has no `/sys/src`. The s
 
 **Leaving devfs alone.** DESIGN.md asked whether the host-tree root needs a faster read path for exec and compilers. With a ReleaseFast h9, the whole userland rebuilds in 60 s serially, or 33 s with 8 jobs. Each `exec` already reads the image in one pass (`Machine.readFile`). A cache or a second read path would add a correctness surface (staleness when the host edits a file) for a gain these numbers don't need. If a profile later shows devfs dominating, that's performance work without a behaviour change, so it doesn't need a proposal.
 
-**Stopping on the process's own thread.** One alternative is to freeze a process by holding its vCPU or pausing its host thread. But reading registers from another thread would then need backend calls on a vCPU the reader doesn't own, which HVF forbids. Parking at the existing stop points, with the state copied to the record, needs no backend support and works the same on every backend. It does mean a process spinning in pure guest code with no syscalls only stops at its next exit. `stop` kicks the vCPU, as note delivery does, so that's bounded by the next timer exit, not unbounded.
+**Stopping on the process's own thread.** One alternative is to freeze a process by holding its vCPU or pausing its host thread. But reading registers from another thread would then need backend calls on a vCPU the reader doesn't own, which HVF forbids. Parking at the existing stop points, with the state copied to the record, needs no backend support and works the same on every backend. A process spinning in pure guest code with no syscalls still stops promptly: `stop` kicks the vCPU, as note delivery and `--timeout` do. hvf's kick is `hv_vcpus_exit`, and emu's is `uc_emu_stop`, retried until the run sees it. Neither waits for a timer tick. `tests/backends.zig` already covers both against a `b .` / `jmp .` loop.
+
+**Breakpoint stepping, not hardware single-step.** acid's `step` plants breakpoints at libmach's `follow(*PC)` and runs `startstop`, on every architecture. That's how 9front itself steps, so h9 needs nothing more. Hardware single-step (`MDSCR_EL1.SS`, `RFLAGS.TF`) would need support in each backend and would make h9 behave differently from 9front. One limitation is inherited: libmach's `arm64foll` doesn't decode `TBZ` and `TBNZ`, so stepping over a taken one runs on to the next stop. That's a fix for 9front's libmach, not h9.
+
+**No watchpoints or profiling.** 9front's own arm64 kernel stubs out `setupwatchpts`, and acid's `wpflush` checks `access(".../watchpt")` before writing, so leaving the file out matches 9front on arm64. Only `tprof` reads `profile`. Either can come in a later proposal if someone needs it.
+
+**amd64 libraries built by the user, not by `mkroot.py`.** Building `/amd64/lib` in `mkroot.py` would make building the root depend on a working h9. `mk libs` already works and takes about 9 s, so the README documents it instead.
 
 **Copy-on-write text for `mem` writes.** Text segments are shared among every process running the same image in a process tree (`Segs.fork`). Writing a breakpoint into shared text would make siblings trap too. 9front avoids this by turning text into a private data segment on the first write (`txt2data`), and h9 does the same.
 
@@ -122,7 +131,7 @@ The integration tests use the root tree, which normally has no `/sys/src`. The s
 - **Guest environment:** gains `NPROC`. A guest that read an empty `$NPROC` and treated it as 1 now runs jobs in parallel. `--env NPROC=1` restores the old behaviour.
 - **`/proc/n`:** gains `mem`, `regs`, `fpregs`, `text` and `segment`. `ctl` gains `stop`, `start`, `waitstop` and `startstop`, and `hang` takes effect.
 - **Notes:** a `BRK` or `INT3` posts `sys: breakpoint` instead of `sys: trap: fault exec addr=…`. Programs that matched the old string weren't matching 9front's.
-- **vmm interface:** gains `Exit.breakpoint`, which needs a proposal per README.md; it's this one. Each backend maps its own exception class, and every backend proposal (kvm, whp) inherits it.
+- **vmm interface:** gains `Exit.breakpoint` and `AddressSpace.codeChanged`, which need a proposal per README.md; it's this one. Each backend maps its own exception class and invalidates its own code cache, and every backend proposal (kvm, whp) inherits both.
 - **CLI flags, exit codes and `Machine.Options`:** unchanged.
 - **Sandbox defaults:** unchanged. The root stays read-only by default, so `mk install` fails with "permission denied" unless the user passes `--writable "$H9ROOT"`.
 - **Root tree:** unchanged; `--src` stays optional.
@@ -155,7 +164,9 @@ Integration cases, tagged `[self-host]`:
 - `test "/proc/n/segment lists Stack first [self-host]"`
 - `test "/proc/n/regs and fpregs read a stopped process's registers [self-host]"`
 - `test "/proc/n/mem reads a variable and a write to text doesn't reach a sibling [self-host]"`
+- `test "/proc/n/mem writes to text are fetched by the next run, including a rewrite of the same address [self-host]"`
 - `test "ctl hang stops a process at exec, and start runs it [self-host]"`
+- `test "ctl stop stops a process spinning in guest code [self-host]"`
 - `test "a BRK posts sys: breakpoint [self-host]"`
 - `test "acid attaches and prints registers and a stack trace [self-host]"`
 
@@ -171,12 +182,9 @@ Already done and untagged, as bug fixes: `test "concurrent processes contending 
 4. `vmm.Exit.breakpoint` in hvf and emu, `sys: breakpoint` in the machine loop, and the backend and integration cases.
 5. devproc `segment` and `text` (read-only, no stopping needed). If [segattach](0004-segattach.md) has landed, it only gains the `Stack`-first ordering check.
 6. Stop points and the record's saved Ureg and Extra, then `ctl` `stop`, `start`, `waitstop`, `startstop` and `hang`, and the `Stopped` and `Stopwait` states.
-7. devproc `regs`, `fpregs` and `mem`, including copy-on-write text.
+7. `AddressSpace.codeChanged` in hvf and emu, then devproc `regs`, `fpregs` and `mem`, including copy-on-write text.
 8. The acid case and demo. DESIGN.md: devproc's row, the Debugging section and the process model table. Then `status: implemented`.
 
 ## Open issues
 
-- **Stopping a spinning process.** `stop` relies on the next guest exit. Under HVF a process in a tight loop exits at least at each timer tick, but the emulator's exits depend on Unicorn's hook granularity. If that proves too coarse, emu may need an instruction-count hook while a stop is pending.
-- **Single-step.** acid's `step` sets a breakpoint at the next instruction, so it needs only this proposal. Hardware single-step (`MDSCR_EL1.SS`, `RFLAGS.TF`) would be more robust, but needs backend support per hypervisor; leave it unless acid's approach fails somewhere.
-- **amd64 root libraries.** `objtype=amd64` builds need `mk libs` first, because the pinned arm64 root has no `/amd64/lib`. `mkroot.py` could build them once, inside h9, as a post-step. That's worth it only if cross builds become routine.
-- **Watchpoints and profiling.** 9front's `watchpt` and `profile` files aren't covered. Nothing in acid's default libraries needs them.
+- **Code-cache invalidation cost on emu.** Unicorn's whole-cache flush is the simple way to drop stale translated blocks after a text write. If stepping through hot code makes that too slow, emu could flush only the blocks for the written range (`uc_ctl_remove_cache`). Measure it with the acid case before choosing.

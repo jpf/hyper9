@@ -93,14 +93,19 @@ const kern_libs = [_]struct { dir: []const u8, files: []const []const u8 }{
 // them too (drawterm's win32 builds take them from per-CPU assembly).
 const kern_port = [_][]const u8{ "getcallerpc.c", "tas.c" };
 
-const kern_flags = [_][]const u8{
+const kern_flags_common = [_][]const u8{
     "-Wall",
     "-Wno-missing-braces",
     "-D_THREAD_SAFE",
     "-fno-sanitize=undefined",
 };
+// PTHREAD, as Make.linux, makes libc/lock.c's Lock a pthread mutex. Without
+// it unlock is a plain store with no release ordering, so on arm64 another
+// thread can take the lock before seeing the writes made under it, which
+// corrupted QLock queues and hung processes under contention.
+const kern_flags = kern_flags_common ++ [_][]const u8{"-DPTHREAD"};
 // Make.win64's CFLAGS.
-const kern_flags_win32 = kern_flags ++ [_][]const u8{ "-DWINDOWS", "-DUNICODE" };
+const kern_flags_win32 = kern_flags_common ++ [_][]const u8{ "-DWINDOWS", "-DUNICODE" };
 
 /// Zig's own macOS SDK detection runs xcodebuild, which fails in some
 /// environments; SDKROOT (set by scripts/env.sh) is used when present.

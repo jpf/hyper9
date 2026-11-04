@@ -359,8 +359,14 @@ pub const args_max = 128;
 /// run together, cut to `args_max` bytes at a character boundary.
 pub fn setArgs(argv: []const []const u8) void {
     var buf: [args_max]u8 = undefined;
+    const n = packArgs(&buf, argv);
+    c.h9_kern_setargs(&buf, @intCast(n));
+}
+
+fn packArgs(buf: *[args_max]u8, argv: []const []const u8) usize {
     var n: usize = 0;
     for (argv) |a| {
+        if (n == buf.len) break;
         if (n + a.len + 1 > buf.len) {
             // As 9front: keep what fits, ending at a UTF-8 boundary.
             var k = buf.len - 1 - n;
@@ -377,7 +383,23 @@ pub fn setArgs(argv: []const []const u8) void {
         buf[n] = 0;
         n += 1;
     }
-    c.h9_kern_setargs(&buf, @intCast(n));
+    return n;
+}
+
+test "packArgs cuts argv to args_max at a character boundary" {
+    var buf: [args_max]u8 = undefined;
+    try std.testing.expectEqualStrings("ar\x00vu\x00", buf[0..packArgs(&buf, &.{ "ar", "vu" })]);
+
+    // Exactly full, then more arguments: ar's argv in libc's mkfile.
+    const full = "x" ** (args_max - 1);
+    try std.testing.expectEqual(args_max, packArgs(&buf, &.{ full, "a.7", "b.7" }));
+    try std.testing.expectEqual(0, buf[args_max - 1]);
+
+    // The cut would fall inside é, so it backs up to before it.
+    const long = "y" ** (args_max - 5) ++ "\u{e9}z";
+    const n = packArgs(&buf, &.{ "ab", long });
+    try std.testing.expectEqual(args_max - 1, n);
+    try std.testing.expectEqualStrings("y" ** (args_max - 5), buf[3 .. n - 1]);
 }
 
 /// Who posted a note (9front's NUser, NExit, NDebug). A note that isn't

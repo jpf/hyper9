@@ -17,7 +17,7 @@ Nov 4, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 Enforce `--write=ephemeral` with a copy-on-write overlay device, `#O`, in h9's own kernel code. Under it, every path the plan would make writable is an overlay: reads come from the host tree, while creates, writes, removes and renames land in memory and are gone when the machine ends. The host tree is never written.
 
-The same device with nothing underneath is a private in-memory `/tmp` for every machine, replacing the host's temp directory. Overlay memory counts against `--memory`. [overlay](overlay.md) can then put the same device over the root.
+The same device over the root tree's empty `/tmp` gives every machine a private in-memory `/tmp`, replacing the host's temp directory. Overlay memory, data and bookkeeping both, counts against `--memory`. [overlay](overlay.md) can then put the same device over the root.
 
 ## Background
 
@@ -64,6 +64,8 @@ int h9_overlay_new(Chan *lower);
 
 It's then bound like any device with `bind '#O<n>' <target>`. Instances belong to the machine: a machine's binds are the only references to them. The last close of the last chan on an instance frees it, which happens at the latest when the machine's namespace is torn down at exit.
 
+**In namespace files.** Instance numbers are per machine, so `--print` and `--ns` don't use them. In a namespace file, a `bind` whose source is `#O` with no number means: walk to the target, make a new instance with that chan as its lower tree, and bind the instance over the target with the line's flags. So `bind -c '#O' /tmp` puts a fresh overlay over whatever `/tmp` is at that point in the replay. No new directive is needed, and newns syntax is unchanged, as with the console's `<id>` placeholder.
+
 **Nodes.** Each node in the memory tree is one of three things:
 - **a copy:** a file or directory that exists in memory, with its own data and `Dir`
 - **a whiteout:** a name removed from the lower tree
@@ -82,7 +84,7 @@ Walks look in memory first. A whiteout ends the walk with "file does not exist".
 | `remove` | A whiteout | The copy is freed; a whiteout is left if the lower tree has the name |
 | `wstat` of mode, mtime or length | Copy up, then apply | Apply |
 | `wstat` renaming a file | Copy up, rename the copy, and whiteout the old name | Rename; whiteout the old name if the lower tree has it |
-| `wstat` renaming a directory | Refused with "permission denied" if the lower tree has it (see Open issues) | Rename |
+| `wstat` renaming a directory | Refused with "permission denied" | Rename a copy; refused with "permission denied" for a directory marker, which stands for a lower directory |
 | Directory read | The lower directory | Memory entries, then lower entries that aren't hidden by a whiteout or shadowed by a copy |
 
 **Copy-up** reads the whole lower file through the lower chan into memory, then sets the copy's `Dir` from the lower file's. A process that already has the lower file open keeps reading the lower file. Copy-up is per name and happens once: later opens find the copy.
@@ -102,7 +104,11 @@ void *h9_overlay_alloc(ulong n);
 void h9_overlay_free(void *p, ulong n);
 ```
 
-So the guest's own memory and its ephemeral files share one cap, `--memory`, exactly, as segments do. Nodes, names and `Dir`s are small and come from the kernel heap. A directory marker costs a node and no data.
+So the guest's own memory and its ephemeral files share one cap, `--memory`, exactly, as segments do.
+
+**Blocks.** A copy's data is a list of page-sized blocks, not one contiguous buffer. Growing a file adds blocks and never moves its data, and a big file needs no big contiguous run of pages.
+
+**Bookkeeping.** Nodes, names and `Dir`s come from a small allocator inside the device that takes its pages from the same leaf, so they count against `--memory` too. There's no separate limit on names: a guest that creates empty files or whiteouts until memory runs out gets "file system full", as one that writes a big file does. A directory marker or whiteout costs a node and no data blocks.
 
 ### `--write=ephemeral`
 
@@ -116,14 +122,16 @@ So the guest's own memory and its ephemeral files share one cap, `--memory`, exa
 
 ### A private `/tmp`
 
-With a root tree, `/tmp` is always a fresh `#O` instance with no lower tree, writable, in both profiles. Under `--write=none` it's the root's read-only `/tmp`, as `none` means.
+With a root tree, `/tmp` is always a fresh `#O` instance over the root tree's own `/tmp`, writable, in both profiles and under both `scope` and `ephemeral`. That directory is empty in a root tree, so lookups that miss memory cost one walk of an empty directory. Under `--write=none` there's no overlay: `/tmp` is the root's read-only `/tmp`, as `none` means.
+
+Putting the instance over the root's `/tmp` rather than over nothing makes every overlay in the plan the same kind, with a lower tree, so each prints and replays as `bind -c '#O' <target>`. An instance with no lower tree stays available to the namespace builder for runs without a root tree.
 
 The host temp directory is no longer bound. `hostTmp` and `Policy.tmp` go away.
 
 ### The plan
 
 - **Access:** a new kind, `eph`, beside `ro` and `rw`.
-- **Namespace:** overlay binds print as `bind -c '#O0' /mnt/term/cwd`, with the overlaid host path in a trailing comment, so `--print` stays readable.
+- **Namespace:** overlay binds print as `bind -c '#O' /mnt/term/cwd`, without an instance number, followed by `eph` and the overlaid host path in a trailing comment. `--ns` accepts the `eph` column as it does `ro` and `rw`, so `--print` output replays as written.
 - **Caveats** for writable paths under `ephemeral`:
   - "ephemeral files count against --memory and are lost when the machine ends"
   - "a file opened for writing is copied into memory whole the first time"
@@ -137,9 +145,9 @@ limits:   write=ephemeral net=enable
 namespace:
   bind '#U/Users/me/h9root' /                             ro
   ...
-  bind -c '#O0' /mnt/term/cwd                             eph  # /Users/me/src/proj
-  bind -c '#O1' /mnt/term/cwd/out                         eph  # /Users/me/src/proj/out
-  bind -c '#O2' /tmp                                      eph
+  bind -c '#O' /mnt/term/cwd                              eph  # /Users/me/src/proj
+  bind -c '#O' /mnt/term/cwd/out                          eph  # /Users/me/src/proj/out
+  bind -c '#O' /tmp                                       eph  # /Users/me/h9root/tmp
 access:
   ro   /Users/me/h9root
   eph  /Users/me/src/proj
@@ -157,13 +165,19 @@ caveats:
 
 **In C, in `src/kern/`.** A device is chans, qids, walks and `waserror`, which is drawterm's world. Zig on the inside would cross the seam on every operation and break seam rule 1 at every lower-device call that can raise. h9's devproc and devhcons are C for the same reason, with Zig leaves for what Zig owns: here, the pages.
 
-**Whole-file copy-up.** It's simple, and correct for the common writers: compilers, editors, `mk`, and tools that rewrite a file through a temporary. Those truncate or rewrite whole files anyway, and `OTRUNC` skips the copy entirely. Block-level copy-on-write would make appending to a large log cheap, at the cost of a block map per file. It can come later inside the device without changing its interface (see Open issues).
+**Whole-file copy-up.** It's simple, and correct for the common writers: compilers, editors, `mk`, and tools that rewrite a file through a temporary. Those truncate or rewrite whole files anyway, and `OTRUNC` skips the copy entirely. The cost is that appending to a large host file copies all of it first, and a file bigger than the free memory can't be opened for writing. Block-level copy-on-write, filling each block from the lower file the first time it's touched, would make that cheap. Storing copies as blocks from the start means it can come later inside the device, without changing its interface or the plan.
 
 **`/tmp` in memory for everyone.** Sharing the host's temp directory put guest files beside the host's: visible to other host programs, left behind after a crash, and outside the sandbox's view, since the plan had to allow the whole directory read-write. A private `/tmp` per machine keeps each run's scratch files its own, and makes the tight profile usable for programs that need scratch space.
 
 **Charging `--memory`.** One cap for everything a machine holds in host memory keeps `--memory` the exact bound it already is. A separate `--tmp-size` would be one more number to choose, and a guest could still fill memory with a big ephemeral file under it.
 
-**Refusing directory renames of lower directories.** Renaming one means copying up or re-parenting its whole subtree, and whiteouts for every name under the old path. That's rare in what h9 runs, and refusing is honest. A file rename, which `mk` and editors do all the time, is supported.
+**Bookkeeping against `--memory` too, not a node limit.** A fixed limit on names per instance would be a number with no right value: too low for a source tree's worth of object files, or too high to bound the heap on a small machine. Deriving it from `--memory` still leaves the heap outside the cap. Taking the device's nodes from the same pages as its data puts one bound on all of it, with one failure, "file system full", and one code path.
+
+**Refusing directory renames of lower directories.** Renaming one means copying up or re-parenting its whole subtree, and whiteouts for every name under the old path. In 9front a rename only changes a name within its directory, and the tools h9 runs, compilers, `mk` and editors, rename files, not directories. Refusing is honest. A file rename is supported. If a workload ever needs directory renames, the device can re-parent the subtree in memory with a whiteout at the old name, without changing its interface.
+
+**`#O` without a number in namespace files, not a new directive.** An `overlay <path>` directive would be one more thing `--ns` parses that newns doesn't. A bare `#O` source keeps every line an ordinary `bind`, says what the line does, and follows the console's `<id>` placeholder, which already stands in for a per-machine name. Overlaying the chan the target walks to at that point in the replay is what the plan did when it was built.
+
+**Not in this proposal: keeping the changes.** A run could export its changes at exit, as a tar or a diff, for a caller that wants to inspect them. The memory tree, copies, whiteouts and directory markers, already is that diff, so the device keeps it walkable until the instance is freed. The export is its own proposal.
 
 ## Compatibility
 
@@ -171,7 +185,7 @@ caveats:
 - **The tight profile** gains a writable, private `/tmp`.
 - **`--write=ephemeral`** now does what it says, and `--strict --write=ephemeral` stops being a usage error.
 - **`Machine.Options.policy`:** `Policy.tmp` is removed. Embedders that set it to share a host directory as `/tmp` should use a writable path instead.
-- **`--print`:** new namespace lines and access kind, as above. A saved namespace with `#O` lines replays with `--ns` only in a run that has the same instances, since instance numbers are per machine (see Open issues).
+- **`--print` and `--ns`:** new namespace lines and access kind, as above. A saved namespace with `#O` lines replays with `--ns`, making fresh instances. Namespace files that used `#O` before are unaffected, since nothing served it.
 - **CLI flags and exit codes:** unchanged.
 - **Vendored tree:** unchanged. The device and its leaves are h9's own files.
 
@@ -179,7 +193,7 @@ caveats:
 
 - **No host writes.** Under `ephemeral`, the overlaid host trees are opened through devfs read-only, and the access rules make them read-only too, so a write that somehow reached devfs would still be refused. Whiteouts, copies and renames exist only in memory.
 - **The policy still decides reads.** Every lower lookup and copy-up goes through the lower chan's device, so `--read-deny`, hidden paths and symlink resolution apply to overlaid trees exactly as to bound ones. A whiteout can hide a host file from the guest, never reveal one.
-- **Memory is capped.** Copy data comes from the machine's page allocator, so a guest can't use more host memory through files than `--memory` allows. A full overlay fails the write with an error rather than the machine. The kernel-heap part, nodes and names, grows with the number of names, and is bounded by a per-instance limit on nodes (see Open issues).
+- **Memory is capped.** Copy data comes from the machine's page allocator, so a guest can't use more host memory through files than `--memory` allows. A full overlay fails the write with an error rather than the machine. Nodes, names and `Dir`s come from the same pages, so a guest can't grow the kernel heap by creating empty files or whiteouts either.
 - **Isolation between machines.** Instances belong to one machine's namespace, so machines in one host process can't see each other's `/tmp` or ephemeral files.
 - **Caveats that go away.** For overlaid paths, the hardlink and uncapped-writes caveats no longer apply, since nothing reaches the host. They stay for `--write=scope`.
 
@@ -200,7 +214,10 @@ Integration cases tagged `[ephemeral-writes]`, using rc and the root tree's tool
 - `test "/tmp is private and writable in both profiles [ephemeral-writes]"`: a file written to `/tmp` isn't in the host's temp directory, and the tight profile can write there.
 - `test "/tmp is read-only under --write=none [ephemeral-writes]"`
 - `test "filling an overlay fails with file system full and the machine carries on [ephemeral-writes]"`, under `--memory 32m`
+- `test "creating empty files until memory runs out fails with file system full [ephemeral-writes]"`, under `--memory 32m`
+- `test "renaming a directory marker is refused [ephemeral-writes]"`: a host directory with a changed child can't be renamed.
 - `test "--strict accepts --write=ephemeral, and --print shows the overlays [ephemeral-writes]"`
+- `test "--print output with overlays replays with --ns [ephemeral-writes]"`: the replayed run's cwd and `/tmp` are writable and the host is unchanged.
 
 Backend cases in `tests/backends.zig`: two machines in one host process each get their own `/tmp`, and a copy-up while another process has the lower file open leaves that reader on the old contents.
 
@@ -208,15 +225,8 @@ Demo: in a copy of a 9front source directory, `h9 --write=ephemeral --rc 'rm -f 
 
 ## Implementation
 
-1. `src/kern/devoverlay.c` with in-memory instances only (no lower tree), the page leaves in `src/kern.zig`, and `/tmp` as a private instance in both profiles. Remove `hostTmp` and `Policy.tmp`. The `/tmp` cases pass.
-2. Lower trees: walk, open and directory-read fall-through, copy-up, whiteouts, `OTRUNC`, renames.
-3. `--write=ephemeral` in `src/policy.zig`: overlay binds, the `eph` access kind, `enforces:`, caveats, `--print`, and `--strict`. The `ephemeral-writes` cases pass.
-4. README's sandbox table, and DESIGN.md: the capability table, the default profile's `/tmp` row and the tight profile's paragraph, `devoverlay.c` in the kernel's "Added by us" table, and the CLI table's `--write` row. Set `status: implemented`.
-
-## Open issues
-
-- **Large files.** Whole-file copy-up makes appending to a large host file cost a copy of it, and can fail with "file system full" for a file bigger than the free memory. Block-level copy-on-write inside the device would fix that.
-- **Directory renames.** Supporting renames of lower directories, by re-parenting the subtree in memory with a whiteout at the old name, if something in the tree needs it.
-- **Replaying `--print`.** `#O` lines name per-machine instances. Should `--ns` accept an `overlay` directive that creates an instance over a path, so a printed namespace replays as written?
-- **Node limit.** How many names an instance may hold before `create` fails with "file system full", so a guest can't grow the kernel heap without bound with empty files. A fixed limit, or one derived from `--memory`?
-- **Keeping the changes.** A `--write=ephemeral` run could export its changes at exit, as a tar or a diff of the overlay, for a caller that wants to inspect them. That would be its own proposal.
+1. `src/kern/devoverlay.c` with in-memory instances only (no lower tree), the page leaves in `src/kern.zig`, block storage for copies, and the node allocator on the same pages.
+2. Lower trees: walk, open and directory-read fall-through, copy-up, whiteouts, `OTRUNC`, renames. `/tmp` as an instance over the root's `/tmp` in both profiles; remove `hostTmp` and `Policy.tmp`. The `/tmp` cases pass.
+3. `--write=ephemeral` in `src/policy.zig`: overlay binds, the `eph` access kind, `enforces:`, caveats, `--print`, and `--strict`.
+4. `--ns`: the `eph` column in `src/newns.zig`, and a bare `#O` source in the replay in `src/machine.zig`. The `ephemeral-writes` cases pass.
+5. README's sandbox table and `--ns` notes, and DESIGN.md: the capability table, the default profile's `/tmp` row and the tight profile's paragraph, `devoverlay.c` in the kernel's "Added by us" table, and the CLI table's `--write` row. Set `status: implemented`.

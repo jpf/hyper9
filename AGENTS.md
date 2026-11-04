@@ -32,6 +32,7 @@ Run the narrowest relevant check, and run broader checks when the change warrant
 ```sh
 zig build test
 zig build
+zig build integration
 zig build proposal -Dp=baseline
 zig build kern
 zig build design -- check

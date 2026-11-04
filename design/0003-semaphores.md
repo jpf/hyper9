@@ -2,7 +2,7 @@
 id: 3
 slug: semaphores
 title: rendezvous and semaphores
-status: draft
+status: accepted
 created: 2026-11-03
 authors: [progrium]
 depends: []

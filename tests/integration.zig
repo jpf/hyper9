@@ -550,6 +550,29 @@ test "more live processes than HVF has vCPUs [baseline]" {
     try std.testing.expectEqual(0, r.code);
 }
 
+test "concurrent processes contending for one environment don't hang" {
+    const e = try env(@src());
+    // 8 processes sharing /env, each creating 150 variables, then running
+    // rc. Before kern locks were pthread mutexes, an unordered unlock
+    // corrupted QLock queues on arm64 and most runs hung.
+    const script =
+        \\for(j in `{seq 8}){
+        \\    @{
+        \\        for(k in `{seq 150}) { v$k=$k }
+        \\        /bin/rc -c 'echo -n'
+        \\    } &
+        \\}
+        \\wait
+        \\echo done
+    ;
+    for (0..3) |_| {
+        const r = try run(e, &.{ "--timeout", "15s", "--rc", script });
+        defer r.deinit();
+        try std.testing.expectEqualStrings("done\n", r.out);
+        try std.testing.expectEqual(0, r.code);
+    }
+}
+
 test "--pids caps the process count [baseline]" {
     const e = try env(@src());
     // rc plus ls and wc is three processes.

@@ -5,7 +5,7 @@ title: devsrv, /srv and mount
 status: draft
 created: 2026-11-03
 authors: [progrium]
-depends: [semaphores]
+depends: [3]
 areas: [kern]
 ---
 
@@ -66,17 +66,18 @@ The `mount` command goes through libauth's `amount`, which calls `fauth` first a
 
 ### devsrv in `src/kern/devsrv.c`
 
-A port of 9front's devsrv, kept close to it, with three changes:
+A port of 9front's devsrv, kept close to it, with four changes:
 
 1. **A root board per machine.** `srvattach` finds the calling process's machine through its h9 process record (`Hproc.mach`) and attaches that machine's root board, creating it on first use. `Hmach` gains a pointer to it.
    - **Lifetime:** the board is freed when the machine is, after closing every channel still posted on it, as closing a lease does.
    - **Locking:** the board's tree and the `RWLock` are per machine. Boards made with `clone` hang off the machine's root, so `#s/id` addressing works within a machine and not across machines.
 2. **drawterm's kernel.**
-   - drawterm's `Chan` has no `srvname`, so devsrv doesn't set one (see `/proc/n/ns` below).
+   - drawterm's `Chan` has no `srvname`, so it gains one, as 9front's has (see `/proc/n/ns` below).
    - `ccloseq` becomes `cclose`, since drawterm's `cclose` already runs from any kernel thread.
    - `iseve` and `up->user` are drawterm's.
    - Everything else devsrv uses exists in drawterm: `devwalk`, `devpermcheck`, `fdtochan`, `RWLock`, and the error strings.
 3. **Device letter and registration.** `s`, added to `src/kern/devtab.c`.
+4. **Posting is split from the fd.** `srvwrite` turns the written fd into a channel with `fdtochan`, then calls `h9_srvpost(board, name, chan)`, which does the rest of 9front's post: the in-use and auth checks, and holding the reference. Nothing else calls it yet, but a host-side post (see [9p-roots](9p-roots.md)) can, without a guest fd.
 
 ### The namespace
 
@@ -98,7 +99,13 @@ The strings are copied into host buffers first, as for `bind`. `--trace` prints 
 
 ### `/proc/n/ns`
 
-h9's devproc prints a mount as `mount` with the mounted channel's path. Without `srvname`, a mount of `/srv/x` prints the channel's own path, such as `#|/data1`, where 9front prints `/srv/x`. The line is right, but it can't be replayed with `--ns`, since `#|/data1` names a different pipe in a new namespace (see Open issues).
+h9's devproc prints a mount as `mount` with the mounted channel's path. For a mount of `/srv/x`, that's the posted channel's own path, such as `#|/data1`, which names a different pipe in a new namespace. 9front prints `/srv/x` instead, from the channel's `srvname`, and h9 does the same:
+
+- drawterm's `Chan` in `kern/dat.h` gains `char *srvname`, which `chanfree` in `kern/chan.c` frees.
+- devsrv's open sets it on the channel it returns, to the `/srv` path, if it's not set already, as 9front's does.
+- `readns1` in `src/kern/devproc.c` prints `srvname` in place of the mounted channel's path when it's set.
+
+A pipe mounted directly, as acme does, has no `srvname` and still prints as `#|/data1`, as on 9front.
 
 ## Rationale
 
@@ -106,9 +113,16 @@ h9's devproc prints a mount as `mount` with the mounted channel's path. Without 
 - **The problem:** h9 runs several machines in one kernel when an embedder or the test suite asks for it, and each machine is meant to be its own sandbox. A global `/srv` would let one machine open another's posted channels: its factotum, its file servers, its pipes.
 - **The fix:** hanging the root board off `Hmach` keeps the port close to 9front's code, and gives each machine what a single 9front kernel gives a single system. `clone` boards still work for namespaces inside a machine.
 
+**`srvname` in drawterm's `Chan`, not in a table beside devsrv.**
+- **Why not a table:** drawterm frees and reuses `Chan`s in `kern/chan.c`, and nothing outside it sees that happen. A table keyed by `Chan*` would keep stale entries, and a reused `Chan` would print another channel's `/srv` name. Making the table safe means hooking `chanfree`, which is a vendor change anyway.
+- **Why the field:** it's three small edits, the same as 9front's, so the port and devproc stay close to 9front's code.
+- **What it's worth:** `/proc/n/ns` reads as it does on 9front. `--ns` can replay `mount /srv/x` lines when `/srv/x` is there at replay, which is rare today (see Compatibility). The line also shows less than the channel's path, in the spirit of [hide-host-paths](hide-host-paths.md).
+
 **`mount` and `fauth` here, not in a proposal of their own.** devsrv without `mount` is a registry nobody can use, since every client of a posted service mounts it. Every other server that mounts itself needs `mount` too. They're one change in practice, and the syscalls are thin, because drawterm already has the code behind them.
 
 **`fauth` through devmnt's `mntauth`.** Without `fauth`, `amount` and the `mount` command die before mounting even unauthenticated servers. With it, they get the server's "authentication not required" and carry on, which is the common case for local servers. Authenticating with factotum and `p9any` also works: it's devmnt's `Tauth` plus a guest factotum, with nothing h9-specific.
+
+**exportfs needs nothing more.** 9front's exportfs (`-s`, `-r` or `-S`) doesn't authenticate: its `Tauth` handler always answers "authentication not required", and on 9front the listener or `cpu` authenticates before running it. So a mount of it needs only `fauth`. It also needs `rfork` with `RFPROC|RFMEM|RFNOWAIT|RFNAMEG|RFFDG|RFREND`, `iounit` (which reads `/fd/Nctl`, served by devdup), `dirfstat` and `chdir`, all of which h9 serves. `srvfs` runs it, so it's tested through `srvfs` and directly with `-S`. Authenticated use across machines, through `import` or `cpu`, is factotum and network policy, not devsrv.
 
 **No devshr or devcap.** devshr's shared `/srv` across namespaces, and devcap's capabilities for changing user, have no user in what h9 runs today. They'd each be a proposal once something needs them.
 
@@ -120,7 +134,8 @@ h9's devproc prints a mount as `mount` with the mounted channel's path. Without 
 - **`mount`, `unmount` and `fauth`** stop posting "sys: bad sys call". Programs that died on them now mount.
 - **`--ns`:** `mount /srv/x …` lines in namespace files now work when a guest has posted `/srv/x` before the replay. Replay runs before the program, so in practice only services posted by an earlier stage of a script, or by the `--ns` file's own commands, are there.
 - **CLI flags, exit codes, `Machine.Options` and sandbox defaults:** unchanged.
-- **Vendored tree:** unchanged. devsrv is a port in `src/kern/`, `h9_fauth` uses `mntauth` from `kern/fns.h`, and `sysmount` and `sysunmount` are used as they are.
+- **`/proc/n/ns`:** a mount of a posted channel prints its `/srv` path, as on 9front, rather than the channel's own path.
+- **Vendored tree:** `Chan` gains `srvname`, and `chanfree` frees it. `scripts/vendor-drawterm.sh` merges the change across upstream updates. devsrv is a port in `src/kern/`, `h9_fauth` uses `mntauth` from `kern/fns.h`, and `sysmount` and `sysunmount` are used as they are.
 
 ## Security
 
@@ -142,6 +157,8 @@ Integration cases, tagged `[devsrv]`, using the root tree's own servers:
 - `test "mount without auth works through fauth [devsrv]"`: `mount` (not `mount -n`) of a ramfs.
 - `test "unmount takes a mount out of the namespace [devsrv]"`
 - `test "srvfs reexports a directory through /srv [devsrv]"`
+- `test "exportfs -S serves a posted channel [devsrv]"`
+- `test "/proc/n/ns prints a mount of /srv/x as /srv/x [devsrv]"`
 - `test "a server's /srv entry goes when it exits [devsrv]"`, through `ORCLOSE`.
 - `test "a second create of a /srv name fails [devsrv]"`
 - `test "clone makes a private board, and closing it clears it [devsrv]"`
@@ -158,18 +175,13 @@ Demo: `h9 --rc 'ramfs -S tmp && mount -c /srv/tmp /n/tmp && touch /n/tmp/a && ls
 ## Implementation
 
 1. `mount`, `unmount` and `fauth` in `src/syscall.zig`, `h9_fauth` in `glue.c`, and the bindings in `src/kern.zig`. A mount over a pipe from a guest that serves 9P itself works now.
-2. `src/kern/devsrv.c`, the port with per-machine root boards, `Hmach`'s board pointer and teardown, and the `s` entry in `devtab.c`.
-3. The `/srv` bind in `src/policy.zig`'s namespace builder, and `--print`'s line for it.
-4. With [semaphores](semaphores.md) implemented, the integration and backend cases.
-5. DESIGN.md:
+2. `src/kern/devsrv.c`, the port with per-machine root boards, `h9_srvpost`, `Hmach`'s board pointer and teardown, and the `s` entry in `devtab.c`.
+3. `srvname`: the field and its free in the vendored `kern/dat.h` and `kern/chan.c`, set by devsrv's open, and printed by `readns1`.
+4. The `/srv` bind in `src/policy.zig`'s namespace builder, and `--print`'s line for it.
+5. With [semaphores](semaphores.md) implemented, the integration and backend cases.
+6. DESIGN.md:
    - the kernel's "Added by us" table: devsrv, per machine
    - the boot sequence's bind list
    - the syscall paragraph: `mount`, `unmount` and `fauth` are served
    
    Then set `status: implemented`.
-
-## Open issues
-
-- **`srvname`.** Should h9 track the `/srv` name a mounted channel came from, in a table beside devsrv rather than in drawterm's `Chan`? That would let `/proc/n/ns` print `mount /srv/x /n/x` as 9front does, so a printed namespace replays with `--ns`.
-- **exportfs.** `exportfs -s` and `-a` serve a namespace over a fd. With `mount` and `/srv`, it should run, but whether its auth paths need more than `fauth` hasn't been checked.
-- **Posting from the host.** An embedder could post a host-served 9P connection into a machine's `/srv` before the program starts, for example a host directory served by a 9P server rather than devfs. That's a `Machine.Options` addition, and would come with [9p-roots](9p-roots.md).
