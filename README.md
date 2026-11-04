@@ -30,10 +30,10 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [gfx](design/0015-gfx.md) | draft | needs devsrv | Graphics (--gfx) |
 | [kvm](design/0016-kvm.md) | draft |  | KVM backend |
 | [whp](design/0017-whp.md) | draft | needs kvm | WHP backend |
+| [linux-personality](design/0018-linux-personality.md) | draft |  | Linux personality |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-sandbox](design/host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
-| [linux-personality](design/linux-personality.md) | draft |  | Linux personality |
 | [zig-interpreter](design/zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
 
 ```mermaid
@@ -59,10 +59,10 @@ flowchart LR
   p_gfx["#35;15 gfx<br/>draft"]:::draft
   p_kvm["#35;16 kvm<br/>draft"]:::draft
   p_whp["#35;17 whp<br/>draft"]:::draft
+  p_linux_personality["#35;18 linux-personality<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
-  p_linux_personality["linux-personality<br/>draft"]:::draft
   p_zig_interpreter["zig-interpreter<br/>draft"]:::draft
   p_semaphores --> p_go_compat
   p_semaphores --> p_devsrv

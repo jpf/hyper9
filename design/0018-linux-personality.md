@@ -1,4 +1,5 @@
 ---
+id: 18
 slug: linux-personality
 title: Linux personality
 status: draft

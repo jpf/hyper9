@@ -176,7 +176,7 @@ The step is run by hand or on a schedule. It isn't part of `zig build test`, and
 **Why not `/proc/n/text` here.** `os.Executable` needs it, but it's part of devproc's debugging files, which [self-host](0010-self-host.md) adds for acid. Go programs rarely call it, and it fails cleanly with an error when it's missing.
 
 **Go on arm64 hosts.** DESIGN.md treats cross-architecture emulation as testing-only. So on an arm64 Mac, Go `plan9/amd64` binaries run, but slowly and through Unicorn, which isn't in the MIT build. Two other proposals change that:
-- [linux-personality](linux-personality.md) runs `linux/arm64` Go binaries natively on HVF.
+- [linux-personality](0018-linux-personality.md) runs `linux/arm64` Go binaries natively on HVF.
 - Someone porting Go to `plan9/arm64` would make this proposal's work apply natively.
 
 Neither is a dependency. And [i386](0009-i386.md) would let `plan9/386` binaries run as well.

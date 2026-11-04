@@ -135,7 +135,7 @@ The reference count is the number of address spaces it's attached to. That takes
 - **Why up front:** h9 allocates every segment's pages when it's created or grown. That keeps `--memory` exact, since a segment either fits or fails at `segattach` with `Enovmem` rather than at some later touch. It also keeps a segment a list of whole chunks.
 - **What 9front does:** it allocates on fault, so a large `segattach` costs nothing until it's touched.
 - **Why that's acceptable here:** the callers in the tree attach what they use. APE's buffers are a few pages, and telnetd's console state is one. The one large, sparse user is `vmx`, which h9 can't run anyway.
-- **Faulting in later:** if a sparse user turns up, `Segment` could map chunks on first touch, the way the stack already grows on faults. `--memory` would then fail at a touch, with a note, instead of at `segattach`. The likelier first user is [linux-personality](linux-personality.md), whose anonymous mappings are allocated on fault; if both need it, it's built once in `Segment` and shared.
+- **Faulting in later:** if a sparse user turns up, `Segment` could map chunks on first touch, the way the stack already grows on faults. `--memory` would then fail at a touch, with a note, instead of at `segattach`. The likelier first user is [linux-personality](0018-linux-personality.md), whose anonymous mappings are allocated on fault; if both need it, it's built once in `Segment` and shared.
 
 **No `#g`.** Named global segments need devsegment, a new device with its own namespace semantics and the `sticky` class, which pins pages. In the tree its user is `vmx`, plus anything that shares memory between unrelated processes by name. `segattach` would consult it first, as 9front's does through `_globalsegattach`, so adding it later doesn't change this design. It would be a proposal of its own if something needs it.
 
@@ -143,7 +143,7 @@ The reference count is the number of address spaces it's attached to. That takes
 
 **Never executable.** h9 maps data and stack without execute permission, and these segments the same. Nothing in the tree executes from an attached segment, and keeping writable memory non-executable means a guest can't build code at run time and jump into it on HVF. 9front's default is executable unless `SG_NOEXEC`. A program that relies on that faults with an exec fault and its note, which a backend test checks so the difference is easy to diagnose.
 - **If one is ever needed:** executable segments would be a host policy opt-in, not the guest's choice by leaving out `SG_NOEXEC`. Otherwise any guest could turn off W^X.
-- **Not linuxemu's route:** linuxemu built Linux's `mmap`, executable mappings included, on `segattach`. h9's [linux-personality](linux-personality.md) has its own VMAs instead, so it won't need executable extras.
+- **Not linuxemu's route:** linuxemu built Linux's `mmap`, executable mappings included, on `segattach`. h9's [linux-personality](0018-linux-personality.md) has its own VMAs instead, so it won't need executable extras.
 
 **Trimming the headroom.** The headroom is an h9 optimisation 9front doesn't have, so it mustn't make a `segattach` fail that 9front allows. Chunks are mapped whole, so trimming one that straddles the break means copying it. Refusing to copy a shared data segment trades a rare `Esoverlap` for never losing a sibling's write.
 
