@@ -22,7 +22,9 @@ Run Go's `GOOS=plan9 GOARCH=amd64` binaries. Semaphores, from [semaphores](0003-
 - `/dev/sysstat`, with a line per vCPU the machine may run, so `runtime.NumCPU` isn't 1
 - `_NSEC`, as 9front serves it
 
-All of it is in drawterm's devcons, through small hooks into h9's own code. Go programs then start, schedule goroutines on several processes, keep time, and exec, the same on every backend that runs amd64.
+All of it is in drawterm's devcons, through small hooks into h9's own code, except `_NSEC`, which is a syscall. Go programs then start, schedule goroutines on several processes, keep time, and exec, the same on every backend that runs amd64.
+
+The CLI also maps an `exits` string that's a plain decimal number from 1 to 255 to that exit code, so `os.Exit(n)` exits with `n`, for every program.
 
 ## Background
 
@@ -77,8 +79,9 @@ Everything above is served except the following:
 | `#c/pid`, `#c/ppid` | Not in drawterm's devcons, so the open fails. The runtime then parses an empty read as pid 0 for the main M, and `syscall.Getpid` fails. | Here |
 | `/dev/sysstat` | Empty, so `runtime.NumCPU()` is 1 and `GOMAXPROCS` defaults to 1 | Here |
 | `_NSEC` | "sys: bad sys call" | Here |
-| `/proc/n/text` | Not served | [self-host](self-host.md) |
-| `/dev/swap` | Not served; the runtime's fallback is right for h9 | - |
+| `/proc/n/text` | Not served | [self-host](0010-self-host.md) |
+| `/dev/swap` | Not served; the runtime's fallback is right for h9 | Not planned; see Rationale |
+| `os.Exit(n)` | `exits("n")`, so h9 exits 1 and prints "n" | Here |
 
 Two details checked along the way:
 
@@ -115,6 +118,20 @@ Each hook is a one-line call. The leaves can't fail and raise no kernel errors (
 
 Syscall 53 returns the wall nanoseconds in the return register, as 9front's `sys_nsec` does on 64-bit machines, and writes nothing through its argument. It's the only underscore call h9 serves: the others keep posting "sys: bad sys call". `--trace` prints it as `_nsec`.
 
+### Numeric exit statuses
+
+Go's `os.Exit(n)` calls `exits` with `n` in decimal, and `exits("")` for 0. The CLI maps a numeric `exits` string to that number:
+
+| `exits` string | Exit code | Printed to stderr |
+| --- | --- | --- |
+| empty | 0 | No |
+| a decimal number from 1 to 255: digits only, no sign, no leading zero, no spaces | That number | No |
+| anything else, including `"0"` | 1 | Yes |
+
+The rule applies to every program, not just Go binaries, and lives in `src/cli.zig`, where a run's result becomes an exit code. `Machine` still returns the `exits` string unchanged, so library callers see what the program wrote.
+
+A guest can now exit 2, 125, 126 or 127, the codes h9 uses for its own failures, as with `env` or `docker run`. h9 prints a message to stderr whenever it fails itself, and a numeric exit prints nothing, so the two can be told apart.
+
 ### Fixtures and the Go toolchain
 
 The tests need Go binaries.
@@ -123,6 +140,13 @@ The tests need Go binaries.
 - **Building them:** `zig build go-fixtures` builds them with `GOOS=plan9 GOARCH=amd64 CGO_ENABLED=0` and `GOTOOLCHAIN=go$GO_VERSION`. `GO_VERSION` is pinned in `scripts/pins.sh`, initially 1.27.3. Any installed Go fetches that exact toolchain, so every host builds the same binaries.
 - **Without Go:** if `go` isn't on `PATH`, the step is skipped and the Go cases skip, as cases without a root tree do.
 - **Runner:** the cases run on the emulator, `H9_TEST_BACKENDS=emu`, with `-Demu=unicorn`.
+- **No 9front commands:** the root tree has no `/amd64/bin` yet (see Open issues), so no fixture execs 9front commands. The `os/exec` case re-execs the fixture itself.
+
+### Go's standard library tests
+
+`zig build go-stdtest` builds the test binaries for `time`, `syscall`, `os` and `runtime`. It uses `go test -c` on the host, with the same toolchain and environment as the fixtures. It runs each one on the emulator with `--cwd` set to its package directory in the toolchain's `GOROOT`, so `testdata` is reachable through `/mnt/term/cwd`, and reports pass, skip and fail counts for each package. These tests don't need a Go source tree or an amd64 root in the guest. Tests that exec `go` or 9front commands can't pass yet, so the step skips them with `-test.skip`, using a list kept next to the step.
+
+The step is run by hand or on a schedule. It isn't part of `zig build test`, and it isn't one of the Done when cases: its job is to find gaps the fixtures miss.
 
 ## Rationale
 
@@ -138,7 +162,18 @@ The tests need Go binaries.
 
 **`sysstat` lines for CPUs, not real counters.** Go only counts the lines, and 9front's `stats` and `cpu` tools are the only other readers. Counting real context switches and syscalls per vCPU would need accounting h9 doesn't have. Zeros keep the format valid without pretending.
 
-**Why not `/proc/n/text` here.** `os.Executable` needs it, but it's part of devproc's debugging files, which [self-host](self-host.md) adds for acid. Go programs rarely call it, and it fails cleanly with an error when it's missing.
+**Numeric exit statuses for every program.**
+- **Why not only for Go:** limiting the mapping to Go binaries would mean detecting them, which is fragile and has no principled test.
+- **Native programs:** 9front programs seldom exit with a bare number. Those that do, such as ported Unix tools, mean what Go means by it.
+- **Not printing:** the code already carries the status, and Go programs print their own messages before `os.Exit`. Printing "3" as well would be noise that Go users don't expect.
+- **Why `"0"` is still a failure:** a program that wrote a non-empty status meant failure. Mapping `"0"` to success would hide that.
+- **The CLI, not `Machine`:** exit codes are a host-process idea. Library callers get the string and decide for themselves.
+
+**Why not `/dev/swap`.** The runtime falls back to 4 KiB pages without it, which is right on amd64. If h9 served it, Go would trust its `pagesize` line for its allocator, so a wrong value there is worse than a missing file. 9front's `memory` and `stats` are the only other readers, and they only display it. It fits better in a later proposal that adds real per-machine accounting, together with real `sysstat` counters.
+
+**Go's tests built on the host.** Running `go test` inside the guest would need the Go source tree there and an amd64 root to build it, which h9 doesn't have. Test binaries built with `go test -c` need neither, so the gaps they find show up now. They aren't a gate, because the result depends on which tests Go's tree has at the pinned version and which ones the step skips.
+
+**Why not `/proc/n/text` here.** `os.Executable` needs it, but it's part of devproc's debugging files, which [self-host](0010-self-host.md) adds for acid. Go programs rarely call it, and it fails cleanly with an error when it's missing.
 
 **Go on arm64 hosts.** DESIGN.md treats cross-architecture emulation as testing-only. So on an arm64 Mac, Go `plan9/amd64` binaries run, but slowly and through Unicorn, which isn't in the MIT build. Two other proposals change that:
 - [linux-personality](linux-personality.md) runs `linux/arm64` Go binaries natively on HVF.
@@ -152,9 +187,10 @@ Neither is a dependency. And [i386](0009-i386.md) would let `plan9/386` binaries
 - **`#c/pid` and `#c/ppid`:** new files, so `ls '#c'` lists two more entries.
 - **`/dev/sysstat`:** now has content. `runtime.NumCPU()` in Go, and any 9front tool that counts CPUs, see the machine's limit rather than 1.
 - **`_NSEC`:** stops posting "sys: bad sys call".
-- **CLI, `Machine.Options`, the vmm interface and sandbox defaults:** unchanged.
+- **Exit codes:** a program that exits with a decimal number from 1 to 255 now gives that code instead of 1, and the number is no longer printed. Scripts that check for exactly 1 see a different code, and ones that capture stderr no longer get the number. All other `exits` strings behave as before.
+- **CLI flags, `Machine.Options`, `Machine`'s result, the vmm interface and sandbox defaults:** unchanged.
 - **Vendored tree:** devcons gains the hooks above.
-- **Build:** a `go-fixtures` step, which `zig build test` depends on when `go` is available.
+- **Build:** a `go-fixtures` step, which `zig build test` depends on when `go` is available, and a `go-stdtest` step, which nothing depends on.
 
 ## Security
 
@@ -176,7 +212,8 @@ The cases are tagged `[go-compat]`, built from `tests/fixtures/go/`, and run on 
 - `test "os/exec runs a child and gets its exit status [go-compat]"`: the fixture re-execs itself from `/mnt/term/cwd`, with an environment variable telling the child what to do.
 - `test "a nil dereference becomes a panic that recover catches [go-compat]"`
 - `test "os/signal receives interrupt on Ctrl-C [go-compat]"`, on a pty as the existing Ctrl-C cases are.
-- `test "os.Exit(3) exits with status 3 [go-compat]"`: h9 exits 1 and prints "3", as for any exits string.
+- `test "os.Exit(3) exits with status 3 [go-compat]"`: h9 exits 3 and prints nothing to stderr.
+- `test "a numeric exits string becomes the exit code [go-compat]"`: an rc case, so it doesn't need Go. `exit 3` gives 3 with an empty stderr, while `exit 0`, `exit 256` and `exit 03` give 1 and print the string.
 - `test "net/http fetches from a listener the test opens [go-compat]"`
 - `test "syscall.Gettimeofday has microsecond resolution [go-compat]"`, through `_NSEC`.
 - `test "/dev/bintime has four words and a monotonic clock [go-compat]"`: an rc case reads 32 bytes from `/dev/bintime` twice, and the fourth word grows by at least the time slept between the reads.
@@ -185,18 +222,18 @@ The cases are tagged `[go-compat]`, built from `tests/fixtures/go/`, and run on 
 
 1. The clock leaf and `_NSEC` in `src/syscall.zig`, with its trace.
 2. `src/kern/consx.c` and the leaves in `src/kern.zig`, then the hooks in `third_party/drawterm/kern/devcons.c`. The `/dev/bintime` case passes.
-3. `tests/fixtures/go/`, `GO_VERSION` in `scripts/pins.sh`, and `zig build go-fixtures`.
-4. With [semaphores](0003-semaphores.md) implemented, the Go cases.
-5. DESIGN.md:
+3. The numeric exit statuses in `src/cli.zig`, and their rc case.
+4. `tests/fixtures/go/`, `GO_VERSION` in `scripts/pins.sh`, and `zig build go-fixtures`.
+5. With [semaphores](0003-semaphores.md) implemented, the Go cases, then `zig build go-stdtest` and its skip list.
+6. The README: the exit codes paragraph, and the Go fixtures and `go-stdtest` steps.
+7. DESIGN.md:
    - the syscall table paragraph: `_NSEC` is served and `/dev/bintime` is nanosecond and monotonic
    - the kernel's "Added by us" table: the devcons hooks
+   - the terminal paragraph's exit status sentence, and the CLI's exit code table
    - a short "Go programs" section on what runs and where
    
    Then set `status: implemented`.
 
 ## Open issues
 
-- **Exit codes from Go.** `os.Exit(n)` becomes `exits("n")`, so h9 exits 1 for every non-zero code. Should the CLI map an exits string that's a decimal number from 1 to 255 to that exit code, for every program? That's a CLI change wider than Go.
-- **An amd64 root tree.** A Go program that execs 9front commands needs `/amd64/bin`. `scripts/mkroot.py` builds an arm64 tree only, so on amd64 those execs fail with "file does not exist". Building an amd64 tree is a change to `mkroot.py`, and perhaps its own proposal.
-- **Go's own test suite.** Running `go test` for `runtime`, `os`, `syscall` and `time` built for `plan9/amd64` would find gaps the fixtures miss. It needs the Go source tree in the guest, which waits for an amd64 root tree.
-- **`/dev/swap`.** The runtime does fine without it, but 9front's `memory` and `stats` read it. Serving the machine's `--memory` and page counts there would be one more devcons hook.
+- **An amd64 root tree.** A Go program that execs 9front commands needs `/amd64/bin`. `scripts/mkroot.py` builds an arm64 tree only, so on amd64 those execs fail with "file does not exist". This should be its own proposal. The likely approach is a post-step in `mkroot.py` that runs `objtype=amd64 mk install` inside h9 on the arm64 root, which [self-host](0010-self-host.md) shows working, rather than unpacking a second 9front image. That gives one root tree with both architectures, and it answers [i386](0009-i386.md)'s question about getting 386 binaries the same way. With it, Go fixtures can exec 9front commands, and `go-stdtest` can run more of its tests.

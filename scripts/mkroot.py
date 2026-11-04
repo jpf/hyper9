@@ -7,7 +7,7 @@ a second raw disk, and unpacks it into .local/9front/root-<release>, with
 
 The tree leaves out what running programs doesn't need: boot kernels,
 /sys/doc and, unless --src is given, /sys/src (needed for self-hosting,
-design/self-host.md).
+design/0010-self-host.md).
 That's about 250 MB instead of 420 MB.
 
 Usage: scripts/mkroot.py [--force] [--src]
