@@ -16,6 +16,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [baseline](design/0000-baseline.md) | implemented |  | Baseline (h9 before proposals) |
 | [proposals](design/0001-proposals.md) | implemented |  | Proposals replace milestones and the design changelog |
 | [9p-roots](design/9p-roots.md) | draft |  | 9P roots |
+| [browser-host](design/browser-host.md) | draft | needs i386 | A browser host on wasm, with v86 |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [devsrv](design/devsrv.md) | draft |  | devsrv and /srv |
 | [ephemeral-writes](design/ephemeral-writes.md) | draft |  | Ephemeral writes and a private /tmp |
@@ -23,8 +24,10 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [go-compat](design/go-compat.md) | draft | needs semaphores | Go compatibility |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-sandbox](design/host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
+| [i386](design/i386.md) | draft |  | 386 binaries |
 | [image-roots](design/image-roots.md) | draft | needs devsrv, 9p-roots | Disk-image roots |
 | [kvm](design/kvm.md) | draft |  | KVM backend |
+| [linux-personality](design/linux-personality.md) | draft |  | Linux personality |
 | [net-policy](design/net-policy.md) | draft |  | Outbound-only network by default, and --net-allow |
 | [overlay](design/overlay.md) | draft | needs ephemeral-writes | Copy-on-write overlay as the root's default |
 | [segattach](design/segattach.md) | draft |  | segattach and shared segments |
@@ -42,6 +45,7 @@ flowchart LR
   p_baseline["baseline<br/>implemented"]:::implemented
   p_proposals["#35;1 proposals<br/>implemented"]:::implemented
   p_9p_roots["9p-roots<br/>draft"]:::draft
+  p_browser_host["browser-host<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
   p_devsrv["devsrv<br/>draft"]:::draft
   p_ephemeral_writes["ephemeral-writes<br/>draft"]:::draft
@@ -49,8 +53,10 @@ flowchart LR
   p_go_compat["go-compat<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
+  p_i386["i386<br/>draft"]:::draft
   p_image_roots["image-roots<br/>draft"]:::draft
   p_kvm["kvm<br/>draft"]:::draft
+  p_linux_personality["linux-personality<br/>draft"]:::draft
   p_net_policy["net-policy<br/>draft"]:::draft
   p_overlay["overlay<br/>draft"]:::draft
   p_segattach["segattach<br/>draft"]:::draft
@@ -58,6 +64,7 @@ flowchart LR
   p_semaphores["semaphores<br/>draft"]:::draft
   p_whp["whp<br/>draft"]:::draft
   p_zig_interpreter["zig-interpreter<br/>draft"]:::draft
+  p_i386 --> p_browser_host
   p_devsrv --> p_gfx
   p_semaphores --> p_go_compat
   p_kvm --> p_host_sandbox
