@@ -16,6 +16,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [baseline](design/0000-baseline.md) | implemented |  | Baseline (h9 before proposals) |
 | [proposals](design/0001-proposals.md) | implemented |  | Proposals replace milestones and the design changelog |
 | [semaphores](design/0003-semaphores.md) | draft |  | rendezvous and semaphores |
+| [segattach](design/0004-segattach.md) | draft |  | segattach and shared segments |
 | [9p-roots](design/9p-roots.md) | draft |  | 9P roots |
 | [browser-host](design/browser-host.md) | draft | needs i386 | A browser host on wasm, with v86 |
 | [ci](design/ci.md) | draft |  | Continuous integration |
@@ -31,7 +32,6 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [linux-personality](design/linux-personality.md) | draft |  | Linux personality |
 | [net-policy](design/net-policy.md) | draft |  | Outbound-only network by default, and --net-allow |
 | [overlay](design/overlay.md) | draft | needs ephemeral-writes | Copy-on-write overlay as the root's default |
-| [segattach](design/segattach.md) | draft |  | segattach and shared segments |
 | [self-host](design/self-host.md) | draft |  | Self-hosting |
 | [whp](design/whp.md) | draft |  | WHP backend |
 | [zig-interpreter](design/zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
@@ -45,6 +45,7 @@ flowchart LR
   p_baseline["baseline<br/>implemented"]:::implemented
   p_proposals["#35;1 proposals<br/>implemented"]:::implemented
   p_semaphores["#35;3 semaphores<br/>draft"]:::draft
+  p_segattach["#35;4 segattach<br/>draft"]:::draft
   p_9p_roots["9p-roots<br/>draft"]:::draft
   p_browser_host["browser-host<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
@@ -60,7 +61,6 @@ flowchart LR
   p_linux_personality["linux-personality<br/>draft"]:::draft
   p_net_policy["net-policy<br/>draft"]:::draft
   p_overlay["overlay<br/>draft"]:::draft
-  p_segattach["segattach<br/>draft"]:::draft
   p_self_host["self-host<br/>draft"]:::draft
   p_whp["whp<br/>draft"]:::draft
   p_zig_interpreter["zig-interpreter<br/>draft"]:::draft

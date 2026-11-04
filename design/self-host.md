@@ -31,5 +31,5 @@ The integration tests would add a self-build of a few `/sys/src/cmd` programs.
 
 ## Open issues
 
-- Which calls the compilers, linkers and mk need that h9 doesn't serve yet; the milestone plan didn't say, so this proposal may gain dependencies (perhaps [segattach](segattach.md)).
+- Which calls the compilers, linkers and mk need that h9 doesn't serve yet; the milestone plan didn't say, so this proposal may gain dependencies (perhaps [segattach](0004-segattach.md)).
 - Should the host-tree root go through devfs as-is, or get a faster read path for exec and compilers? (Moved from DESIGN.md's Open questions.)
