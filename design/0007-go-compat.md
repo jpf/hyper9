@@ -1,4 +1,5 @@
 ---
+id: 7
 slug: go-compat
 title: Go compatibility
 status: draft

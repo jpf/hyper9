@@ -19,12 +19,12 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [segattach](design/0004-segattach.md) | draft |  | segattach and shared segments |
 | [net-policy](design/0005-net-policy.md) | draft |  | Outbound-only network by default, and --net-allow |
 | [ephemeral-writes](design/0006-ephemeral-writes.md) | draft |  | Ephemeral writes and a private /tmp |
+| [go-compat](design/0007-go-compat.md) | draft | needs semaphores | Go compatibility |
 | [9p-roots](design/9p-roots.md) | draft |  | 9P roots |
 | [browser-host](design/browser-host.md) | draft | needs i386 | A browser host on wasm, with v86 |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [devsrv](design/devsrv.md) | draft |  | devsrv and /srv |
 | [gfx](design/gfx.md) | draft | needs devsrv | Graphics (--gfx) |
-| [go-compat](design/go-compat.md) | draft | needs semaphores | Go compatibility |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-sandbox](design/host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
 | [i386](design/i386.md) | draft |  | 386 binaries |
@@ -48,12 +48,12 @@ flowchart LR
   p_segattach["#35;4 segattach<br/>draft"]:::draft
   p_net_policy["#35;5 net-policy<br/>draft"]:::draft
   p_ephemeral_writes["#35;6 ephemeral-writes<br/>draft"]:::draft
+  p_go_compat["#35;7 go-compat<br/>draft"]:::draft
   p_9p_roots["9p-roots<br/>draft"]:::draft
   p_browser_host["browser-host<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
   p_devsrv["devsrv<br/>draft"]:::draft
   p_gfx["gfx<br/>draft"]:::draft
-  p_go_compat["go-compat<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
   p_i386["i386<br/>draft"]:::draft
@@ -64,9 +64,9 @@ flowchart LR
   p_self_host["self-host<br/>draft"]:::draft
   p_whp["whp<br/>draft"]:::draft
   p_zig_interpreter["zig-interpreter<br/>draft"]:::draft
+  p_semaphores --> p_go_compat
   p_i386 --> p_browser_host
   p_devsrv --> p_gfx
-  p_semaphores --> p_go_compat
   p_kvm --> p_host_sandbox
   p_whp --> p_host_sandbox
   p_devsrv --> p_image_roots

@@ -39,7 +39,7 @@ Its strengths stay: about 1.5 G instructions/s on arm64 (M3 Max), mature A64 and
 ### Scope
 
 - **arm64 only**, at EL0: user-mode A64. No AArch32, no SVE, no EL1, no MMU, no system registers beyond those EL0 can reach. amd64 stays on Unicorn; an amd64 interpreter would be its own proposal.
-- **The subset 9front emits.** That means the code 7c and 7l generate, the hand-written assembly in `libc/arm64` and the other `*.s` files in the arm64 userland, and whatever the Go toolchain emits once [go-compat](go-compat.md) lands. The subset is measured, not guessed (Inventory, below).
+- **The subset 9front emits.** That means the code 7c and 7l generate, the hand-written assembly in `libc/arm64` and the other `*.s` files in the arm64 userland, and whatever the Go toolchain emits once [go-compat](0007-go-compat.md) lands. The subset is measured, not guessed (Inventory, below).
 - **Anything else faults.** An encoding the interpreter doesn't implement exits with a fault whose syndrome is EC 0 (unknown reason), as the hardware reports an undefined instruction. The guest gets `sys: trap: ...` like any other bad instruction, never wrong results.
 
 ### Layout

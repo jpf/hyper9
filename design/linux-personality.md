@@ -65,7 +65,7 @@ Linux processes have no Tos.
 | Memory | `brk`, `mmap`, `munmap`, `mprotect`, `madvise`, `mremap` | A VMA layer (see Memory) |
 | Threads | `clone` with `CLONE_VM`, `futex`, `set_robust_list`, `rseq` (`-ENOSYS`) | See Threads |
 | Signals | `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`, `sigaltstack` | See Signals |
-| Time | `clock_gettime`, `clock_nanosleep`, `nanosleep`, `gettimeofday` | The host clock, the same one [go-compat](go-compat.md) uses for `/dev/bintime` |
+| Time | `clock_gettime`, `clock_nanosleep`, `nanosleep`, `gettimeofday` | The host clock, the same one [go-compat](0007-go-compat.md) uses for `/dev/bintime` |
 | Terminal | `ioctl` `TCGETS`, `TCSETS*`, `TIOCGWINSZ`, `TIOCGPGRP` on the console | `TCSETS` with `ICANON` off writes `rawon` to `/dev/consctl`, and `rawoff` when it's on again. `isatty` and line editing work. |
 | Sockets | `socket`, `connect`, `bind`, `listen`, `accept4`, `sendto`, `recvfrom`, `getsockname`, `getpeername`, `setsockopt`, `shutdown` | `/net` clone files. `connect` dials, `bind` and `listen` announce, and `accept4` listens. The policy's devip hooks apply unchanged. |
 | Readiness | `poll`, `ppoll`, `pselect6`, `epoll_create1`, `epoll_ctl`, `epoll_pwait`, `eventfd2` | See Readiness |

@@ -248,5 +248,5 @@ Nothing in the page is reachable except through those imports.
 - **Network.** None, at first. A WebSocket relay or Wanix's network could back devip later, as a separate proposal.
 - **Graphics.** [gfx](gfx.md) on a canvas, through devdraw, would be its own proposal.
 - **Coroutine stack size.** 256 KiB is a guess. Kernel paths with large frames may need more, and memory for many processes adds up, since wasm memory never shrinks.
-- **Time.** `Tos.cyclefreq` and `kcycles` on the web host, and whether `/dev/bintime` can be finer than devcons's one second here ([go-compat](go-compat.md)).
+- **Time.** `Tos.cyclefreq` and `kcycles` on the web host, and whether `/dev/bintime` can be finer than devcons's one second here ([go-compat](0007-go-compat.md)).
 - **arm64 on the web host.** Once [zig-interpreter](zig-interpreter.md) exists, the web host can run arm64 binaries on it. The question is whether the browser then gets an arm64 root, or both.

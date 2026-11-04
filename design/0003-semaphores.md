@@ -25,7 +25,7 @@ From DESIGN.md's process model table:
 | --- | --- |
 | `rendezvous` / `semacquire` / `tsemacquire` / `semrelease` | Host kernel primitives built on drawterm's sleep/wakeup |
 
-Today all four post "sys: bad sys call", so a program that calls one dies. 9front's libc `qlock` and `rwlock` park on `rendezvous` when a lock is contended, and libthread parks procs on it; in the pinned arm64 root, 325 of 704 binaries reference it, including `ls`, `acme`, `plumber` and `factotum`. They work today only as long as no lock is contended. `semacquire` and `semrelease` are used by `gefs` and `cwfs64x` (wanted by [image-roots](image-roots.md)) and by Go's `semasleep`/`semawakeup`, and Go's timed parks use `tsemacquire` ([go-compat](go-compat.md)).
+Today all four post "sys: bad sys call", so a program that calls one dies. 9front's libc `qlock` and `rwlock` park on `rendezvous` when a lock is contended, and libthread parks procs on it; in the pinned arm64 root, 325 of 704 binaries reference it, including `ls`, `acme`, `plumber` and `factotum`. They work today only as long as no lock is contended. `semacquire` and `semrelease` are used by `gefs` and `cwfs64x` (wanted by [image-roots](image-roots.md)) and by Go's `semasleep`/`semawakeup`, and Go's timed parks use `tsemacquire` ([go-compat](0007-go-compat.md)).
 
 The numbers are `RENDEZVOUS` 34, `SEMACQUIRE` 37, `SEMRELEASE` 38 and `TSEMACQUIRE` 52 (`libc/9syscall/sys.h`). The semantics are in 9front's `port/sysproc.c` and the `rendezvous(2)` and `semacquire(2)` manual pages:
 
