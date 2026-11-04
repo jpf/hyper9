@@ -144,7 +144,7 @@ The tests need Go binaries.
 - [linux-personality](linux-personality.md) runs `linux/arm64` Go binaries natively on HVF.
 - Someone porting Go to `plan9/arm64` would make this proposal's work apply natively.
 
-Neither is a dependency. And [i386](i386.md) would let `plan9/386` binaries run as well.
+Neither is a dependency. And [i386](0009-i386.md) would let `plan9/386` binaries run as well.
 
 ## Compatibility
 

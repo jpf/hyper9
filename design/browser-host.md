@@ -4,7 +4,7 @@ title: A browser host on wasm, with v86
 status: draft
 created: 2026-11-04
 authors: [progrium]
-depends: [i386]
+depends: [9]
 areas: [vmm, kern, build, tests]
 ---
 
@@ -14,7 +14,7 @@ Nov 4, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Abstract
 
-h9 builds for wasm32 and runs in a Web Worker, with no VM image, boot or guest kernel, as on every other host. drawterm's kernel runs unchanged above a new OS layer whose kernel processes are coroutines, built on JavaScript Promise Integration (JSPI). Guest code runs on a new vmm backend, v86, which emulates a 32-bit x86 CPU and compiles hot code to wasm, so the browser host runs 9front's 386 binaries ([i386](i386.md)). The same build runs under Node, which is how the integration suite tests it.
+h9 builds for wasm32 and runs in a Web Worker, with no VM image, boot or guest kernel, as on every other host. drawterm's kernel runs unchanged above a new OS layer whose kernel processes are coroutines, built on JavaScript Promise Integration (JSPI). Guest code runs on a new vmm backend, v86, which emulates a 32-bit x86 CPU and compiles hot code to wasm, so the browser host runs 9front's 386 binaries ([i386](0009-i386.md)). The same build runs under Node, which is how the integration suite tests it.
 
 ## Background
 
@@ -25,7 +25,7 @@ What does exist:
 - **wasm, in a Worker.** It can run for as long as it needs and block only through the event loop.
 - **JSPI.** A wasm call into JavaScript can return a Promise, and the wasm stack suspends until the Promise settles. JSPI is phase 4. As of mid-2026 it ships in Chrome and Edge 137 and later and in Safari 27 beta, and in Firefox Nightly behind a pref, with default-on intended for Firefox 153.
 - **v86.** A BSD-2-licensed x86 PC emulator whose CPU core is Rust compiled to wasm. Its JIT turns hot guest code into wasm modules. It emulates 32-bit x86 with x87, SSE2, FXSAVE and PAE paging. Its run loop (`main_loop`) runs guest code in slices of about 1 ms and returns early when the CPU halts. Its registers sit at fixed addresses in its linear memory.
-- **9front's 386 port,** still released ([i386](i386.md)).
+- **9front's 386 port,** still released ([i386](0009-i386.md)).
 
 drawterm's kernel reaches its OS through a small layer, `kern/posix.c` or `kern/win32.c`:
 
@@ -192,10 +192,10 @@ The GDT, IDT and TSS are shared by every vCPU, since only one runs at a time. Th
 ## Compatibility
 
 - **DESIGN.md's goals.** "Run native code only" and the non-goal of translating across architectures for users assume a CPU to run natively on. A browser has none. DESIGN.md would say that the web host runs 386 binaries on v86, and that this is its only mode.
-- **vmm.** `Kind` and `BackendKind` gain `v86`. `--backend v86` is accepted everywhere and fails with `BackendNotBuilt` outside web builds. The [i386](i386.md) proposal changes `Extra`; this one changes nothing else in the interface.
+- **vmm.** `Kind` and `BackendKind` gain `v86`. `--backend v86` is accepted everywhere and fails with `BackendNotBuilt` outside web builds. The [i386](0009-i386.md) proposal changes `Extra`; this one changes nothing else in the interface.
 - **Machine and CLI.** `Machine.Options` is unchanged. In web builds the policy always masks `#C`, which doesn't exist, and `#I`, since there's no socket API. `--net` other than `disable` is listed as unenforced, and `--strict` refuses it. `--host-cmd` is a usage error.
 - **Build and releases.** A new step, `zig build web`, and a new release archive, `h9-web-<version>.tar.gz`. Native builds are unchanged. h9 stays MIT. The archive carries v86's BSD-2 notice and the root archive's 9front licence.
-- **Root tree.** The [i386](i386.md) root. The browser gets an archive of it.
+- **Root tree.** The [i386](0009-i386.md) root. The browser gets an archive of it.
 - **`third_party/`.** Unchanged. v86 isn't vendored: the build fetches or builds it from a pin.
 
 ## Security
