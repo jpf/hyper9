@@ -80,7 +80,7 @@ Each backend is a file under `src/vmm/` with the same method set; the unions dis
 
 The contract is in Plan 9 terms (address spaces, Ureg, syscall exits) rather than hardware terms such as guest-physical memory and page tables. That keeps page-table building inside the hypervisor backends, and lets the emulator implement the contract without emulating kernel mode or an MMU.
 
-The interface was shaped around all three hypervisors, so the table and rules below cover KVM and WHP as well. Only HVF is built; [kvm](design/0016-kvm.md) and [whp](design/whp.md) are proposed.
+The interface was shaped around all three hypervisors, so the table and rules below cover KVM and WHP as well. Only HVF is built; [kvm](design/0016-kvm.md) and [whp](design/0017-whp.md) are proposed.
 
 | Operation | macOS: Hypervisor.framework | Linux: KVM | Windows: WHP |
 | --- | --- | --- | --- |
