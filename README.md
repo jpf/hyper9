@@ -16,7 +16,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [baseline](design/0000-baseline.md) | implemented |  | Baseline (h9 before proposals) |
 | [proposals](design/0001-proposals.md) | implemented |  | Proposals replace milestones and the design changelog |
 | [semaphores](design/0003-semaphores.md) | accepted | ready | rendezvous and semaphores |
-| [segattach](design/0004-segattach.md) | draft |  | segattach and shared segments |
+| [segattach](design/0004-segattach.md) | accepted | ready | segattach and shared segments |
 | [net-policy](design/0005-net-policy.md) | draft |  | Outbound-only network by default, and --net-allow |
 | [ephemeral-writes](design/0006-ephemeral-writes.md) | draft |  | Ephemeral writes and a private /tmp |
 | [go-compat](design/0007-go-compat.md) | draft | needs semaphores | Go compatibility |
@@ -45,7 +45,7 @@ flowchart LR
   p_baseline["baseline<br/>implemented"]:::implemented
   p_proposals["#35;1 proposals<br/>implemented"]:::implemented
   p_semaphores["#35;3 semaphores<br/>accepted"]:::accepted
-  p_segattach["#35;4 segattach<br/>draft"]:::draft
+  p_segattach["#35;4 segattach<br/>accepted"]:::accepted
   p_net_policy["#35;5 net-policy<br/>draft"]:::draft
   p_ephemeral_writes["#35;6 ephemeral-writes<br/>draft"]:::draft
   p_go_compat["#35;7 go-compat<br/>draft"]:::draft
