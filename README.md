@@ -17,6 +17,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [proposals](design/0001-proposals.md) | implemented |  | Proposals replace milestones and the design changelog |
 | [semaphores](design/0003-semaphores.md) | draft |  | rendezvous and semaphores |
 | [segattach](design/0004-segattach.md) | draft |  | segattach and shared segments |
+| [net-policy](design/0005-net-policy.md) | draft |  | Outbound-only network by default, and --net-allow |
 | [9p-roots](design/9p-roots.md) | draft |  | 9P roots |
 | [browser-host](design/browser-host.md) | draft | needs i386 | A browser host on wasm, with v86 |
 | [ci](design/ci.md) | draft |  | Continuous integration |
@@ -30,7 +31,6 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [image-roots](design/image-roots.md) | draft | needs devsrv, 9p-roots | Disk-image roots |
 | [kvm](design/kvm.md) | draft |  | KVM backend |
 | [linux-personality](design/linux-personality.md) | draft |  | Linux personality |
-| [net-policy](design/net-policy.md) | draft |  | Outbound-only network by default, and --net-allow |
 | [overlay](design/overlay.md) | draft | needs ephemeral-writes | Copy-on-write overlay as the root's default |
 | [self-host](design/self-host.md) | draft |  | Self-hosting |
 | [whp](design/whp.md) | draft |  | WHP backend |
@@ -46,6 +46,7 @@ flowchart LR
   p_proposals["#35;1 proposals<br/>implemented"]:::implemented
   p_semaphores["#35;3 semaphores<br/>draft"]:::draft
   p_segattach["#35;4 segattach<br/>draft"]:::draft
+  p_net_policy["#35;5 net-policy<br/>draft"]:::draft
   p_9p_roots["9p-roots<br/>draft"]:::draft
   p_browser_host["browser-host<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
@@ -59,7 +60,6 @@ flowchart LR
   p_image_roots["image-roots<br/>draft"]:::draft
   p_kvm["kvm<br/>draft"]:::draft
   p_linux_personality["linux-personality<br/>draft"]:::draft
-  p_net_policy["net-policy<br/>draft"]:::draft
   p_overlay["overlay<br/>draft"]:::draft
   p_self_host["self-host<br/>draft"]:::draft
   p_whp["whp<br/>draft"]:::draft
@@ -263,7 +263,7 @@ h9 --strict --write=overlay mk      # exit 2: overlay isn't enforced yet
 | `--readable PATH`, `--writable PATH` | Bind a host path read-only or read-write; outside the root and cwd it appears at `/mnt/term/PATH` |
 | `--read-deny PATH` | Hide a host path, even inside a bound tree |
 | `--write none\|scope` | Deny all writes, or allow them only in writable paths (`ephemeral` and `overlay` are [proposed](design/README.md) and deny writes for now) |
-| `--net disable\|enable` | Mask `#I`, or leave it (`outbound` is [proposed](design/net-policy.md)) |
+| `--net disable\|enable` | Mask `#I`, or leave it (`outbound` is [proposed](design/0005-net-policy.md)) |
 | `--memory SIZE`, `--timeout DURATION` | Cap guest memory (`512m`); post `hangup` after a deadline (`30s`, `1m`) and stop the machine 2 s later |
 | `--pids N`, `--cpus N` | Cap live processes (rfork fails with "no procs"); cap vCPUs running guest code at once |
 | `--host-fs`, `--host-cmd` | Show the whole host read-only at `/mnt/term`; unmask devcmd |

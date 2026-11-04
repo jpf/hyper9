@@ -24,7 +24,7 @@ pub const WriteMode = enum {
 
 pub const NetMode = enum {
     disable,
-    /// Clients work, `announce` is refused (design/net-policy.md; not enforced yet).
+    /// Clients work, `announce` is refused (design/0005-net-policy.md; not enforced yet).
     outbound,
     enable,
 };

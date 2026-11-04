@@ -165,7 +165,7 @@ h9's host process already sits where the Sentry would.
 
 ## Security
 
-- **The guest reaches nothing new on the host.** Every Linux call is served by drawterm's kernel through the same namespace, device mask and policy hooks. Sockets go through devip, so `net.disable` and, once built, [net-policy](net-policy.md) apply.
+- **The guest reaches nothing new on the host.** Every Linux call is served by drawterm's kernel through the same namespace, device mask and policy hooks. Sockets go through devip, so `net.disable` and, once built, [net-policy](0005-net-policy.md) apply.
 - **`rt_sigreturn`** must sanitize the restored state exactly as `noted` does (see Signals). It gets its own tests, including a forged frame that asks for EL1, or for kernel selectors on amd64.
 - **Symlink resolution inside a root** must never step above the bound tree, and must still pass the resolved path through `h9_fs_check`. The existing escape tests in `tests/integration.zig` get Linux-root variants.
 - **The synthetic `/proc`** must not reveal host details beyond what the policy already does. `/proc/cpuinfo` and `/proc/meminfo` report the machine's limits (`--cpus`, `--memory`), not the host's. `/proc/<pid>/exe` shows guest paths.
