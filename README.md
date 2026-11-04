@@ -24,8 +24,8 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [i386](design/0009-i386.md) | draft |  | 386 binaries |
 | [self-host](design/0010-self-host.md) | draft |  | Self-hosting |
 | [overlay](design/0011-overlay.md) | draft | needs ephemeral-writes | Copy-on-write overlay as the root's default |
+| [browser-host](design/0012-browser-host.md) | draft | needs i386 | A browser host on wasm, with v86 |
 | [9p-roots](design/9p-roots.md) | draft | needs semaphores | 9P roots |
-| [browser-host](design/browser-host.md) | draft | needs i386 | A browser host on wasm, with v86 |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [gfx](design/gfx.md) | draft | needs devsrv | Graphics (--gfx) |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
@@ -53,8 +53,8 @@ flowchart LR
   p_i386["#35;9 i386<br/>draft"]:::draft
   p_self_host["#35;10 self-host<br/>draft"]:::draft
   p_overlay["#35;11 overlay<br/>draft"]:::draft
+  p_browser_host["#35;12 browser-host<br/>draft"]:::draft
   p_9p_roots["9p-roots<br/>draft"]:::draft
-  p_browser_host["browser-host<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
   p_gfx["gfx<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
@@ -67,8 +67,8 @@ flowchart LR
   p_semaphores --> p_go_compat
   p_semaphores --> p_devsrv
   p_ephemeral_writes --> p_overlay
-  p_semaphores --> p_9p_roots
   p_i386 --> p_browser_host
+  p_semaphores --> p_9p_roots
   p_devsrv --> p_gfx
   p_kvm --> p_host_sandbox
   p_whp --> p_host_sandbox
