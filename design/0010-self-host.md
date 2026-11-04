@@ -11,6 +11,8 @@ areas: [kern, vmm, tests]
 
 # Proposal: self-hosting
 
+Nov 3, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 The 9front compilers, linkers and mk already run inside h9 and rebuild all of `/sys/src`. This proposal makes that a tested, documented capability. It also adds what acid needs to debug a live process: `/proc/n/mem`, `regs`, `fpregs`, `text` and `segment`, the `ctl` stop and start messages, and breakpoint traps.

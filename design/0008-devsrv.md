@@ -11,8 +11,6 @@ areas: [kern]
 
 # Proposal: devsrv, /srv and mount
 
-Nov 4, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
-
 ## Abstract
 
 Guest file servers can post themselves and be mounted:

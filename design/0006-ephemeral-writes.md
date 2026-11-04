@@ -2,7 +2,7 @@
 id: 6
 slug: ephemeral-writes
 title: Ephemeral writes and a private /tmp
-status: draft
+status: accepted
 created: 2026-11-03
 authors: [progrium]
 depends: []

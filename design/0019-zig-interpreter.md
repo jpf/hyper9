@@ -11,8 +11,6 @@ areas: [vmm, build, tests]
 
 # Proposal: a native Zig interpreter for the emulator
 
-Nov 3, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
-
 ## Abstract
 
 A second emulator backend, written in Zig: MIT, dependency-free and deterministic, covering the instructions 9front's compilers and libc's assembly routines emit, arm64 first. It would let the emulator ship in the MIT `h9` build, which Unicorn's GPLv2 prevents. It implements the existing vmm contract unchanged, is checked instruction by instruction against Unicorn, and keeps its core free of host-specific code, so that it can later run where no JIT can, such as wasm.

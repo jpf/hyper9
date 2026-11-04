@@ -11,8 +11,6 @@ areas: [sandbox, cli, kern]
 
 # Proposal: outbound-only network by default, and --net-allow
 
-Nov 4, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
-
 ## Abstract
 
 Enforce `--net=outbound` and make it the default profile's setting: guests can dial out but not announce. Add `--net-allow PATTERN`, an egress allowlist of dial-string patterns that devip checks on every `connect`, with addresses, CIDR ranges, `*`, or host names. Without patterns, `connect` still refuses link-local addresses, which keeps cloud metadata endpoints out of reach. Name patterns are also enforced at devip's built-in `cs`, so a guest can't make the host resolve names the allowlist doesn't cover. Enforcement is a leaf hook in devip, like devfs's `h9_fs_check`: the same on every vmm backend and every host, with no host firewall involved.

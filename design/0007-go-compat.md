@@ -11,8 +11,6 @@ areas: [kern, tests]
 
 # Proposal: Go compatibility
 
-Nov 4, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
-
 ## Abstract
 
 Run Go's `GOOS=plan9 GOARCH=amd64` binaries. Semaphores, from [semaphores](0003-semaphores.md), are the large missing piece. Four smaller ones are here:

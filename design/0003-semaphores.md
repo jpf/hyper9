@@ -11,6 +11,8 @@ areas: [kern]
 
 # Proposal: rendezvous and semaphores
 
+Nov 3, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 Serve `rendezvous`, `semacquire`, `tsemacquire` and `semrelease` with host kernel primitives built on drawterm's sleep/wakeup, so guest programs can synchronize. Go's runtime parks every lock on them.

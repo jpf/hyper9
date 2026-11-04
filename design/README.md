@@ -21,6 +21,12 @@ It isn't needed for bug fixes, workarounds, performance work that doesn't change
 
 The sections are Abstract, Background, Proposal, Rationale, Compatibility, Security, Done when, Implementation and Open issues, and, after acceptance, Updates. Rationale should cover the alternatives that were rejected, so the question isn't asked again. Done when names the demo commands and the integration cases that prove the proposal, the way the old milestone demos did.
 
+## Signature
+
+A proposal is signed with a line under its title: `Mon D, YYYY · Full Name, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>`. It's the named person's sign-off: they directed the work, reviewed it closely enough to understand and defend it, and take responsibility for it, however much of it AI wrote. Readers can trust that a person stands behind a signed doc.
+
+The signature is added by hand by the person it names, never by a tool or an agent. It's dated, and re-signed with a new date after significant changes. An unsigned draft usually hasn't been fully reviewed or understood by its `authors`, and an unsigned proposal is unlikely to be accepted. `check` doesn't enforce any of this. [DESIGN.md](../DESIGN.md) is signed the same way, by the person who last reviewed it as a whole.
+
 ## Filing and numbering
 
 A draft has only its slug, and its file is `design/<slug>.md`. `zig build design -- file <slug>` creates the GitHub issue (title `proposal: <title>`, the `Proposal` label, the Abstract and a link to the file as the body), renames the file to `design/NNNN-<slug>.md` with its `id` set to the issue number, rewrites references to the slug as the number and links to the old path, refreshes the README table, and commits. It asks first, as it creates the issue as the account `gh` is logged in as; `--dry-run` shows what it would do, and `--yes` skips the question. `--issue N` numbers the draft for an issue that already exists, without touching GitHub.

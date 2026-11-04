@@ -18,12 +18,12 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [semaphores](design/0003-semaphores.md) | accepted | ready | rendezvous and semaphores |
 | [segattach](design/0004-segattach.md) | accepted | ready | segattach and shared segments |
 | [net-policy](design/0005-net-policy.md) | draft |  | Outbound-only network by default, and --net-allow |
-| [ephemeral-writes](design/0006-ephemeral-writes.md) | draft |  | Ephemeral writes and a private /tmp |
+| [ephemeral-writes](design/0006-ephemeral-writes.md) | accepted | ready | Ephemeral writes and a private /tmp |
 | [go-compat](design/0007-go-compat.md) | draft | needs semaphores | Go compatibility |
 | [devsrv](design/0008-devsrv.md) | draft | needs semaphores | devsrv, /srv and mount |
-| [i386](design/0009-i386.md) | draft |  | 386 binaries |
+| [i386](design/0009-i386.md) | accepted | ready | 386 binaries |
 | [self-host](design/0010-self-host.md) | draft |  | Self-hosting |
-| [overlay](design/0011-overlay.md) | draft | needs ephemeral-writes | Copy-on-write overlay as the root's default |
+| [overlay](design/0011-overlay.md) | accepted | needs ephemeral-writes | Copy-on-write overlay as the root's default |
 | [browser-host](design/0012-browser-host.md) | draft | needs i386 | A browser host on wasm, with v86 |
 | [9p-roots](design/0013-9p-roots.md) | draft | needs semaphores | 9P roots |
 | [image-roots](design/0014-image-roots.md) | draft | needs devsrv, 9p-roots | Disk-image roots |
@@ -47,12 +47,12 @@ flowchart LR
   p_semaphores["#35;3 semaphores<br/>accepted"]:::accepted
   p_segattach["#35;4 segattach<br/>accepted"]:::accepted
   p_net_policy["#35;5 net-policy<br/>draft"]:::draft
-  p_ephemeral_writes["#35;6 ephemeral-writes<br/>draft"]:::draft
+  p_ephemeral_writes["#35;6 ephemeral-writes<br/>accepted"]:::accepted
   p_go_compat["#35;7 go-compat<br/>draft"]:::draft
   p_devsrv["#35;8 devsrv<br/>draft"]:::draft
-  p_i386["#35;9 i386<br/>draft"]:::draft
+  p_i386["#35;9 i386<br/>accepted"]:::accepted
   p_self_host["#35;10 self-host<br/>draft"]:::draft
-  p_overlay["#35;11 overlay<br/>draft"]:::draft
+  p_overlay["#35;11 overlay<br/>accepted"]:::accepted
   p_browser_host["#35;12 browser-host<br/>draft"]:::draft
   p_9p_roots["#35;13 9p-roots<br/>draft"]:::draft
   p_image_roots["#35;14 image-roots<br/>draft"]:::draft

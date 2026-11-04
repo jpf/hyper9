@@ -272,3 +272,4 @@ This proposal is decided under the current process, since the new one doesn't ex
   - `check` refuses test tags not written as `[a, b]`, since `zig build proposal -Dp` matches them by text, and `fix` rewrites them.
   - `file` also rewrites links to the draft's old path (`design/<slug>.md` in any tracked file, and `](<slug>.md` within `design/`), refreshes the README table, and commits a draft that was never committed.
   - The Done when item for `file` is met with `--issue N`, which numbers a draft offline. `--dry-run` changes nothing, as its name says.
+- 2026-11-04: The signature line under a proposal's title (`date · name, h.d.a.`) is documented under Signature in [README.md](README.md): it's the named person's hand-added sign-off that they reviewed the doc, understand it and take responsibility for it. It isn't enforced by tools, but unsigned proposals are unlikely to be accepted, and agents never add it.

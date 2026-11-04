@@ -11,8 +11,6 @@ areas: [cli, kern, sandbox]
 
 # Proposal: 9P roots
 
-Nov 4, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
-
 ## Abstract
 
 `--root` takes a 9P server as well as a host directory: a dial string (`tcp!fs.example!564`) or a unix socket (`unix!/run/fs.sock`, or the socket's path). h9 connects before the program starts and mounts the server through devmnt as the guest's `/`. Everything else in the namespace, the cwd, `/mnt/term`, `/dev` and the rest, is bound over it as over a host tree. Programs are looked up and loaded through the kernel, so they run from the server unchanged.
