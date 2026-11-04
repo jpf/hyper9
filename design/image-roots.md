@@ -4,7 +4,7 @@ title: Disk-image roots
 status: draft
 created: 2026-11-03
 authors: [progrium]
-depends: [devsrv, 9p-roots]
+depends: [8, 9p-roots]
 areas: [cli, kern]
 ---
 
@@ -22,7 +22,7 @@ From DESIGN.md's root filesystem list, the third of three:
 
 3. **Disk image:** cwfs or gefs runs as a guest process over an image file exposed as a host file, and posts to `#s`. This is also a good stress test of the process model.
 
-It posts through [devsrv](devsrv.md), and the root is mounted as a [9P root](9p-roots.md) is.
+It posts through [devsrv](0008-devsrv.md), and the root is mounted as a [9P root](9p-roots.md) is.
 
 ## Done when
 

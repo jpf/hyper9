@@ -174,7 +174,7 @@ h9 --net-allow 'tcp!10.0.0.0/8!564' --rc 'srv tcp!10.0.0.5!564 fs'   # egress to
 h9 --net-allow 'tcp!*.example.com!443' myclient              # by name, through cs
 ```
 
-The second example needs [devsrv](devsrv.md) for `srv` to post to `/srv`; the connect it makes is allowed today.
+The second example needs [devsrv](0008-devsrv.md) for `srv` to post to `/srv`; the connect it makes is allowed today.
 
 ## Rationale
 

@@ -39,7 +39,7 @@ int clipwrite(char *s) { USED(s); return 0; }
 /* Compose sequences only matter for GUI keyboard input. */
 long latin1(Rune *k, int n) { USED(k, n); return -1; }
 
-/* devtls's factotum path; there's no factotum until devsrv (design/devsrv.md). */
+/* devtls's factotum path; there's no factotum until devsrv (design/0008-devsrv.md). */
 void *auth_allocrpc(int afd) { USED(afd); werrstr("no factotum"); return nil; }
 void auth_freerpc(void *rpc) { USED(rpc); }
 int auth_rpc(void *rpc, char *verb, void *a, int n) { USED(rpc, verb, a, n); return -1; }

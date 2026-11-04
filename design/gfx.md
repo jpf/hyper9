@@ -4,7 +4,7 @@ title: Graphics (--gfx)
 status: draft
 created: 2026-11-03
 authors: [progrium]
-depends: [devsrv]
+depends: [8]
 areas: [cli, kern]
 ---
 
@@ -20,7 +20,7 @@ This was milestone M7 in DESIGN.md, before milestones became proposals ([#1](000
 
 **Graphics (`--gfx`):** opens one host window through drawterm's GUI backend (Cocoa/Metal, X11 or Wayland, Win32) and serves `/dev/draw`, `/dev/mouse` and `/dev/kbd`, plus snarf mapped to the host clipboard. One screen per machine: running rio gives the full desktop. A seamless mode, where each rio window becomes a host window, is a later project.
 
-devdraw, devmouse and the GUI backends are vendored from drawterm already; kern is built today with no-op GUI stubs in `src/kern/glue.c`. rio posts its file server to `/srv`, hence [devsrv](devsrv.md).
+devdraw, devmouse and the GUI backends are vendored from drawterm already; kern is built today with no-op GUI stubs in `src/kern/glue.c`. rio posts its file server to `/srv`, hence [devsrv](0008-devsrv.md).
 
 | Flag | Meaning |
 | --- | --- |
