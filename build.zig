@@ -14,7 +14,7 @@ const kern_sources = [_][]const u8{
     "pgrp.c",     "procinit.c",      "rwlock.c", "sleep.c",    "stub.c",
     "sysfile.c",  "qio.c",           "qlock.c",  "term.c",     "waserror.c",
 };
-// drawterm files that post notes, built so their notes reach hp9's note
+// drawterm files that post notes, built so their notes reach h9's note
 // queue (src/kern/proc.c) instead of drawterm's postnote.
 const kern_notes = [_][]const u8{"devpipe.c"};
 // OS=posix (Make.unix), and OS=win32 with FS=fs-win32 (Make.win64).
@@ -103,15 +103,15 @@ const kern_flags_win32 = kern_flags ++ [_][]const u8{ "-DWINDOWS", "-DUNICODE" }
 
 /// Zig's own macOS SDK detection runs xcodebuild, which fails in some
 /// environments; SDKROOT (set by scripts/env.sh) is used when present.
-/// Runs tests/integration.zig against the hp9 binary. `filters` selects
+/// Runs tests/integration.zig against the h9 binary. `filters` selects
 /// cases by name; with `pending`, cases for a milestone not yet done (named
 /// "M5: ..." and so on) run instead of skipping.
-fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, hp9_bin: []const u8, root: []const u8, backends: []const u8, pending: bool) *std.Build.Step.Run {
+fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, h9_bin: []const u8, root: []const u8, backends: []const u8, pending: bool) *std.Build.Step.Run {
     const run = b.addRunArtifact(integrationTests(b, b.graph.host, optimize, filters));
-    run.setEnvironmentVariable("HP9_TEST_BIN", hp9_bin);
-    run.setEnvironmentVariable("HP9_TEST_ROOT", root);
-    run.setEnvironmentVariable("HP9_TEST_BACKENDS", backends);
-    if (pending) run.setEnvironmentVariable("HP9_TEST_PENDING", "1");
+    run.setEnvironmentVariable("H9_TEST_BIN", h9_bin);
+    run.setEnvironmentVariable("H9_TEST_ROOT", root);
+    run.setEnvironmentVariable("H9_TEST_BACKENDS", backends);
+    if (pending) run.setEnvironmentVariable("H9_TEST_PENDING", "1");
     run.has_side_effects = true;
     return run;
 }
@@ -210,7 +210,7 @@ fn addUnicornSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         b.getInstallStep().dependOn(&b.addFail("-Dunicorn=source: no config for this target in third_party/unicorn/config").step);
         return null;
     }
-    if (b.build_root.handle.access(b.graph.io, unicorn_src.src_dir ++ "/.hp9-stamp", .{})) {} else |_| {
+    if (b.build_root.handle.access(b.graph.io, unicorn_src.src_dir ++ "/.h9-stamp", .{})) {} else |_| {
         b.getInstallStep().dependOn(&b.addFail(unicorn_src.src_dir ++ " is missing; run scripts/fetch.sh").step);
         return null;
     }
@@ -278,12 +278,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const os = target.result.os.tag;
-    var emu = b.option(Emu, "emu", "Emulator backend to build in (GPLv2 Unicorn: dev, CI and the hp9-emu release only)") orelse .none;
+    var emu = b.option(Emu, "emu", "Emulator backend to build in (GPLv2 Unicorn: dev, CI and the h9-emu release only)") orelse .none;
     // No wheel exists for Windows, so it always builds from source.
     const unicorn_from = b.option(UnicornFrom, "unicorn", "With -Demu=unicorn: the prebuilt wheel library or a source build (default: prebuilt, source on Windows)") orelse
         if (os == .windows) UnicornFrom.source else .prebuilt;
 
-    const mod = b.addModule("hp9", .{
+    const mod = b.addModule("h9", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
@@ -321,7 +321,7 @@ pub fn build(b: *std.Build) void {
     kern.root_module.addCSourceFiles(.{
         .root = b.path(drawterm ++ "/kern"),
         .files = &kern_notes,
-        .flags = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{"-Dpostnote=hp9_postnote"} }) catch @panic("OOM"),
+        .flags = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{"-Dpostnote=h9_postnote"} }) catch @panic("OOM"),
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path(drawterm ++ "/kern"),
@@ -341,7 +341,7 @@ pub fn build(b: *std.Build) void {
     // Zig's bundled musl memccpy is broken; see src/kern/memccpy.c.
     if (target.result.abi.isMusl()) {
         kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"memccpy.c"}, .flags = flags });
-        kern.root_module.addCMacro("memccpy", "hp9_memccpy");
+        kern.root_module.addCMacro("memccpy", "h9_memccpy");
     }
     if (os == .windows) {
         kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"glue-win32.c"}, .flags = flags });
@@ -361,7 +361,7 @@ pub fn build(b: *std.Build) void {
     }
     const build_kern = have_drawterm;
     kern_step.dependOn(&kern.step);
-    // Everything that imports the hp9 module links kern.
+    // Everything that imports the h9 module links kern.
     mod.linkLibrary(kern);
 
     const options = b.addOptions();
@@ -369,7 +369,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "kern", build_kern);
     // For --version: scripts/release.sh passes -Dversion; otherwise git
     // describe, or build.zig.zon's version where there's no git checkout.
-    options.addOption([]const u8, "version", b.option([]const u8, "version", "Version hp9 --version reports (default: git describe, else build.zig.zon's)") orelse gitVersion(b));
+    options.addOption([]const u8, "version", b.option([]const u8, "version", "Version h9 --version reports (default: git describe, else build.zig.zon's)") orelse gitVersion(b));
     const pins = b.build_root.handle.readFileAlloc(b.graph.io, "scripts/pins.sh", b.allocator, .limited(1 << 16)) catch "";
     options.addOption([]const u8, "ninefront_release", pin(pins, "NINEFRONT_RELEASE"));
     options.addOption([]const u8, "ninefront_rev", pin(pins, "NINEFRONT_REV"));
@@ -377,13 +377,13 @@ pub fn build(b: *std.Build) void {
     mod.addOptions("build_options", options);
 
     const exe = b.addExecutable(.{
-        .name = "hp9",
+        .name = "h9",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "hp9", .module = mod },
+                .{ .name = "h9", .module = mod },
                 // --check runs the hello fixture on each backend.
                 .{ .name = "hello", .module = b.createModule(.{ .root_source_file = b.path("tests/fixtures/hello.zig"), .target = target }) },
             },
@@ -403,7 +403,7 @@ pub fn build(b: *std.Build) void {
     var signed_step = &install_exe.step;
     if (os == .macos and b.graph.host.result.os.tag == .macos) {
         const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", "--entitlements" });
-        sign.addFileArg(b.path("hp9.entitlements"));
+        sign.addFileArg(b.path("h9.entitlements"));
         sign.addArg(b.getInstallPath(.bin, exe.out_filename));
         sign.step.dependOn(&install_exe.step);
         b.getInstallStep().dependOn(&sign.step);
@@ -413,7 +413,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addSystemCommand(&.{b.getInstallPath(.bin, exe.out_filename)});
     run_cmd.step.dependOn(signed_step);
     if (b.args) |args| run_cmd.addArgs(args);
-    b.step("run", "Run hp9").dependOn(&run_cmd.step);
+    b.step("run", "Run h9").dependOn(&run_cmd.step);
 
     // M0/M1 fixtures: hand-assembled hello a.outs for arm64 and amd64.
     const mkhello = b.addExecutable(.{
@@ -438,7 +438,7 @@ pub fn build(b: *std.Build) void {
     // The M0 and M1 demos: the host architecture's hello on the default
     // backend, and on the emulator when it's built in.
     const host_hello = if (target.result.cpu.arch == .x86_64) hellos[1] else hellos[0];
-    const m1_step = b.step("m1", "Run the M0 and M1 demos: hp9 ./hello, and hp9 --backend emu ./hello with -Demu=unicorn");
+    const m1_step = b.step("m1", "Run the M0 and M1 demos: h9 ./hello, and h9 --backend emu ./hello with -Demu=unicorn");
     const m0 = b.addSystemCommand(&.{b.getInstallPath(.bin, exe.out_filename)});
     m0.addFileArg(host_hello);
     m0.expectStdOutEqual("hello\n");
@@ -455,18 +455,18 @@ pub fn build(b: *std.Build) void {
     // M2 and later run real 9front binaries from a host root tree.
     const root = b.option([]const u8, "root", "9front root tree for the M2 demo and integration tests (default .local/9front/root)") orelse
         b.pathFromRoot(".local/9front/root");
-    const hp9_bin = b.getInstallPath(.bin, exe.out_filename);
+    const h9_bin = b.getInstallPath(.bin, exe.out_filename);
 
-    const m2 = b.addSystemCommand(&.{ hp9_bin, "--root", root, "/bin/cat", "/lib/namespace" });
+    const m2 = b.addSystemCommand(&.{ h9_bin, "--root", root, "/bin/cat", "/lib/namespace" });
     m2.expectStdOutEqual(b.build_root.handle.readFileAlloc(b.graph.io, b.pathJoin(&.{ root, "lib/namespace" }), b.allocator, .limited(1 << 20)) catch "(no root tree; run scripts/mkroot.py)");
     m2.step.dependOn(signed_step);
-    const m2_step = b.step("m2", "Run the M2 demo: hp9 /bin/cat /lib/namespace, and a write under --profile=tight fails (needs a root tree)");
+    const m2_step = b.step("m2", "Run the M2 demo: h9 /bin/cat /lib/namespace, and a write under --profile=tight fails (needs a root tree)");
     m2_step.dependOn(&m2.step);
     // The tight profile's cwd is read-only, so rc's redirection fails. The
     // cwd is a fresh directory, so nothing is left behind if it doesn't.
     const m2_cwd = b.addWriteFiles();
     _ = m2_cwd.add(".keep", "");
-    const m2_tight = b.addSystemCommand(&.{ hp9_bin, "--root", root, "--profile=tight", "--cwd" });
+    const m2_tight = b.addSystemCommand(&.{ h9_bin, "--root", root, "--profile=tight", "--cwd" });
     m2_tight.addDirectoryArg(m2_cwd.getDirectory());
     m2_tight.addArgs(&.{ "--rc", "echo x > /mnt/term/cwd/f" });
     m2_tight.expectExitCode(1);
@@ -476,10 +476,10 @@ pub fn build(b: *std.Build) void {
 
     // The M3 demo: ls prints each member of the /bin union, duplicates and
     // all, so the count is the two directories' entries added together.
-    const m3 = b.addSystemCommand(&.{ hp9_bin, "--root", root, "--rc", "ls /bin | wc -l" });
+    const m3 = b.addSystemCommand(&.{ h9_bin, "--root", root, "--rc", "ls /bin | wc -l" });
     m3.expectStdOutEqual(if (countBin(b, root)) |n| b.fmt("{d: >7}\n", .{n}) else "(no root tree; run scripts/mkroot.py)");
     m3.step.dependOn(signed_step);
-    const m3_step = b.step("m3", "Run the M3 demo, hp9 --rc 'ls /bin | wc -l', and the M3 integration cases (needs a root tree)");
+    const m3_step = b.step("m3", "Run the M3 demo, h9 --rc 'ls /bin | wc -l', and the M3 integration cases (needs a root tree)");
     m3_step.dependOn(&m3.step);
 
     // Each integration case runs on every backend built in that runs arm64 here.
@@ -488,13 +488,13 @@ pub fn build(b: *std.Build) void {
     if (emu == .unicorn) backends.appendSlice(b.allocator, "emu,") catch @panic("OOM");
     const backend_list = if (backends.items.len > 0) backends.items else "auto";
 
-    // Runs real binaries through the hp9 CLI; skipped without a root tree.
+    // Runs real binaries through the h9 CLI; skipped without a root tree.
     // Cases for the milestone in progress ("M5: ...") skip here until it's
     // done. zig build m3 runs the M3 cases, tagged "(M3" in their names.
-    const run_integration = addIntegration(b, optimize, &.{}, hp9_bin, root, backend_list, false);
+    const run_integration = addIntegration(b, optimize, &.{}, h9_bin, root, backend_list, false);
     run_integration.step.dependOn(signed_step);
-    b.step("integration", "Run real 9front binaries from the root tree through hp9").dependOn(&run_integration.step);
-    const run_m3_cases = addIntegration(b, optimize, &.{"(M3"}, hp9_bin, root, backend_list, false);
+    b.step("integration", "Run real 9front binaries from the root tree through h9").dependOn(&run_integration.step);
+    const run_m3_cases = addIntegration(b, optimize, &.{"(M3"}, h9_bin, root, backend_list, false);
     run_m3_cases.step.dependOn(signed_step);
     m3_step.dependOn(&run_m3_cases.step);
 
@@ -502,7 +502,7 @@ pub fn build(b: *std.Build) void {
     // pty (ConPTY on Windows) from tests/term.zig, as the other M4 cases,
     // tagged "(M4" in their names, do, so zig build m4 is those cases.
     const m4_step = b.step("m4", "Run the M4 demo (kill and ps in an interactive rc, on a pty) and the M4 integration cases (needs a root tree)");
-    const run_m4_cases = addIntegration(b, optimize, &.{"(M4"}, hp9_bin, root, backend_list, false);
+    const run_m4_cases = addIntegration(b, optimize, &.{"(M4"}, h9_bin, root, backend_list, false);
     run_m4_cases.step.dependOn(signed_step);
     m4_step.dependOn(&run_m4_cases.step);
 
@@ -515,7 +515,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "hp9", .module = mod },
+            .{ .name = "h9", .module = mod },
             .{ .name = "hello", .module = b.createModule(.{ .root_source_file = b.path("tests/fixtures/hello.zig"), .target = target }) },
         },
     }) });
@@ -527,11 +527,11 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);
-    // HVF needs the entitlement, so the test binary is signed like hp9.
+    // HVF needs the entitlement, so the test binary is signed like h9.
     const run_backend_tests = b.addRunArtifact(backend_tests);
     if (os == .macos and b.graph.host.result.os.tag == .macos) {
         const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", "--entitlements" });
-        sign.addFileArg(b.path("hp9.entitlements"));
+        sign.addFileArg(b.path("h9.entitlements"));
         sign.addFileArg(backend_tests.getEmittedBin());
         run_backend_tests.step.dependOn(&sign.step);
     }
@@ -539,14 +539,14 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_integration.step);
 
     // The speed numbers in DESIGN.md's "Limits and selection". Always
-    // ReleaseFast (the hp9 module inherits it), whatever -Doptimize says.
+    // ReleaseFast (the h9 module inherits it), whatever -Doptimize says.
     const bench = b.addExecutable(.{
         .name = "bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/bench.zig"),
             .target = target,
             .optimize = .ReleaseFast,
-            .imports = &.{.{ .name = "hp9", .module = mod }},
+            .imports = &.{.{ .name = "h9", .module = mod }},
         }),
     });
     if (os == .macos) {
@@ -558,7 +558,7 @@ pub fn build(b: *std.Build) void {
     run_bench.has_side_effects = true;
     if (os == .macos and b.graph.host.result.os.tag == .macos) {
         const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", "--entitlements" });
-        sign.addFileArg(b.path("hp9.entitlements"));
+        sign.addFileArg(b.path("h9.entitlements"));
         sign.addFileArg(bench.getEmittedBin());
         run_bench.step.dependOn(&sign.step);
     }

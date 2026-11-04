@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Lima VMs for testing hp9's emu backend: linux, macos and windows (arm64)
+# Lima VMs for testing h9's emu backend: linux, macos and windows (arm64)
 # and linux-amd64 (emulated x86_64). Instances live in .local/lima (their
 # LIMA_HOME).
 #
@@ -8,14 +8,14 @@
 #   scripts/lima/vm rm <os>            delete it
 #   scripts/lima/vm status             list the VMs
 #   scripts/lima/vm shell <os> [cmd]   ssh into it (cmd.exe on windows)
-#   scripts/lima/vm push <os> file...  copy files into ~/hp9 in the guest
-#   scripts/lima/vm push-root <os> [-f] copy the 9front root tree into ~/hp9/root
+#   scripts/lima/vm push <os> file...  copy files into ~/h9 in the guest
+#   scripts/lima/vm push-root <os> [-f] copy the 9front root tree into ~/h9/root
 #   scripts/lima/vm test <os> [backend|integration]...
 #                                      push zig-out/<os> and the root tree, then
 #                                      run the backend and integration tests
 #
-# Env: WIN_ISO (Windows 11 Arm64 installer ISO); HP9_TEST_PENDING and
-# HP9_TEST_SLOW are passed to the integration tests.
+# Env: WIN_ISO (Windows 11 Arm64 installer ISO); H9_TEST_PENDING and
+# H9_TEST_SLOW are passed to the integration tests.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -70,8 +70,8 @@ cmd_push() {
 	local os=$1; shift
 	[[ $# -gt 0 ]] || die "usage: scripts/lima/vm push <os> file..."
 	need_running "$os"
-	ssh_ "$os" mkdir hp9 </dev/null >/dev/null 2>&1 || true
-	scp_ "$os" "$@" "lima-$os:hp9/" </dev/null
+	ssh_ "$os" mkdir h9 </dev/null >/dev/null 2>&1 || true
+	scp_ "$os" "$@" "lima-$os:h9/" </dev/null
 }
 
 # The root tree from scripts/mkroot.py, streamed as one tar over ssh (it's
@@ -87,15 +87,15 @@ cmd_push_root() {
 	local stamp; stamp="$(basename "$real") $(stat -f %m "$real" 2>/dev/null || stat -c %Y "$real")"
 	local have
 	if [[ "$os" == windows ]]; then
-		have="$(ssh_ "$os" type 'hp9\root\.hp9-root' 2>/dev/null </dev/null | tr -d '\r' | sed 's/ *$//' || true)"
+		have="$(ssh_ "$os" type 'h9\root\.h9-root' 2>/dev/null </dev/null | tr -d '\r' | sed 's/ *$//' || true)"
 	else
-		have="$(ssh_ "$os" cat hp9/root/.hp9-root 2>/dev/null </dev/null || true)"
+		have="$(ssh_ "$os" cat h9/root/.h9-root 2>/dev/null </dev/null || true)"
 	fi
 	if [[ -z "$force" && "$have" == "$stamp" ]]; then
-		log "$os: hp9/root is up to date ($stamp)"
+		log "$os: h9/root is up to date ($stamp)"
 		return
 	fi
-	log "$os: copying $(basename "$real") into hp9/root"
+	log "$os: copying $(basename "$real") into h9/root"
 	if [[ "$os" == windows ]]; then
 		# NTFS can't hold rc's '"' and '""' scripts, and Windows tar decodes
 		# names in the ANSI code page, so non-ASCII names (just troff's
@@ -104,19 +104,19 @@ cmd_push_root() {
 		local skip=(--exclude '^rc/bin/"*')
 		while IFS= read -r f; do skip+=(--exclude "^${f#./}\$"); done < <(cd "$real" && LC_ALL=C find . -name '*[^ -~]*')
 		bsdtar -cf - --no-xattrs --no-mac-metadata --no-acls --no-fflags -C "$real" "${skip[@]}" $(ls -A "$real") |
-			ssh_ "$os" '(if exist hp9\root.tmp rmdir /s /q hp9\root.tmp) & mkdir hp9\root.tmp && tar -xf - -C hp9\root.tmp'
-		ssh_ "$os" "(echo $stamp)> hp9\\root.tmp\\.hp9-root && (if exist hp9\\root rmdir /s /q hp9\\root) & move hp9\\root.tmp hp9\\root >nul" </dev/null
+			ssh_ "$os" '(if exist h9\root.tmp rmdir /s /q h9\root.tmp) & mkdir h9\root.tmp && tar -xf - -C h9\root.tmp'
+		ssh_ "$os" "(echo $stamp)> h9\\root.tmp\\.h9-root && (if exist h9\\root rmdir /s /q h9\\root) & move h9\\root.tmp h9\\root >nul" </dev/null
 	else
 		bsdtar -cf - --no-xattrs --no-mac-metadata --no-acls --no-fflags -C "$real" . |
-			ssh_ "$os" 'set -e; mkdir -p hp9; rm -rf hp9/root.tmp; mkdir hp9/root.tmp; tar -xf - -C hp9/root.tmp'
-		ssh_ "$os" "set -e; echo '$stamp' > hp9/root.tmp/.hp9-root; rm -rf hp9/root; mv hp9/root.tmp hp9/root" </dev/null
+			ssh_ "$os" 'set -e; mkdir -p h9; rm -rf h9/root.tmp; mkdir h9/root.tmp; tar -xf - -C h9/root.tmp'
+		ssh_ "$os" "set -e; echo '$stamp' > h9/root.tmp/.h9-root; rm -rf h9/root; mv h9/root.tmp h9/root" </dev/null
 	fi
-	log "$os: hp9/root ready"
+	log "$os: h9/root ready"
 }
 
 # Runs the tests built by `zig build install install-tests -Demu=unicorn
 # --prefix zig-out/<os>` (plus -Dtarget, see README.md) in the guest, on
-# the emulator, against hp9/root. The test binaries get no terminal from
+# the emulator, against h9/root. The test binaries get no terminal from
 # ssh; the interactive cases make their own (tests/term.zig).
 cmd_test() {
 	local os=$1; shift
@@ -127,7 +127,7 @@ cmd_test() {
 	fi
 	local bin="$ROOT/zig-out/$os/bin" exe=""
 	[[ "$os" == windows ]] && exe=.exe
-	local files=("$bin/hp9$exe")
+	local files=("$bin/h9$exe")
 	for w in "${which[@]}"; do
 		case "$w" in backend|integration) files+=("$bin/$w-tests$exe") ;; *) die "unknown test set '$w' (want: backend integration)" ;; esac
 	done
@@ -136,22 +136,22 @@ cmd_test() {
 	[[ " ${which[*]} " == *" integration "* ]] && cmd_push_root "$os"
 	# Emulated x86_64 is about ten times slower than the others, and on
 	# Windows each guest process takes about 0.4 s to start.
-	local slow=${HP9_TEST_SLOW:-1}
-	if [[ -z "${HP9_TEST_SLOW:-}" ]]; then
+	local slow=${H9_TEST_SLOW:-1}
+	if [[ -z "${H9_TEST_SLOW:-}" ]]; then
 		case "$os" in linux-amd64) slow=10 ;; windows) slow=3 ;; esac
 	fi
-	local pend=${HP9_TEST_PENDING:-}
+	local pend=${H9_TEST_PENDING:-}
 	local status=0
 	for w in "${which[@]}"; do
 		log "$os: $w tests"
 		if [[ "$os" == windows ]]; then
-			local set="set HP9_TEST_BIN=%USERPROFILE%\\hp9\\hp9.exe&& set HP9_TEST_ROOT=%USERPROFILE%/hp9/root&& set HP9_TEST_BACKENDS=emu&& set HP9_TEST_SLOW=$slow&&"
-			[[ -n "$pend" ]] && set+=" set HP9_TEST_PENDING=1&&"
-			ssh_ "$os" "$set cd hp9 && $w-tests.exe" </dev/null || status=1
+			local set="set H9_TEST_BIN=%USERPROFILE%\\h9\\h9.exe&& set H9_TEST_ROOT=%USERPROFILE%/h9/root&& set H9_TEST_BACKENDS=emu&& set H9_TEST_SLOW=$slow&&"
+			[[ -n "$pend" ]] && set+=" set H9_TEST_PENDING=1&&"
+			ssh_ "$os" "$set cd h9 && $w-tests.exe" </dev/null || status=1
 		else
-			local vars="HP9_TEST_BIN=\$HOME/hp9/hp9 HP9_TEST_ROOT=\$HOME/hp9/root HP9_TEST_BACKENDS=emu HP9_TEST_SLOW=$slow"
-			[[ -n "$pend" ]] && vars+=" HP9_TEST_PENDING=1"
-			ssh_ "$os" "cd hp9 && env $vars ./$w-tests" </dev/null || status=1
+			local vars="H9_TEST_BIN=\$HOME/h9/h9 H9_TEST_ROOT=\$HOME/h9/root H9_TEST_BACKENDS=emu H9_TEST_SLOW=$slow"
+			[[ -n "$pend" ]] && vars+=" H9_TEST_PENDING=1"
+			ssh_ "$os" "cd h9 && env $vars ./$w-tests" </dev/null || status=1
 		fi
 	done
 	return $status

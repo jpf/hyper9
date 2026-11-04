@@ -1,4 +1,4 @@
-// hp9 arm64 guest shim. Runs at EL1 from the TTBR1 half of the address space.
+// h9 arm64 guest shim. Runs at EL1 from the TTBR1 half of the address space.
 //
 // SP_EL1 points at this vCPU's shared page, which starts with a Plan 9 Ureg.
 // Any exception saves the interrupted state there, records why it happened,

@@ -1,4 +1,4 @@
-# Minimal Windows guest setup for hp9 testing. Idempotent; run by
+# Minimal Windows guest setup for h9 testing. Idempotent; run by
 # `scripts/lima/vm up windows` (as the Lima admin user over ssh).
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -22,9 +22,9 @@ powercfg /change standby-timeout-ac 0
 powercfg /hibernate off
 
 # Real-time scanning of freshly copied test binaries slows every run.
-$hp9 = Join-Path $env:USERPROFILE 'hp9'
-New-Item -ItemType Directory -Force $hp9 | Out-Null
-Add-MpPreference -ExclusionPath $hp9 -ErrorAction SilentlyContinue
+$h9 = Join-Path $env:USERPROFILE 'h9'
+New-Item -ItemType Directory -Force $h9 | Out-Null
+Add-MpPreference -ExclusionPath $h9 -ErrorAction SilentlyContinue
 
 Step 'precompiling .NET Framework (ngen)'
 # Without native images PowerShell takes ~20s to start in this guest.

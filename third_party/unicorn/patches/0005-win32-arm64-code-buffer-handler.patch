@@ -1,6 +1,6 @@
 Subject: translate-all: vectored code buffer handler without a trampoline on arm64 Windows
 
-Part of hp9 (third_party/unicorn). Modifies Unicorn, so GPLv2 like it.
+Part of h9 (third_party/unicorn). Modifies Unicorn, so GPLv2 like it.
 
 diff --git a/qemu/accel/tcg/translate-all.c b/qemu/accel/tcg/translate-all.c
 index 71b6b2b..d508dcd 100644
@@ -14,7 +14,7 @@ index 71b6b2b..d508dcd 100644
 +/*
 + * arm64: a vectored handler only gets the exception pointers, and there's no
 + * x86 trampoline to bind uc to it, so live code buffers are kept in a list
-+ * and the handler looks the faulting address up in it. hp9 runs an engine
++ * and the handler looks the faulting address up in it. h9 runs an engine
 + * per guest process, so the list holds far more than a typical embedder's.
 + */
 +static SRWLOCK seh_lock = SRWLOCK_INIT;

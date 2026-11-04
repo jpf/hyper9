@@ -1,6 +1,6 @@
 /*
  * #p: /proc. Ported from 9front's port/devproc.c at the pinned release
- * (NINEFRONT_REV), serving hp9's process records (proc.c, hproc.h)
+ * (NINEFRONT_REV), serving h9's process records (proc.c, hproc.h)
  * instead of 9front's Proc table. See DESIGN.md, "Process model".
  *
  * A machine sees only its own processes: the directory lists and walks
@@ -88,7 +88,7 @@ extern int procfdprint(Chan*, int, int, char*, int);
 static Hmach*
 upmach(void)
 {
-	return hp9_uphproc()->mach;
+	return h9_uphproc()->mach;
 }
 
 /* The process the chan names, in the caller's machine, with a reference. */
@@ -97,7 +97,7 @@ chanproc(Chan *c)
 {
 	Hproc *h;
 
-	h = hp9_pidlookup(upmach(), PIDQ(c->qid));
+	h = h9_pidlookup(upmach(), PIDQ(c->qid));
 	if(h == nil)
 		error(Eprocdied);
 	return h;
@@ -127,15 +127,15 @@ procgen(Chan *c, char *name, Dirtab *tab, int ntab, int s, Dir *dp)
 			if(pid == 0 || ename[0] != '\0')
 				return -1;
 		} else {
-			n = hp9_pids(upmach(), pids, nelem(pids));
+			n = h9_pids(upmach(), pids, nelem(pids));
 			if(s >= n)
 				return -1;
 			pid = pids[s];
 		}
-		h = hp9_pidlookup(upmach(), pid);
+		h = h9_pidlookup(upmach(), pid);
 		if(h == nil)
 			return name != nil ? -1 : 0;
-		hp9_putproc(h);
+		h9_putproc(h);
 		/* String comparison is done in devwalk so name must match its formatted pid. */
 		snprint(up->genbuf, sizeof up->genbuf, "%lud", pid);
 		if(name != nil && strcmp(name, up->genbuf) != 0)
@@ -149,7 +149,7 @@ procgen(Chan *c, char *name, Dirtab *tab, int ntab, int s, Dir *dp)
 		return -1;
 	t = &procdir[s];
 	pid = PIDQ(c->qid);
-	h = hp9_pidlookup(upmach(), pid);
+	h = h9_pidlookup(upmach(), pid);
 	if(h == nil)
 		return -1;
 	perm = t->perm;
@@ -160,7 +160,7 @@ procgen(Chan *c, char *name, Dirtab *tab, int ntab, int s, Dir *dp)
 	n = 0;
 	if(t->qid.path == Qwait)
 		n = h->nwait;	/* incorrect size, but >0 means there's something to read */
-	hp9_putproc(h);
+	h9_putproc(h);
 	mkqid(&qid, (pid<<QSHIFT)|t->qid.path, c->qid.vers, QTFILE);
 	devdir(c, qid, t->name, n, eve, perm, dp);
 	return 1;
@@ -197,7 +197,7 @@ procopen(Chan *c, int omode0)
 
 	h = chanproc(c);
 	if(waserror()){
-		hp9_putproc(h);
+		h9_putproc(h);
 		nexterror();
 	}
 	omode = openmode(omode0);
@@ -233,7 +233,7 @@ procopen(Chan *c, int omode0)
 	c->qid.vers = vers;
 	tc = devopen(c, omode, 0, 0, procgen);
 	poperror();
-	hp9_putproc(h);
+	h9_putproc(h);
 	return tc;
 }
 
@@ -330,7 +330,7 @@ dropgroups(Groups *g)
 	if(g->pg != nil)
 		closepgrp(g->pg);
 	if(g->fg != nil)
-		hp9_fgrpclose(g->fg);
+		h9_fgrpclose(g->fg);
 	if(g->dot != nil)
 		cclose(g->dot);
 }
@@ -421,8 +421,8 @@ statusread(Hproc *h, char *buf, int nbuf)
 	lock(&h->nlk);
 	if(h->p == nil)
 		strcpy(state, "Moribund");
-	else if(h->aux != nil && hp9_procstatus != nil)
-		hp9_procstatus(h->aux, state, sizeof state, &mem);
+	else if(h->aux != nil && h9_procstatus != nil)
+		h9_procstatus(h->aux, state, sizeof state, &mem);
 	unlock(&h->nlk);
 	return snprint(buf, nbuf,
 		"%-27s %-27s %-11s "
@@ -451,7 +451,7 @@ procread(Chan *c, void *va, long n, vlong off)
 
 	h = chanproc(c);
 	if(waserror()){
-		hp9_putproc(h);
+		h9_putproc(h);
 		nexterror();
 	}
 
@@ -552,7 +552,7 @@ procread(Chan *c, void *va, long n, vlong off)
 				n = i;
 			memmove(va, h->note[0]->msg, n-1);
 			((char*)va)[n-1] = '\0';
-			hp9_freenote(h->note[0]);
+			h9_freenote(h->note[0]);
 			if(--h->nnote > 0)
 				memmove(&h->note[0], &h->note[1], h->nnote*sizeof(Hnote*));
 			h->note[h->nnote] = nil;
@@ -573,7 +573,7 @@ procread(Chan *c, void *va, long n, vlong off)
 		break;
 	}
 	poperror();
-	hp9_putproc(h);
+	h9_putproc(h);
 	return n;
 }
 
@@ -632,7 +632,7 @@ procctlreq(Hproc *h, char *va, int n)
 		h->hang = 1;
 		break;
 	case CMkill:
-		hp9_killproc(h);
+		h9_killproc(h);
 		break;
 	case CMnohang:
 		h->hang = 0;
@@ -662,13 +662,13 @@ procwrite(Chan *c, void *va, long n, vlong off)
 			error(Etoobig);
 		memmove(buf, va, n);
 		buf[n] = 0;
-		hp9_postnotepg(upmach(), c->qid.vers, buf, NUser);
+		h9_postnotepg(upmach(), c->qid.vers, buf, NUser);
 		return n;
 	}
 
 	h = chanproc(c);
 	if(waserror()){
-		hp9_putproc(h);
+		h9_putproc(h);
 		nexterror();
 	}
 	switch(QID(c->qid)){
@@ -692,9 +692,9 @@ procwrite(Chan *c, void *va, long n, vlong off)
 			error(Etoobig);
 		memmove(buf, va, n);
 		buf[n] = 0;
-		if((nt = hp9_mknote(buf, NUser)) == nil)
+		if((nt = h9_mknote(buf, NUser)) == nil)
 			error(Enomem);
-		if(!hp9_pushnote(h, nt))
+		if(!h9_pushnote(h, nt))
 			error("note not posted");
 		break;
 
@@ -705,7 +705,7 @@ procwrite(Chan *c, void *va, long n, vlong off)
 		buf[n] = 0;
 		if(atoi(buf) <= 0)
 			error(Ebadarg);
-		if(hp9_setnoteid(h, atoi(buf)) < 0)
+		if(h9_setnoteid(h, atoi(buf)) < 0)
 			error(Eperm);
 		break;
 
@@ -713,7 +713,7 @@ procwrite(Chan *c, void *va, long n, vlong off)
 		error(Egreg);
 	}
 	poperror();
-	hp9_putproc(h);
+	h9_putproc(h);
 	return n;
 }
 

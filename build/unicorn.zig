@@ -81,7 +81,7 @@ fn lib(
         .name = name,
         .linkage = .static,
         // A Debug Unicorn is much slower and only helps when debugging
-        // Unicorn itself, so it's optimized even in Debug builds of hp9.
+        // Unicorn itself, so it's optimized even in Debug builds of h9.
         .root_module = b.createModule(.{
             .target = target,
             .optimize = if (optimize == .Debug) .ReleaseFast else optimize,

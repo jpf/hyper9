@@ -1,16 +1,16 @@
 # Unicorn (emu backend, GPLv2)
 
-What hp9 needs to build [Unicorn](https://github.com/unicorn-engine/unicorn)
+What h9 needs to build [Unicorn](https://github.com/unicorn-engine/unicorn)
 from source with Zig, for the emulator backend (`-Demu=unicorn`). The source
 itself isn't vendored: `scripts/fetch.sh` downloads the release tarball pinned
 in [scripts/pins.sh](../../scripts/pins.sh) (`UNICORN_VERSION`,
 `UNICORN_SRC_URL`, `UNICORN_SRC_SHA256`), unpacks it into `.local/src/unicorn`
 and applies the patches here in order. It redoes that only when the tarball
-pin or a patch changes (`.local/src/unicorn/.hp9-stamp`).
+pin or a patch changes (`.local/src/unicorn/.h9-stamp`).
 
 Unicorn is GPLv2, and so are these patches and config headers (see
-[COPYING](COPYING)). It never goes into the MIT `hp9` release build; it ships
-only in the separate GPLv2 `hp9-emu` release assets, next to their
+[COPYING](COPYING)). It never goes into the MIT `h9` release build; it ships
+only in the separate GPLv2 `h9-emu` release assets, next to their
 corresponding source (see `scripts/release.sh`).
 
 | Path | Contents |

@@ -28,87 +28,87 @@ pub const MCREATE = 4;
 pub const MCACHE = 0x10;
 pub const ERRMAX = 128;
 
-/// The C side, or stubs where kern isn't built so hp9 still links.
+/// The C side, or stubs where kern isn't built so h9 still links.
 const c = if (available) c_real else c_stub;
 
 const c_stub = struct {
-    fn hp9_kern_boot() c_int {
+    fn h9_kern_boot() c_int {
         return -1;
     }
-    fn hp9_kern_park() noreturn {
+    fn h9_kern_park() noreturn {
         unreachable;
     }
-    fn hp9_kern_spawn(_: [*:0]const u8, _: *const fn (?*anyopaque) callconv(.c) void, _: ?*anyopaque) c_int {
+    fn h9_kern_spawn(_: [*:0]const u8, _: *const fn (?*anyopaque) callconv(.c) void, _: ?*anyopaque) c_int {
         return -1;
     }
-    fn hp9_kern_pid() c_ulong {
+    fn h9_kern_pid() c_ulong {
         return 0;
     }
-    fn hp9_kern_fork(_: c_int, _: c_ulong, _: *const fn (?*anyopaque) callconv(.c) void, _: ?*anyopaque) c_int {
+    fn h9_kern_fork(_: c_int, _: c_ulong, _: *const fn (?*anyopaque) callconv(.c) void, _: ?*anyopaque) c_int {
         return -1;
     }
-    fn hp9_kern_rfork(_: c_int) c_int {
+    fn h9_kern_rfork(_: c_int) c_int {
         return -1;
     }
-    fn hp9_kern_await(_: [*]u8, _: c_int) c_int {
+    fn h9_kern_await(_: [*]u8, _: c_int) c_int {
         return -1;
     }
-    fn hp9_kern_setexits(_: [*:0]const u8) void {}
-    fn hp9_kern_gpid() c_ulong {
+    fn h9_kern_setexits(_: [*:0]const u8) void {}
+    fn h9_kern_gpid() c_ulong {
         return 0;
     }
-    fn hp9_kern_setgpid(_: c_ulong) void {}
-    fn hp9_kern_settext(_: [*:0]const u8) void {}
-    fn hp9_kern_aux() ?*anyopaque {
+    fn h9_kern_setgpid(_: c_ulong) void {}
+    fn h9_kern_settext(_: [*:0]const u8) void {}
+    fn h9_kern_aux() ?*anyopaque {
         return null;
     }
-    fn hp9_kern_setaux(_: ?*anyopaque) void {}
-    fn hp9_kern_closeexec() void {}
-    fn hp9_kern_postnote(_: c_ulong, _: [*:0]const u8, _: c_int) c_int {
+    fn h9_kern_setaux(_: ?*anyopaque) void {}
+    fn h9_kern_closeexec() void {}
+    fn h9_kern_postnote(_: c_ulong, _: [*:0]const u8, _: c_int) c_int {
         return -1;
     }
-    fn hp9_kern_postnotepg(_: c_ulong, _: [*:0]const u8, _: c_int) void {}
-    fn hp9_kern_noteid() c_ulong {
+    fn h9_kern_postnotepg(_: c_ulong, _: [*:0]const u8, _: c_int) void {}
+    fn h9_kern_noteid() c_ulong {
         return 0;
     }
-    fn hp9_kern_setnotify(_: c_int) void {}
-    fn hp9_kern_notepending() c_int {
+    fn h9_kern_setnotify(_: c_int) void {}
+    fn h9_kern_notepending() c_int {
         return 0;
     }
-    fn hp9_kern_popnote(_: [*]u8, _: u64) c_int {
+    fn h9_kern_popnote(_: [*]u8, _: u64) c_int {
         return 0;
     }
-    fn hp9_kern_noted(_: c_int, _: [*]u8) c_int {
+    fn h9_kern_noted(_: c_int, _: [*]u8) c_int {
         return -1;
     }
-    fn hp9_kern_execnotes() void {}
-    fn hp9_kern_mach() ?*anyopaque {
+    fn h9_kern_execnotes() void {}
+    fn h9_kern_mach() ?*anyopaque {
         return null;
     }
-    fn hp9_kern_putmach(_: ?*anyopaque) void {}
-    fn hp9_kern_postmach(_: ?*anyopaque, _: c_int, _: [*:0]const u8, _: c_int) c_int {
+    fn h9_kern_putmach(_: ?*anyopaque) void {}
+    fn h9_kern_postmach(_: ?*anyopaque, _: c_int, _: [*:0]const u8, _: c_int) c_int {
         return 0;
     }
     fn syspipe(_: *[2]c_int) c_int {
         return -1;
     }
-    fn hp9_kern_user() [*:0]const u8 {
+    fn h9_kern_user() [*:0]const u8 {
         return "none";
     }
-    fn hp9_kern_devmask(_: [*:0]const u8) void {}
-    fn hp9_kern_self() ?*anyopaque {
+    fn h9_kern_devmask(_: [*:0]const u8) void {}
+    fn h9_kern_self() ?*anyopaque {
         return null;
     }
-    fn hp9_kern_interrupt(_: ?*anyopaque) void {}
-    fn hp9_kern_sleep(_: c_long) c_int {
+    fn h9_kern_interrupt(_: ?*anyopaque) void {}
+    fn h9_kern_sleep(_: c_long) c_int {
         return -1;
     }
-    fn hp9_cons_wake(_: c_ulong) void {}
+    fn h9_cons_wake(_: c_ulong) void {}
     var no_err: [ERRMAX:0]u8 = @splat(0);
-    fn hp9_kern_errstr() [*:0]u8 {
+    fn h9_kern_errstr() [*:0]u8 {
         return &no_err;
     }
-    fn hp9_fd2path(_: c_int, _: [*]u8, _: c_uint) c_int {
+    fn h9_fd2path(_: c_int, _: [*]u8, _: c_uint) c_int {
         return -1;
     }
     fn sysopen(_: [*:0]const u8, _: c_int) c_int {
@@ -138,10 +138,10 @@ const c_stub = struct {
     fn sysunmount(_: ?[*:0]const u8, _: [*:0]const u8) c_int {
         return -1;
     }
-    fn hp9_kern_chdir(_: [*:0]const u8) c_int {
+    fn h9_kern_chdir(_: [*:0]const u8) c_int {
         return -1;
     }
-    fn hp9_kern_setargs(_: [*]const u8, _: c_int) void {}
+    fn h9_kern_setargs(_: [*]const u8, _: c_int) void {}
     fn sysdup(_: c_int, _: c_int) c_int {
         return -1;
     }
@@ -163,41 +163,41 @@ const c_stub = struct {
 };
 
 const c_real = struct {
-    extern fn hp9_kern_boot() c_int;
-    extern fn hp9_kern_park() noreturn;
-    extern fn hp9_kern_spawn(name: [*:0]const u8, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
-    extern fn hp9_kern_pid() c_ulong;
-    extern fn hp9_kern_fork(flag: c_int, pid: c_ulong, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
-    extern fn hp9_kern_rfork(flag: c_int) c_int;
-    extern fn hp9_kern_await(buf: [*]u8, n: c_int) c_int;
-    extern fn hp9_kern_setexits(msg: [*:0]const u8) void;
-    extern fn hp9_kern_gpid() c_ulong;
-    extern fn hp9_kern_setgpid(pid: c_ulong) void;
-    extern fn hp9_kern_settext(text: [*:0]const u8) void;
-    extern fn hp9_kern_aux() ?*anyopaque;
-    extern fn hp9_kern_setaux(aux: ?*anyopaque) void;
-    extern fn hp9_kern_closeexec() void;
-    extern var hp9_notekick: ?*const fn (?*anyopaque) callconv(.c) void;
-    extern fn hp9_kern_postnote(pid: c_ulong, msg: [*:0]const u8, flag: c_int) c_int;
-    extern fn hp9_kern_postnotepg(noteid: c_ulong, msg: [*:0]const u8, flag: c_int) void;
-    extern fn hp9_kern_noteid() c_ulong;
-    extern fn hp9_kern_setnotify(on: c_int) void;
-    extern fn hp9_kern_notepending() c_int;
-    extern fn hp9_kern_popnote(msg: [*]u8, pc: u64) c_int;
-    extern fn hp9_kern_noted(arg: c_int, msg: [*]u8) c_int;
-    extern fn hp9_kern_execnotes() void;
-    extern fn hp9_kern_mach() ?*anyopaque;
-    extern fn hp9_kern_putmach(m: ?*anyopaque) void;
-    extern fn hp9_kern_postmach(m: ?*anyopaque, all: c_int, msg: [*:0]const u8, flag: c_int) c_int;
+    extern fn h9_kern_boot() c_int;
+    extern fn h9_kern_park() noreturn;
+    extern fn h9_kern_spawn(name: [*:0]const u8, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
+    extern fn h9_kern_pid() c_ulong;
+    extern fn h9_kern_fork(flag: c_int, pid: c_ulong, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
+    extern fn h9_kern_rfork(flag: c_int) c_int;
+    extern fn h9_kern_await(buf: [*]u8, n: c_int) c_int;
+    extern fn h9_kern_setexits(msg: [*:0]const u8) void;
+    extern fn h9_kern_gpid() c_ulong;
+    extern fn h9_kern_setgpid(pid: c_ulong) void;
+    extern fn h9_kern_settext(text: [*:0]const u8) void;
+    extern fn h9_kern_aux() ?*anyopaque;
+    extern fn h9_kern_setaux(aux: ?*anyopaque) void;
+    extern fn h9_kern_closeexec() void;
+    extern var h9_notekick: ?*const fn (?*anyopaque) callconv(.c) void;
+    extern fn h9_kern_postnote(pid: c_ulong, msg: [*:0]const u8, flag: c_int) c_int;
+    extern fn h9_kern_postnotepg(noteid: c_ulong, msg: [*:0]const u8, flag: c_int) void;
+    extern fn h9_kern_noteid() c_ulong;
+    extern fn h9_kern_setnotify(on: c_int) void;
+    extern fn h9_kern_notepending() c_int;
+    extern fn h9_kern_popnote(msg: [*]u8, pc: u64) c_int;
+    extern fn h9_kern_noted(arg: c_int, msg: [*]u8) c_int;
+    extern fn h9_kern_execnotes() void;
+    extern fn h9_kern_mach() ?*anyopaque;
+    extern fn h9_kern_putmach(m: ?*anyopaque) void;
+    extern fn h9_kern_postmach(m: ?*anyopaque, all: c_int, msg: [*:0]const u8, flag: c_int) c_int;
     extern fn syspipe(fd: *[2]c_int) c_int;
-    extern fn hp9_kern_user() [*:0]const u8;
-    extern fn hp9_kern_devmask(devs: [*:0]const u8) void;
-    extern fn hp9_kern_self() ?*anyopaque;
-    extern fn hp9_kern_interrupt(p: ?*anyopaque) void;
-    extern fn hp9_kern_sleep(ms: c_long) c_int;
-    extern fn hp9_cons_wake(id: c_ulong) void;
-    extern fn hp9_kern_errstr() [*:0]u8;
-    extern fn hp9_fd2path(fd: c_int, buf: [*]u8, n: c_uint) c_int;
+    extern fn h9_kern_user() [*:0]const u8;
+    extern fn h9_kern_devmask(devs: [*:0]const u8) void;
+    extern fn h9_kern_self() ?*anyopaque;
+    extern fn h9_kern_interrupt(p: ?*anyopaque) void;
+    extern fn h9_kern_sleep(ms: c_long) c_int;
+    extern fn h9_cons_wake(id: c_ulong) void;
+    extern fn h9_kern_errstr() [*:0]u8;
+    extern fn h9_fd2path(fd: c_int, buf: [*]u8, n: c_uint) c_int;
     extern fn sysopen(name: [*:0]const u8, mode: c_int) c_int;
     extern fn syscreate(name: [*:0]const u8, mode: c_int, perm: c_uint) c_int;
     extern fn sysclose(fd: c_int) c_int;
@@ -207,9 +207,9 @@ const c_real = struct {
     extern fn sysbind(old: [*:0]const u8, new: [*:0]const u8, flag: c_int) c_int;
     extern fn sysmount(fd: c_int, afd: c_int, new: [*:0]const u8, flag: c_int, spec: [*:0]const u8) c_int;
     extern fn sysunmount(old: ?[*:0]const u8, new: [*:0]const u8) c_int;
-    extern fn hp9_kern_chdir(name: [*:0]const u8) c_int;
-    extern fn hp9_kern_setargs(args: [*]const u8, n: c_int) void;
-    extern var hp9_procstatus: ?*const fn (?*anyopaque, [*]u8, c_int, *c_ulong) callconv(.c) void;
+    extern fn h9_kern_chdir(name: [*:0]const u8) c_int;
+    extern fn h9_kern_setargs(args: [*]const u8, n: c_int) void;
+    extern var h9_procstatus: ?*const fn (?*anyopaque, [*]u8, c_int, *c_ulong) callconv(.c) void;
     extern fn sysdup(fd0: c_int, fd1: c_int) c_int;
     extern fn sysstat(name: [*:0]const u8, buf: [*]u8, n: c_int) c_int;
     extern fn sysfstat(fd: c_int, buf: [*]u8, n: c_int) c_int;
@@ -241,10 +241,10 @@ pub fn boot() Error!void {
 }
 
 fn bootThread() void {
-    const ok = c.hp9_kern_boot() >= 0;
+    const ok = c.h9_kern_boot() >= 0;
     boot_state.store(if (ok) .up else .failed, .release);
-    // The thread is the boot Proc now, which hp9_kern_spawn clones from.
-    if (ok) c.hp9_kern_park();
+    // The thread is the boot Proc now, which h9_kern_spawn clones from.
+    if (ok) c.h9_kern_park();
 }
 
 /// Runs `func(arg)` on a new kernel process with its own host thread, a
@@ -257,7 +257,7 @@ pub fn spawn(name: [*:0]const u8, comptime T: type, comptime func: fn (*T) void,
             func(@ptrCast(@alignCast(p.?)));
         }
     };
-    if (c.hp9_kern_spawn(name, Tramp.run, arg) < 0) return error.OutOfMemory;
+    if (c.h9_kern_spawn(name, Tramp.run, arg) < 0) return error.OutOfMemory;
 }
 
 /// rfork flags (9front's libc.h).
@@ -288,52 +288,52 @@ pub fn fork(flag: c_int, child_pid: u32, comptime T: type, comptime func: fn (*T
             func(@ptrCast(@alignCast(p.?)));
         }
     };
-    _ = try check(c.hp9_kern_fork(flag, child_pid, Tramp.run, arg));
+    _ = try check(c.h9_kern_fork(flag, child_pid, Tramp.run, arg));
 }
 
 /// rfork without RF.PROC: changes the caller's own groups.
 pub fn rfork(flag: c_int) Error!void {
-    _ = try check(c.hp9_kern_rfork(flag));
+    _ = try check(c.h9_kern_rfork(flag));
 }
 
 /// Waits for a child to exit and writes its wait message to `buf`, as the
 /// await syscall returns it: "pid utime stime real 'msg'". Fails with "no
 /// living children" when there are none.
 pub fn await(buf: []u8) Error!usize {
-    return try check(c.hp9_kern_await(buf.ptr, clampLen(buf.len)));
+    return try check(c.h9_kern_await(buf.ptr, clampLen(buf.len)));
 }
 
 /// Sets the exit string the parent's wait record carries; "" is success.
 pub fn setExits(msg: [*:0]const u8) void {
-    c.hp9_kern_setexits(msg);
+    c.h9_kern_setexits(msg);
 }
 
 /// The calling process's machine-local pid (0 if never set).
 pub fn guestPid() u32 {
-    return @intCast(c.hp9_kern_gpid());
+    return @intCast(c.h9_kern_gpid());
 }
 
 pub fn setGuestPid(p: u32) void {
-    c.hp9_kern_setgpid(p);
+    c.h9_kern_setgpid(p);
 }
 
 /// Sets the process's name, as wait messages show it.
 pub fn setText(text: [*:0]const u8) void {
-    c.hp9_kern_settext(text);
+    c.h9_kern_settext(text);
 }
 
 /// The Zig process attached to the calling kernel process.
 pub fn aux() ?*anyopaque {
-    return c.hp9_kern_aux();
+    return c.h9_kern_aux();
 }
 
 pub fn setAux(p: ?*anyopaque) void {
-    c.hp9_kern_setaux(p);
+    c.h9_kern_setaux(p);
 }
 
 /// Closes the calling process's close-on-exec fds.
 pub fn closeExec() void {
-    c.hp9_kern_closeexec();
+    c.h9_kern_closeexec();
 }
 
 /// Sets the hook a note posted to a process calls, with the process's
@@ -341,7 +341,7 @@ pub fn closeExec() void {
 /// runs on the posting thread with the target's note lock held, and only
 /// while `aux` is set; it must not post notes or block.
 pub fn setNoteKick(f: *const fn (?*anyopaque) callconv(.c) void) void {
-    if (available) c.hp9_notekick = f;
+    if (available) c.h9_notekick = f;
 }
 
 /// Sets the hook /proc/n/status calls, with the process's `aux`, for its
@@ -349,7 +349,7 @@ pub fn setNoteKick(f: *const fn (?*anyopaque) callconv(.c) void) void {
 /// on the reading thread with the target's note lock held, and only while
 /// `aux` is set; it must not block or make kernel calls.
 pub fn setProcStatus(f: *const fn (?*anyopaque, [*]u8, c_int, *c_ulong) callconv(.c) void) void {
-    if (available) c.hp9_procstatus = f;
+    if (available) c.h9_procstatus = f;
 }
 
 /// The most of exec's argv /proc/n/args keeps, as 9front's exec.
@@ -377,7 +377,7 @@ pub fn setArgs(argv: []const []const u8) void {
         buf[n] = 0;
         n += 1;
     }
-    c.hp9_kern_setargs(&buf, @intCast(n));
+    c.h9_kern_setargs(&buf, @intCast(n));
 }
 
 /// Who posted a note (9front's NUser, NExit, NDebug). A note that isn't
@@ -389,29 +389,29 @@ pub const NoteFlag = enum(c_int) { user = 0, exit = 1, debug = 2 };
 /// machine. Returns false if its queue was full. Fails, with "process
 /// exited" as the error string, if there's no such process.
 pub fn postNote(to: u32, msg: [*:0]const u8, flag: NoteFlag) Error!bool {
-    return try check(c.hp9_kern_postnote(to, msg, @intFromEnum(flag))) != 0;
+    return try check(c.h9_kern_postnote(to, msg, @intFromEnum(flag))) != 0;
 }
 
 /// Posts a note to every process but the caller in note group `noteid` of
 /// the caller's machine.
 pub fn postNoteGroup(noteid: u32, msg: [*:0]const u8, flag: NoteFlag) void {
-    c.hp9_kern_postnotepg(noteid, msg, @intFromEnum(flag));
+    c.h9_kern_postnotepg(noteid, msg, @intFromEnum(flag));
 }
 
 /// The calling process's note group: machine-local, inherited by children
 /// and replaced by RF.NOTEG.
 pub fn noteId() u32 {
-    return @intCast(c.hp9_kern_noteid());
+    return @intCast(c.h9_kern_noteid());
 }
 
 /// Records whether the calling process has a note handler (`notify`).
 pub fn setNotify(on: bool) void {
-    c.hp9_kern_setnotify(@intFromBool(on));
+    c.h9_kern_setnotify(@intFromBool(on));
 }
 
 /// Whether the calling process has a note queued.
 pub fn notePending() bool {
-    return c.hp9_kern_notepending() != 0;
+    return c.h9_kern_notepending() != 0;
 }
 
 /// What to do with a popped note.
@@ -432,7 +432,7 @@ pub const NoteAction = enum(c_int) {
 /// Also clears the "interrupt this call" flag.
 pub fn popNote(msg: *[ERRMAX]u8, pc: u64) NoteAction {
     msg[0] = 0;
-    return @enumFromInt(c.hp9_kern_popnote(msg, pc));
+    return @enumFromInt(c.h9_kern_popnote(msg, pc));
 }
 
 /// noted's arguments (9front's libc.h).
@@ -444,7 +444,7 @@ pub const Noted = enum(c_int) { cont = 0, dflt = 1, save = 2, rstr = 3, _ };
 /// error string set, for noted outside a handler with anything but `rstr`.
 pub fn noted(arg: Noted, msg: *[ERRMAX]u8) Error!NoteAction {
     msg[0] = 0;
-    const r = c.hp9_kern_noted(@intFromEnum(arg), msg);
+    const r = c.h9_kern_noted(@intFromEnum(arg), msg);
     if (r < 0) return error.Kern;
     return @enumFromInt(r);
 }
@@ -454,7 +454,7 @@ pub fn noted(arg: Noted, msg: *[ERRMAX]u8) Error!NoteAction {
 pub const Mach = opaque {
     /// Releases the reference from `mach`.
     pub fn put(m: *Mach) void {
-        c.hp9_kern_putmach(m);
+        c.h9_kern_putmach(m);
     }
 
     /// Who a host-side note goes to.
@@ -469,18 +469,18 @@ pub const Mach = opaque {
     /// from any thread, including ones that aren't kernel processes.
     /// Returns how many processes it reached.
     pub fn post(m: *Mach, to: To, msg: [*:0]const u8) u32 {
-        return @intCast(c.hp9_kern_postmach(m, @intFromEnum(to), msg, @intFromEnum(NoteFlag.user)));
+        return @intCast(c.h9_kern_postmach(m, @intFromEnum(to), msg, @intFromEnum(NoteFlag.user)));
     }
 };
 
 /// The calling process's machine, with a reference to release with `put`.
 pub fn mach() ?*Mach {
-    return @ptrCast(c.hp9_kern_mach());
+    return @ptrCast(c.h9_kern_mach());
 }
 
 /// exec's reset of the calling process's notes: no handler, none queued.
 pub fn execNotes() void {
-    c.hp9_kern_execnotes();
+    c.h9_kern_execnotes();
 }
 
 /// Makes a pipe and returns its two fds.
@@ -492,36 +492,36 @@ pub fn pipe() Error![2]u31 {
 
 /// The host user, which is the kernel's hostowner (eve).
 pub fn user() []const u8 {
-    return std.mem.span(c.hp9_kern_user());
+    return std.mem.span(c.h9_kern_user());
 }
 
 /// The calling Proc's kernel pid.
 pub fn pid() u32 {
-    return @intCast(c.hp9_kern_pid());
+    return @intCast(c.h9_kern_pid());
 }
 
 /// Blocks future attaches of the devices named by `devs` (letters, as in
 /// `#U`) in the calling Proc's namespace. Existing binds keep working.
 pub fn devmask(devs: [*:0]const u8) void {
-    c.hp9_kern_devmask(devs);
+    c.h9_kern_devmask(devs);
 }
 
 /// The calling kernel process, for `interrupt`.
 pub const Proc = opaque {};
 
 pub fn self() *Proc {
-    return @ptrCast(c.hp9_kern_self().?);
+    return @ptrCast(c.h9_kern_self().?);
 }
 
 /// Makes the process's current or next blocking kernel call fail with
 /// "interrupted". The caller must know the process hasn't exited.
 pub fn interrupt(p: *Proc) void {
-    c.hp9_kern_interrupt(p);
+    c.h9_kern_interrupt(p);
 }
 
 /// Sleeps for `ms` milliseconds, or until the process is interrupted.
 pub fn sleep(ms: i64) Error!void {
-    _ = try check(c.hp9_kern_sleep(@intCast(std.math.clamp(ms, std.math.minInt(c_long), std.math.maxInt(c_long)))));
+    _ = try check(c.h9_kern_sleep(@intCast(std.math.clamp(ms, std.math.minInt(c_long), std.math.maxInt(c_long)))));
 }
 
 /// The sandbox plan devfs checks for the calling thread's process (see
@@ -535,13 +535,13 @@ pub fn setPlan(p: ?*const policy.Plan) void {
 
 /// The calling Proc's error string after a failed call.
 pub fn errstr() []const u8 {
-    return std.mem.span(c.hp9_kern_errstr());
+    return std.mem.span(c.h9_kern_errstr());
 }
 
 /// Swaps `buf` (NUL-terminated, at most ERRMAX) with the error string, as
 /// the errstr syscall does.
 pub fn swapErrstr(buf: *[ERRMAX]u8) void {
-    const k = c.hp9_kern_errstr();
+    const k = c.h9_kern_errstr();
     var tmp: [ERRMAX]u8 = undefined;
     const kl = std.mem.len(k);
     @memcpy(tmp[0..kl], k[0..kl]);
@@ -552,9 +552,9 @@ pub fn swapErrstr(buf: *[ERRMAX]u8) void {
     @memcpy(buf[0 .. kl + 1], tmp[0 .. kl + 1]);
 }
 
-/// Sets the error string, for errors hp9 raises itself.
+/// Sets the error string, for errors h9 raises itself.
 pub fn setErrstr(msg: []const u8) void {
-    const k = c.hp9_kern_errstr();
+    const k = c.h9_kern_errstr();
     const n = @min(msg.len, ERRMAX - 1);
     @memcpy(k[0..n], msg[0..n]);
     k[n] = 0;
@@ -613,7 +613,7 @@ pub fn unmount(old: ?[*:0]const u8, new: [*:0]const u8) Error!void {
 
 /// chdir, swapping dot so /proc/n readers never see it freed.
 pub fn chdir(name: [*:0]const u8) Error!void {
-    _ = try check(c.hp9_kern_chdir(name));
+    _ = try check(c.h9_kern_chdir(name));
 }
 
 pub fn dup(fd0: u31, fd1: i32) Error!u31 {
@@ -643,7 +643,7 @@ pub fn remove(name: [*:0]const u8) Error!void {
 }
 
 pub fn fd2path(fd: u31, buf: []u8) Error!void {
-    _ = try check(c.hp9_fd2path(fd, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_uint)))));
+    _ = try check(c.h9_fd2path(fd, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_uint)))));
 }
 
 /// One machine's console, behind `#y<id>` (src/kern/devhcons.c).
@@ -676,7 +676,7 @@ pub const Console = struct {
 /// console's reader thread, which isn't a kernel process: drawterm's
 /// wakeup only takes locks and signals the sleeper's thread.
 pub fn wakeConsole(id: u32) void {
-    c.hp9_cons_wake(id);
+    c.h9_cons_wake(id);
 }
 
 const max_consoles = 64;
@@ -703,45 +703,45 @@ fn console(id: c_ulong) ?*Console {
 
 comptime {
     if (available) {
-        @export(&hp9_cons_read, .{ .name = "hp9_cons_read" });
-        @export(&hp9_cons_ready, .{ .name = "hp9_cons_ready" });
-        @export(&hp9_cons_write, .{ .name = "hp9_cons_write" });
-        @export(&hp9_cons_raw, .{ .name = "hp9_cons_raw" });
-        @export(&hp9_policy_active, .{ .name = "hp9_policy_active" });
-        @export(&hp9_policy_check, .{ .name = "hp9_policy_check" });
+        @export(&h9_cons_read, .{ .name = "h9_cons_read" });
+        @export(&h9_cons_ready, .{ .name = "h9_cons_ready" });
+        @export(&h9_cons_write, .{ .name = "h9_cons_write" });
+        @export(&h9_cons_raw, .{ .name = "h9_cons_raw" });
+        @export(&h9_policy_active, .{ .name = "h9_policy_active" });
+        @export(&h9_policy_check, .{ .name = "h9_policy_check" });
     }
 }
 
-fn hp9_policy_active() callconv(.c) c_int {
+fn h9_policy_active() callconv(.c) c_int {
     return @intFromBool(fs_plan != null);
 }
 
-fn hp9_policy_check(path: [*]const u8, len: c_long, op: c_int) callconv(.c) c_int {
+fn h9_policy_check(path: [*]const u8, len: c_long, op: c_int) callconv(.c) c_int {
     const p = fs_plan orelse return 0;
     const o = std.enums.fromInt(policy.Op, op) orelse return @intFromEnum(policy.Verdict.hidden);
     return @intFromEnum(p.check(path[0..@intCast(len)], o));
 }
 
 /// Returns the bytes read, 0 at EOF, -1 on error, or -2 when the caller
-/// has to sleep until `hp9_cons_ready` and try again.
-fn hp9_cons_read(id: c_ulong, buf: [*]u8, n: c_long) callconv(.c) c_long {
+/// has to sleep until `h9_cons_ready` and try again.
+fn h9_cons_read(id: c_ulong, buf: [*]u8, n: c_long) callconv(.c) c_long {
     const con = console(id) orelse return -1;
     const in = con.in orelse return 0;
     return @intCast(in.read(buf[0..@intCast(n)]));
 }
 
-fn hp9_cons_ready(id: c_ulong) callconv(.c) c_int {
+fn h9_cons_ready(id: c_ulong) callconv(.c) c_int {
     const con = console(id) orelse return 1;
     const in = con.in orelse return 1;
     return @intFromBool(in.ready());
 }
 
-fn hp9_cons_raw(id: c_ulong, on: c_int) callconv(.c) void {
+fn h9_cons_raw(id: c_ulong, on: c_int) callconv(.c) void {
     const con = console(id) orelse return;
     con.setRaw(on != 0);
 }
 
-fn hp9_cons_write(id: c_ulong, fd: c_int, buf: [*]const u8, n: c_long) callconv(.c) c_long {
+fn h9_cons_write(id: c_ulong, fd: c_int, buf: [*]const u8, n: c_long) callconv(.c) c_long {
     const con = console(id) orelse return -1;
     const w = if (fd == 2) con.err else con.out;
     while (!con.mutex.tryLock()) std.atomic.spinLoopHint();
@@ -802,7 +802,7 @@ test "spawn a process and read a host file through kern" {
     if (t.err) |e| return e;
     try std.testing.expectEqualStrings("mount -a #s/boot /\n", t.data[0..t.len]);
     try std.testing.expect(std.mem.indexOf(u8, t.missing, "does not exist") != null);
-    try std.testing.expectEqualStrings("hp9", t.sysname[0..t.sysname_len]);
+    try std.testing.expectEqualStrings("h9", t.sysname[0..t.sysname_len]);
 }
 
 test "fork shares or copies groups, and await returns wait records" {

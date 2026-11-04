@@ -1,5 +1,5 @@
 //! The host's stdin as a `std.Io.Reader`, for the guest's console, with a
-//! `cancel` that makes a blocked read return (`hp9.consin.Cancel`), so a
+//! `cancel` that makes a blocked read return (`h9.consin.Cancel`), so a
 //! run can end while the console's reader thread is in a read.
 //!
 //! On POSIX the reader polls stdin together with a wake pipe, and `cancel`
@@ -45,13 +45,13 @@ const PosixStdin = struct {
         return &s.interface;
     }
 
-    /// For `hp9.consin.Cancel`: `ctx` is the PosixStdin.
+    /// For `h9.consin.Cancel`: `ctx` is the PosixStdin.
     pub fn cancel(ctx: *anyopaque, _: std.Thread) void {
         const s: *PosixStdin = @ptrCast(@alignCast(ctx));
         if (s.wake[1] >= 0) _ = std.c.write(s.wake[1], "x", 1);
     }
 
-    /// For `hp9.consin.Cancel`.
+    /// For `h9.consin.Cancel`.
     pub fn reset(ctx: *anyopaque) void {
         const s: *PosixStdin = @ptrCast(@alignCast(ctx));
         if (s.wake[0] >= 0) s.drainWake();
@@ -124,7 +124,7 @@ const WindowsStdin = struct {
         return &s.interface;
     }
 
-    /// For `hp9.consin.Cancel`: `ctx` is the WindowsStdin, and `thread` is
+    /// For `h9.consin.Cancel`: `ctx` is the WindowsStdin, and `thread` is
     /// the one reading.
     pub fn cancel(ctx: *anyopaque, thread: std.Thread) void {
         const s: *WindowsStdin = @ptrCast(@alignCast(ctx));
@@ -132,7 +132,7 @@ const WindowsStdin = struct {
         _ = CancelSynchronousIo(thread.getHandle());
     }
 
-    /// For `hp9.consin.Cancel`.
+    /// For `h9.consin.Cancel`.
     pub fn reset(ctx: *anyopaque) void {
         const s: *WindowsStdin = @ptrCast(@alignCast(ctx));
         s.cancelled.store(false, .release);

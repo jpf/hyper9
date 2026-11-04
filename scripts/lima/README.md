@@ -1,9 +1,9 @@
 # Test VMs
 
-Lima VMs for running hp9 with the emu backend (`--backend emu`) on Linux,
+Lima VMs for running h9 with the emu backend (`--backend emu`) on Linux,
 macOS and Windows. None has a usable hypervisor (no `/dev/kvm`, no nested
 Hypervisor.framework, no WHP), which is the case emu is for. Nothing is
-installed for building: cross-compile hp9 on the host and copy it in.
+installed for building: cross-compile h9 on the host and copy it in.
 
 | OS | Build |
 | --- | --- |
@@ -33,17 +33,17 @@ export LIMA_HOME=$PWD/.local/lima
 ```sh
 zig build -Demu=unicorn -Dtarget=aarch64-linux-musl --prefix zig-out/linux
 scripts/lima/vm up linux                    # create (first time), start, provision
-scripts/lima/vm push linux zig-out/linux/bin/hp9 zig-out/fixtures/hello  # into ~/hp9
-scripts/lima/vm shell linux ./hp9/hp9 --backend emu ./hp9/hello
-scripts/lima/vm push-root linux             # 9front root tree into ~/hp9/root
-scripts/lima/vm shell linux ./hp9/hp9 --root hp9/root /bin/cat /lib/namespace
-scripts/lima/vm shell windows 'cd hp9 && hp9.exe --root root /bin/cat /lib/namespace'
+scripts/lima/vm push linux zig-out/linux/bin/h9 zig-out/fixtures/hello  # into ~/h9
+scripts/lima/vm shell linux ./h9/h9 --backend emu ./h9/hello
+scripts/lima/vm push-root linux             # 9front root tree into ~/h9/root
+scripts/lima/vm shell linux ./h9/h9 --root h9/root /bin/cat /lib/namespace
+scripts/lima/vm shell windows 'cd h9 && h9.exe --root root /bin/cat /lib/namespace'
 scripts/lima/vm down linux
 ```
 
 `push-root` copies `.local/9front/root` (from `scripts/mkroot.py`, about
 250 MB in 10k files) as one tar stream over ssh, which takes seconds where
-`push` would take minutes. It writes `hp9/root/.hp9-root` with the tree's
+`push` would take minutes. It writes `h9/root/.h9-root` with the tree's
 name and build time, and skips the copy when that matches; `-f` forces it.
 The copy is unpacked beside the old one and swapped in, so an interrupted
 push leaves the old tree intact. It takes about a second on Linux and about
@@ -65,13 +65,13 @@ emulator. Build them first with the same target as the table above, adding
 zig build install install-tests -Demu=unicorn -Dtarget=aarch64-linux-musl --prefix zig-out/linux
 scripts/lima/vm test linux                  # both sets
 scripts/lima/vm test windows integration    # just one
-HP9_TEST_PENDING=1 scripts/lima/vm test macos integration  # include the "M5: ..." cases
+H9_TEST_PENDING=1 scripts/lima/vm test macos integration  # include the "M5: ..." cases
 ```
 
-It pushes `hp9` and the test binaries from `zig-out/<os>/bin`, runs
-`push-root`, then runs each set over ssh with `HP9_TEST_BIN`,
-`HP9_TEST_ROOT` and `HP9_TEST_BACKENDS=emu`. The root tree is arm64 only, so
-`linux-amd64` runs just the backend tests. `HP9_TEST_SLOW` multiplies the
+It pushes `h9` and the test binaries from `zig-out/<os>/bin`, runs
+`push-root`, then runs each set over ssh with `H9_TEST_BIN`,
+`H9_TEST_ROOT` and `H9_TEST_BACKENDS=emu`. The root tree is arm64 only, so
+`linux-amd64` runs just the backend tests. `H9_TEST_SLOW` multiplies the
 interactive cases' timeouts; it defaults to 10 on `linux-amd64` and 3 on
 `windows`, where each guest process takes about 0.4 s to start.
 
@@ -125,7 +125,7 @@ If the Windows install gets stuck:
    Then run `scripts/lima/vm up windows` again.
 
 [provision.ps1](provision.ps1) is idempotent. It disables Windows Update,
-sleep and hibernation, excludes `~\hp9` from Defender scanning, and runs
+sleep and hibernation, excludes `~\h9` from Defender scanning, and runs
 `ngen` on the .NET Framework to speed up PowerShell startup (about 20s
 before; on a fresh install it dropped to about 15s, because Windows is still
 busy with first-boot work).

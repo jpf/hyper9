@@ -3,18 +3,18 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const hp9 = @import("hp9");
+const h9 = @import("h9");
 const hello = @import("hello");
-const vmm = hp9.vmm;
-const build_options = hp9.build_info;
+const vmm = h9.vmm;
+const build_options = h9.build_info;
 
-/// Exit status of a check that found a problem: hp9 itself can't work.
+/// Exit status of a check that found a problem: h9 itself can't work.
 pub const exit_failed = 125;
 
 /// Prints the version, the pinned 9front and drawterm revisions and the
 /// backends built in.
 pub fn version(w: *std.Io.Writer) std.Io.Writer.Error!void {
-    try w.print("hp9 {s}\n", .{build_options.version});
+    try w.print("h9 {s}\n", .{build_options.version});
     try w.print("9front {s} ({s})\n", .{ build_options.ninefront_release, short(build_options.ninefront_rev) });
     try w.print("drawterm {s}\n", .{short(build_options.drawterm_rev)});
     try w.writeAll("backends:");
@@ -52,10 +52,10 @@ pub const CheckOptions = struct {
 /// Probes the backends (creating a VM and running a tiny program on each,
 /// which on macOS also checks the hypervisor entitlement), reports HVF's
 /// vCPU limit, and checks the root tree by running /bin/echo from it.
-/// Prints one line per item and returns 0, or `exit_failed` if hp9 can't
+/// Prints one line per item and returns 0, or `exit_failed` if h9 can't
 /// run 9front programs from the root here.
 pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOptions) std.Io.Writer.Error!u8 {
-    try w.print("hp9 {s} on {t} {t}\n", .{ build_options.version, builtin.os.tag, builtin.cpu.arch });
+    try w.print("h9 {s} on {t} {t}\n", .{ build_options.version, builtin.os.tag, builtin.cpu.arch });
     const arch = vmm.host_arch orelse {
         try w.writeAll("host: no 9front architecture for this CPU\n");
         return exit_failed;
@@ -90,7 +90,7 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOpti
     }
 
     const root = o.root orelse {
-        if (o.root_arg) |r| try w.print("root {s}: not found\n", .{r}) else try w.writeAll("root: none (use --root DIR or $HP9ROOT; scripts/mkroot.py builds one)\n");
+        if (o.root_arg) |r| try w.print("root {s}: not found\n", .{r}) else try w.writeAll("root: none (use --root DIR or $H9ROOT; scripts/mkroot.py builds one)\n");
         return exit_failed;
     };
     try w.print("root {s}: ", .{root});
@@ -126,12 +126,12 @@ const Probe = union(enum) {
 
 /// Creates a machine on backend `k` and runs the hello fixture on it.
 fn probe(gpa: std.mem.Allocator, io: std.Io, k: vmm.BackendKind, arch: vmm.Arch, memory: ?u64) Probe {
-    var hdr: [hp9.aout.header_size]u8 = undefined;
+    var hdr: [h9.aout.header_size]u8 = undefined;
     const text: []const u8 = switch (arch) {
         .arm64 => &hello.arm64_text,
         .amd64 => &hello.amd64_text,
     };
-    hp9.aout.writeTextHeader(&hdr, arch, text.len);
+    h9.aout.writeTextHeader(&hdr, arch, text.len);
     const img = std.mem.concat(gpa, u8, &.{ &hdr, text }) catch |e| return .{ .err = e };
     defer gpa.free(img);
 
@@ -140,7 +140,7 @@ fn probe(gpa: std.mem.Allocator, io: std.Io, k: vmm.BackendKind, arch: vmm.Arch,
     var err: std.Io.Writer.Allocating = .init(gpa);
     defer err.deinit();
     const start: std.Io.Timestamp = .now(io, .awake);
-    var m = hp9.Machine.init(gpa, io, .{
+    var m = h9.Machine.init(gpa, io, .{
         .backend = k,
         .arch = arch,
         .policy = .{ .memory = memory },
@@ -166,7 +166,7 @@ fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: vmm.Arch) 
     defer out.deinit();
     var err: std.Io.Writer.Allocating = .init(gpa);
     defer err.deinit();
-    var m = hp9.Machine.init(gpa, io, .{
+    var m = h9.Machine.init(gpa, io, .{
         .backend = o.backend,
         .arch = arch,
         .root = o.root,
@@ -186,12 +186,12 @@ fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: vmm.Arch) 
 pub fn explain(want: vmm.BackendKind, err: anyerror) []const u8 {
     return switch (err) {
         error.HypervisorUnavailable => if (builtin.os.tag == .macos)
-            "no usable hypervisor (is hp9 signed with hp9.entitlements?)"
+            "no usable hypervisor (is h9 signed with h9.entitlements?)"
         else
             "no usable hypervisor",
         error.BackendNotBuilt => switch (want) {
-            .emu, .auto => "the emulator isn't built into this hp9 (use hp9-emu from the releases, or build with -Demu=unicorn)",
-            else => "not built into this hp9",
+            .emu, .auto => "the emulator isn't built into this h9 (use h9-emu from the releases, or build with -Demu=unicorn)",
+            else => "not built into this h9",
         },
         error.WrongArch => "can't run this architecture",
         error.NotImplemented => "not implemented yet",

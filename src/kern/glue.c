@@ -1,5 +1,5 @@
 /*
- * hp9's replacement for drawterm's main.c, cpu.c and GUI backend: boots
+ * h9's replacement for drawterm's main.c, cpu.c and GUI backend: boots
  * drawterm's kern without a window or a cpu connection. See DESIGN.md,
  * "Kernel: drawterm kern/ and the Zig seam".
  */
@@ -45,8 +45,8 @@ void auth_freerpc(void *rpc) { USED(rpc); }
 int auth_rpc(void *rpc, char *verb, void *a, int n) { USED(rpc, verb, a, n); return -1; }
 
 #ifdef WINDOWS
-extern char *hp9_hostuser(void);	/* glue-win32.c */
-#define hostuser hp9_hostuser
+extern char *h9_hostuser(void);	/* glue-win32.c */
+#define hostuser h9_hostuser
 #else
 static char*
 hostuser(void)
@@ -66,13 +66,13 @@ hostuser(void)
 /*
  * Boots the kernel. The calling thread becomes the kernel's first Proc for
  * good, so callers use a private thread (src/kern.zig). Machines' processes
- * are made later with hp9_kern_spawn (proc.c). Returns 0, or -1 with the error
+ * are made later with h9_kern_spawn (proc.c). Returns 0, or -1 with the error
  * string set.
  */
-extern void hp9_proc_boot(void);	/* proc.c */
+extern void h9_proc_boot(void);	/* proc.c */
 
 int
-hp9_kern_boot(void)
+h9_kern_boot(void)
 {
 	kerndate = seconds();
 	eve = hostuser();
@@ -83,15 +83,15 @@ hp9_kern_boot(void)
 	chandevreset();
 	chandevinit();
 	/* After chandevinit: devip sets sysname to the host name. */
-	kstrdup(&sysname, "hp9");
+	kstrdup(&sysname, "h9");
 	quotefmtinstall();
-	hp9_proc_boot();
+	h9_proc_boot();
 	return 0;
 }
 
 /* Parks the boot thread for good once the kernel is up. */
 void
-hp9_kern_park(void)
+h9_kern_park(void)
 {
 	for(;;)
 		procsleep();
@@ -99,34 +99,34 @@ hp9_kern_park(void)
 
 /* The host user, which is hostowner. */
 char*
-hp9_kern_user(void)
+h9_kern_user(void)
 {
 	return eve;
 }
 
 /* The calling Proc's pid. */
 ulong
-hp9_kern_pid(void)
+h9_kern_pid(void)
 {
 	return up->pid;
 }
 
 /* Masks the devices whose letters are in devs from future attaches. */
 void
-hp9_kern_devmask(char *devs)
+h9_kern_devmask(char *devs)
 {
 	devmask(up->pgrp, 0, devs);
 }
 
 /* The calling Proc, and interrupting one (for timeouts). */
 void*
-hp9_kern_self(void)
+h9_kern_self(void)
 {
 	return up;
 }
 
 void
-hp9_kern_interrupt(void *p)
+h9_kern_interrupt(void *p)
 {
 	procinterrupt(p);
 }
@@ -137,7 +137,7 @@ hp9_kern_interrupt(void *p)
  * "interrupted" as the error string.
  */
 int
-hp9_kern_sleep(long ms)
+h9_kern_sleep(long ms)
 {
 	long slice;
 
@@ -160,7 +160,7 @@ hp9_kern_sleep(long ms)
 
 /* The current Proc's error string, for the Zig side. */
 char*
-hp9_kern_errstr(void)
+h9_kern_errstr(void)
 {
 	return up->nerrlab ? up->errstr : up->syserrstr;
 }
@@ -170,7 +170,7 @@ hp9_kern_errstr(void)
  * length and has no sys* wrapper.
  */
 int
-hp9_fd2path(int fd, char *buf, uint nbuf)
+h9_fd2path(int fd, char *buf, uint nbuf)
 {
 	Chan *c;
 

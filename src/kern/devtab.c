@@ -1,5 +1,5 @@
 /*
- * hp9's device table: drawterm's kern/devtab.c plus our devices. The
+ * h9's device table: drawterm's kern/devtab.c plus our devices. The
  * build compiles this instead of drawterm's copy.
  */
 #include "u.h"

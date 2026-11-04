@@ -1,5 +1,5 @@
 /*
- * hp9's per-process records: what 9front keeps in its Proc and drawterm's
+ * h9's per-process records: what 9front keeps in its Proc and drawterm's
  * lacks (parent, children, wait queue, Egrp, the machine-local pid and a
  * pointer to the Zig process). kern/dat.h stays unmodified, so a record is
  * found from its Proc through a table here. See DESIGN.md, "Process model".
@@ -12,11 +12,11 @@
  * Notes are queued on the record, not in drawterm's Proc: drawterm's
  * postnote only sets notepending, which its sysfile.c clears after every
  * successful call, so notepending stays the "interrupt this call" flag.
- * devpipe.c is built with -Dpostnote=hp9_postnote, so its notes come here.
+ * devpipe.c is built with -Dpostnote=h9_postnote, so its notes come here.
  * Each record belongs to a machine (Hmach): note groups and postnotepg
  * never reach another machine's processes.
  *
- * devproc.c (#p) reads and changes records through the hp9_* functions
+ * devproc.c (#p) reads and changes records through the h9_* functions
  * declared in hproc.h; a lookup by pid only finds processes in the
  * caller's machine.
  *
@@ -146,7 +146,7 @@ uphproc(void)
 
 	h = lookup(up);
 	if(h == nil)
-		error("not an hp9 process");
+		error("not an h9 process");
 	return h;
 }
 
@@ -166,7 +166,7 @@ newnoteid(Hmach *m)
  * so a note posted to it is delivered. Called with the process's nlk held,
  * and only while its aux is set.
  */
-void	(*hp9_notekick)(void*);
+void	(*h9_notekick)(void*);
 
 static Hnote*
 mknote(char *msg, int flag)
@@ -205,19 +205,19 @@ pushnote(Hproc *h, Hnote *n)
 	}
 	h->note[h->nnote++] = n;
 	procinterrupt(h->p);
-	if(h->aux != nil && hp9_notekick != nil)
-		hp9_notekick(h->aux);
+	if(h->aux != nil && h9_notekick != nil)
+		h9_notekick(h->aux);
 	unlock(&h->nlk);
 	return 1;
 }
 
 /*
- * drawterm's postnote, which kern files built with -Dpostnote=hp9_postnote
- * (devpipe.c) call. A Proc that isn't an hp9 process (a kproc) is only
+ * drawterm's postnote, which kern files built with -Dpostnote=h9_postnote
+ * (devpipe.c) call. A Proc that isn't an h9 process (a kproc) is only
  * interrupted, as drawterm's postnote does.
  */
 int
-hp9_postnote(Proc *p, int dolock, char *msg, int flag)
+h9_postnote(Proc *p, int dolock, char *msg, int flag)
 {
 	Hproc *h;
 	Hnote *n;
@@ -272,7 +272,7 @@ postnotepg(Hmach *m, ulong noteid, char *msg, int flag)
  * with the error string set if there's no such process.
  */
 int
-hp9_kern_postnote(ulong pid, char *msg, int flag)
+h9_kern_postnote(ulong pid, char *msg, int flag)
 {
 	Hproc *self, *h;
 	Hnote *n;
@@ -301,10 +301,10 @@ hp9_kern_postnote(ulong pid, char *msg, int flag)
 
 /*
  * The calling process's machine, with a reference for the caller, which
- * hp9_kern_putmach releases. nil if the caller isn't an hp9 process.
+ * h9_kern_putmach releases. nil if the caller isn't an h9 process.
  */
 void*
-hp9_kern_mach(void)
+h9_kern_mach(void)
 {
 	Hproc *h;
 
@@ -316,7 +316,7 @@ hp9_kern_mach(void)
 }
 
 void
-hp9_kern_putmach(void *m)
+h9_kern_putmach(void *m)
 {
 	putmach(m);
 }
@@ -326,11 +326,11 @@ hp9_kern_putmach(void *m)
  * m: with all set, to every process; otherwise to the note group of its
  * first process (pid 1), which is the foreground group. Callable from any
  * thread, including ones that aren't kernel processes: it takes only
- * locks, never up or an error label, as hp9_cons_wake doesn't. Returns
+ * locks, never up or an error label, as h9_cons_wake doesn't. Returns
  * how many processes it reached.
  */
 int
-hp9_kern_postmach(void *v, int all, char *msg, int flag)
+h9_kern_postmach(void *v, int all, char *msg, int flag)
 {
 	Hmach *m;
 	Hnote *n;
@@ -367,17 +367,17 @@ hp9_kern_postmach(void *v, int all, char *msg, int flag)
 
 /* For devproc.c (hproc.h). */
 
-void	(*hp9_procstatus)(void*, char*, int, ulong*);
+void	(*h9_procstatus)(void*, char*, int, ulong*);
 
 Hproc*
-hp9_uphproc(void)
+h9_uphproc(void)
 {
 	return uphproc();
 }
 
 /* The process with machine-local pid in machine m, with a reference, or nil. */
 Hproc*
-hp9_pidlookup(Hmach *m, ulong pid)
+h9_pidlookup(Hmach *m, ulong pid)
 {
 	Hproc *h;
 	int i;
@@ -395,7 +395,7 @@ hp9_pidlookup(Hmach *m, ulong pid)
 }
 
 void
-hp9_putproc(Hproc *h)
+h9_putproc(Hproc *h)
 {
 	putproc(h);
 }
@@ -405,7 +405,7 @@ hp9_putproc(Hproc *h)
  * pids and returns how many it filled.
  */
 int
-hp9_pids(Hmach *m, ulong *pids, int n)
+h9_pids(Hmach *m, ulong *pids, int n)
 {
 	Hproc *h;
 	int i, count;
@@ -435,25 +435,25 @@ hp9_pids(Hmach *m, ulong *pids, int n)
 }
 
 Hnote*
-hp9_mknote(char *msg, int flag)
+h9_mknote(char *msg, int flag)
 {
 	return mknote(msg, flag);
 }
 
 void
-hp9_freenote(Hnote *n)
+h9_freenote(Hnote *n)
 {
 	freenote(n);
 }
 
 int
-hp9_pushnote(Hproc *h, Hnote *n)
+h9_pushnote(Hproc *h, Hnote *n)
 {
 	return pushnote(h, n);
 }
 
 void
-hp9_postnotepg(Hmach *m, ulong noteid, char *msg, int flag)
+h9_postnotepg(Hmach *m, ulong noteid, char *msg, int flag)
 {
 	postnotepg(m, noteid, msg, flag);
 }
@@ -464,7 +464,7 @@ hp9_postnotepg(Hmach *m, ulong noteid, char *msg, int flag)
  * Returns 0, or -1 if there's no such group.
  */
 int
-hp9_setnoteid(Hproc *h, ulong noteid)
+h9_setnoteid(Hproc *h, ulong noteid)
 {
 	Hproc *q;
 	int i, found;
@@ -488,14 +488,14 @@ hp9_setnoteid(Hproc *h, ulong noteid)
  * next note delivery, whether or not it has a handler.
  */
 void
-hp9_killproc(Hproc *h)
+h9_killproc(Hproc *h)
 {
 	lock(&h->nlk);
 	if(h->p != nil){
 		h->killed = 1;
 		procinterrupt(h->p);
-		if(h->aux != nil && hp9_notekick != nil)
-			hp9_notekick(h->aux);
+		if(h->aux != nil && h9_notekick != nil)
+			h9_notekick(h->aux);
 	}
 	unlock(&h->nlk);
 }
@@ -505,7 +505,7 @@ hp9_killproc(Hproc *h)
  * which the caller has cut to ARGSLEN at a character boundary.
  */
 void
-hp9_kern_setargs(char *args, int n)
+h9_kern_setargs(char *args, int n)
 {
 	Hproc *h;
 
@@ -521,7 +521,7 @@ hp9_kern_setargs(char *args, int n)
 
 /* Posts a note to every process but the caller in its machine's note group noteid. */
 void
-hp9_kern_postnotepg(ulong noteid, char *msg, int flag)
+h9_kern_postnotepg(ulong noteid, char *msg, int flag)
 {
 	Hproc *h;
 
@@ -532,7 +532,7 @@ hp9_kern_postnotepg(ulong noteid, char *msg, int flag)
 
 /* The calling process's note group. */
 ulong
-hp9_kern_noteid(void)
+h9_kern_noteid(void)
 {
 	Hproc *h;
 
@@ -542,7 +542,7 @@ hp9_kern_noteid(void)
 
 /* Whether the calling process has a note handler (notify with a non-nil function). */
 void
-hp9_kern_setnotify(int on)
+h9_kern_setnotify(int on)
 {
 	Hproc *h;
 
@@ -556,7 +556,7 @@ hp9_kern_setnotify(int on)
 
 /* Whether the calling process has a note queued. */
 int
-hp9_kern_notepending(void)
+h9_kern_notepending(void)
 {
 	Hproc *h;
 
@@ -568,12 +568,12 @@ hp9_kern_notepending(void)
  * 9front's popnote, for delivery at a syscall exit or kick. Takes the
  * next note into msg (ERRMAX bytes), with " pc=" and pc appended to a
  * "sys:" note posted to this process alone, and says what to do:
- * Nhandle (the process is now in its handler until hp9_kern_noted),
+ * Nhandle (the process is now in its handler until h9_kern_noted),
  * Nkill or Nkilldebug (it has no handler, or is in it already), or Nnone
  * (no note, or only user notes while in the handler, which wait).
  */
 int
-hp9_kern_popnote(char *msg, uvlong pc)
+h9_kern_popnote(char *msg, uvlong pc)
 {
 	Hproc *h;
 	Hnote *n;
@@ -621,7 +621,7 @@ hp9_kern_popnote(char *msg, uvlong pc)
  * when the process carries on, out of the handler (NCONT, NSAVE, NRSTR).
  */
 int
-hp9_kern_noted(int arg, char *msg)
+h9_kern_noted(int arg, char *msg)
 {
 	Hproc *h;
 	int r;
@@ -662,7 +662,7 @@ hp9_kern_noted(int arg, char *msg)
 
 /* exec's reset of the note state: no handler, nothing queued. */
 void
-hp9_kern_execnotes(void)
+h9_kern_execnotes(void)
 {
 	Hproc *h;
 
@@ -680,7 +680,7 @@ hp9_kern_execnotes(void)
 
 /* The calling process's Egrp, for devenv; raises an error if it has none. */
 void*
-hp9_upegrp(void)
+h9_upegrp(void)
 {
 	Hproc *h;
 
@@ -775,7 +775,7 @@ fgrpclose(Fgrp *f)
 #define closefgrp fgrpclose
 
 void
-hp9_fgrpclose(Fgrp *f)
+h9_fgrpclose(Fgrp *f)
 {
 	fgrpclose(f);
 }
@@ -816,12 +816,12 @@ static Proc *bootproc;
 
 /* Called once the kernel is up, from the boot Proc (glue.c). */
 void
-hp9_proc_boot(void)
+h9_proc_boot(void)
 {
 	bootproc = up;
 }
 
-void hp9_kern_exit(void);
+void h9_kern_exit(void);
 
 static void
 spawntramp(void *v)
@@ -833,17 +833,17 @@ spawntramp(void *v)
 	free(v);
 	/* Now that up is set, kernel calls (and their errors) are allowed. */
 	if(waserror())
-		panic("hp9_kern_spawn: %s", up->errstr);
+		panic("h9_kern_spawn: %s", up->errstr);
 	h = uphproc();
 	up->slash = cclone(bootproc->slash);
 	up->dot = cclone(bootproc->slash);
 	up->pgrp = newpgrp();
 	up->fgrp = dupfgrp(nil);
 	up->rgrp = newrgrp();
-	h->egrp = hp9_egrpnew();
+	h->egrp = h9_egrpnew();
 	poperror();
 	s.fn(s.arg);
-	hp9_kern_exit();
+	h9_kern_exit();
 }
 
 /*
@@ -855,7 +855,7 @@ spawntramp(void *v)
  * or -1 if allocation fails.
  */
 int
-hp9_kern_spawn(char *name, void (*fn)(void*), void *arg)
+h9_kern_spawn(char *name, void (*fn)(void*), void *arg)
 {
 	Proc *p;
 	Spawn *s;
@@ -894,7 +894,7 @@ forktramp(void *v)
 	s = *(Spawn*)v;
 	free(v);
 	s.fn(s.arg);
-	hp9_kern_exit();
+	h9_kern_exit();
 }
 
 /*
@@ -906,7 +906,7 @@ forktramp(void *v)
  * with the error string set; on error, fn never runs.
  */
 int
-hp9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
+h9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 {
 	Proc *p;
 	Hproc *h, *ph;
@@ -931,7 +931,7 @@ hp9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 		}
 		if(h != nil){
 			if(h->egrp != nil)
-				hp9_egrpclose(h->egrp);
+				h9_egrpclose(h->egrp);
 			putmach(h->mach);
 			free(h);
 		}
@@ -996,12 +996,12 @@ hp9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 	/* Environment group */
 	if(flag & (RFENVG|RFCENVG)){
 		if(flag & RFENVG)
-			h->egrp = hp9_egrpcopy(ph->egrp);
+			h->egrp = h9_egrpcopy(ph->egrp);
 		else
-			h->egrp = hp9_egrpnew();
+			h->egrp = h9_egrpnew();
 	} else {
 		h->egrp = ph->egrp;
-		hp9_egrpincref(ph->egrp);
+		h9_egrpincref(ph->egrp);
 	}
 	poperror();
 
@@ -1042,7 +1042,7 @@ swappgrp(Hproc *h, Pgrp *pg)
 
 /* chdir, as drawterm's syschdir, with dot swapped under the record's debug lock. */
 int
-hp9_kern_chdir(char *name)
+h9_kern_chdir(char *name)
 {
 	Hproc *h;
 	Chan *c, *old;
@@ -1067,7 +1067,7 @@ hp9_kern_chdir(char *name)
  * sysrfork). Returns 0, or -1 with the error string set.
  */
 int
-hp9_kern_rfork(int flag)
+h9_kern_rfork(int flag)
 {
 	Fgrp *ofg;
 	Pgrp *opg;
@@ -1102,7 +1102,7 @@ hp9_kern_rfork(int flag)
 			up->rgrp = org;
 		}
 		if(h->egrp != oeg){
-			hp9_egrpclose(h->egrp);
+			h9_egrpclose(h->egrp);
 			h->egrp = oeg;
 		}
 		return syserr();
@@ -1129,9 +1129,9 @@ hp9_kern_rfork(int flag)
 	/* Environment group */
 	if(flag & (RFENVG|RFCENVG)){
 		if(flag & RFENVG)
-			h->egrp = hp9_egrpcopy(oeg);
+			h->egrp = h9_egrpcopy(oeg);
 		else
-			h->egrp = hp9_egrpnew();
+			h->egrp = h9_egrpnew();
 	}
 
 	if(ofg != up->fgrp)
@@ -1141,7 +1141,7 @@ hp9_kern_rfork(int flag)
 	if(org != up->rgrp)
 		closergrp(org);
 	if(oeg != h->egrp)
-		hp9_egrpclose(oeg);
+		h9_egrpclose(oeg);
 
 	poperror();
 
@@ -1160,11 +1160,11 @@ hp9_kern_rfork(int flag)
 
 /*
  * Ends the calling kernel process; it doesn't return. The parent, if any,
- * gets a wait record built from the exit string set with hp9_kern_setexits,
+ * gets a wait record built from the exit string set with h9_kern_setexits,
  * as 9front's pexit builds it.
  */
 void
-hp9_kern_exit(void)
+h9_kern_exit(void)
 {
 	Hproc *h, *ph;
 	Hwait *w;
@@ -1223,7 +1223,7 @@ hp9_kern_exit(void)
 	unlock(&h->exl);
 
 	if(h->egrp != nil){
-		hp9_egrpclose(h->egrp);
+		h9_egrpclose(h->egrp);
 		h->egrp = nil;
 	}
 	putproc(h);
@@ -1248,7 +1248,7 @@ haswaitq(void *x)
  * children"), another await in progress, or interrupted.
  */
 int
-hp9_kern_await(char *buf, int n)
+h9_kern_await(char *buf, int n)
 {
 	Hproc *h;
 	Hwait *w;
@@ -1288,7 +1288,7 @@ hp9_kern_await(char *buf, int n)
 
 /* The exit string the parent's wait record will carry; empty for success. */
 void
-hp9_kern_setexits(char *msg)
+h9_kern_setexits(char *msg)
 {
 	Hproc *h;
 
@@ -1299,7 +1299,7 @@ hp9_kern_setexits(char *msg)
 
 /* The calling process's machine-local pid, and setting it. */
 ulong
-hp9_kern_gpid(void)
+h9_kern_gpid(void)
 {
 	Hproc *h;
 
@@ -1308,7 +1308,7 @@ hp9_kern_gpid(void)
 }
 
 void
-hp9_kern_setgpid(ulong pid)
+h9_kern_setgpid(ulong pid)
 {
 	Hproc *h;
 
@@ -1319,7 +1319,7 @@ hp9_kern_setgpid(ulong pid)
 
 /* The process's name in wait records; exec sets it to the program's. */
 void
-hp9_kern_settext(char *text)
+h9_kern_settext(char *text)
 {
 	Hproc *h;
 
@@ -1331,7 +1331,7 @@ hp9_kern_settext(char *text)
 
 /* The Zig process behind the calling kernel process. */
 void*
-hp9_kern_aux(void)
+h9_kern_aux(void)
 {
 	Hproc *h;
 
@@ -1340,14 +1340,14 @@ hp9_kern_aux(void)
 }
 
 void
-hp9_kern_setaux(void *aux)
+h9_kern_setaux(void *aux)
 {
 	Hproc *h;
 
 	h = lookup(up);
 	if(h == nil)
 		return;
-	/* hp9_notekick reads aux under nlk. */
+	/* h9_notekick reads aux under nlk. */
 	lock(&h->nlk);
 	h->aux = aux;
 	unlock(&h->nlk);
@@ -1357,7 +1357,7 @@ extern int sysclose(int);
 
 /* Closes the calling process's close-on-exec fds, as exec does. */
 void
-hp9_kern_closeexec(void)
+h9_kern_closeexec(void)
 {
 	Fgrp *f;
 	int i, cexec;

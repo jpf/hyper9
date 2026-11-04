@@ -5,7 +5,7 @@
  * process's environment on first attach (DESIGN.md, env.scrub).
  *
  * drawterm's Proc has no egrp, and kern/dat.h stays unmodified, so a Proc's
- * group is kept on its hp9 process record (src/kern/proc.c). drawterm's own Egrp
+ * group is kept on its h9 process record (src/kern/proc.c). drawterm's own Egrp
  * and Evalue types don't match 9front's, so this file uses its own (HEgrp,
  * HEvalue). #ec (the kernel configuration group) isn't supported.
  */
@@ -56,12 +56,12 @@ struct HEgrp
 #define QID(qidpath)	((uint)(qidpath) & 0x7FFFFFFF)
 #define ROUND(s, sz)	(((s)+((sz)-1))&~((sz)-1))
 
-extern void *hp9_upegrp(void);	/* proc.c */
+extern void *h9_upegrp(void);	/* proc.c */
 
 static HEgrp*
 upegrp(void)
 {
-	return hp9_upegrp();
+	return h9_upegrp();
 }
 
 static void
@@ -90,7 +90,7 @@ hcloseegrp(HEgrp *eg)
 
 /* A new, empty environment. */
 void*
-hp9_egrpnew(void)
+h9_egrpnew(void)
 {
 	HEgrp *eg;
 
@@ -102,13 +102,13 @@ hp9_egrpnew(void)
 }
 
 void
-hp9_egrpincref(void *eg)
+h9_egrpincref(void *eg)
 {
 	incref(&((HEgrp*)eg)->ref);
 }
 
 void
-hp9_egrpclose(void *eg)
+h9_egrpclose(void *eg)
 {
 	hcloseegrp(eg);
 }
@@ -118,14 +118,14 @@ static HEvalue**	envhash(HEgrp*, char*);
 
 /* A copy of an environment, for RFENVG: 9front's envcpy. */
 void*
-hp9_egrpcopy(void *vfrom)
+h9_egrpcopy(void *vfrom)
 {
 	HEgrp *to, *from;
 	HEvalue *e, *ne, **h;
 	int i, n;
 
 	from = vfrom;
-	to = hp9_egrpnew();
+	to = h9_egrpnew();
 	if(waserror()){
 		hcloseegrp(to);
 		nexterror();

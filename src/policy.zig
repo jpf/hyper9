@@ -1,7 +1,7 @@
 //! The sandbox policy (DESIGN.md, "Sandbox policy"): profiles and explicit
 //! settings, compiled into a Plan that the machine's namespace builder
 //! follows and `--print` shows. The Plan's access rules are what devfs
-//! checks through `hp9_fs_check` (src/kern.zig).
+//! checks through `h9_fs_check` (src/kern.zig).
 //!
 //! All host paths here are absolute and already resolved (symlinks
 //! followed); the CLI resolves them before building a Policy.
@@ -371,7 +371,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     if (pol.host_cmd) try caveats.append(arena, "#C runs host commands with the host user's rights");
     if (pol.host_fs) try caveats.append(arena, "--host-fs exposes the whole host filesystem");
     try caveats.append(arena, "/proc/n/ns shows the host paths of bound host trees");
-    try caveats.append(arena, "the hp9 process itself is not host-sandboxed");
+    try caveats.append(arena, "the h9 process itself is not host-sandboxed");
 
     return .{
         .profile = pol.profile,

@@ -3,14 +3,14 @@
  * (lib/zig/c/string.zig) returns a pointer to the matching byte instead
  * of one past it, and never returns nil when there's no match, so
  * drawterm's strecpy and utfecpy leave strings unterminated. The build
- * defines memccpy as hp9_memccpy for kern and its libraries on musl, so
+ * defines memccpy as h9_memccpy for kern and its libraries on musl, so
  * they call this standard one.
  */
 
 #include <stddef.h>
 
 void*
-hp9_memccpy(void *dst, const void *src, int c, size_t n)
+h9_memccpy(void *dst, const void *src, int c, size_t n)
 {
 	unsigned char *d;
 	const unsigned char *s;

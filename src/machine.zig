@@ -207,7 +207,7 @@ pub const Machine = struct {
     ///
     /// With a timeout in the policy, the process is stopped at the deadline:
     /// its vCPU is kicked and any blocking kernel call is interrupted, and
-    /// it's killed with "hp9: timeout". A console read waits in the kernel,
+    /// it's killed with "h9: timeout". A console read waits in the kernel,
     /// so it's interrupted too, and the console's reader thread is stopped
     /// with `Stdio.in_cancel`. If a process is stuck in a host call that
     /// can't be interrupted, or `in` has no cancel and is blocked in a read,
@@ -250,7 +250,7 @@ pub const Machine = struct {
                 error.TooManyProcs => unreachable, // the cap is at least 1
             };
         };
-        kern.spawn("hp9", Proc, firstMain, first) catch |e| {
+        kern.spawn("h9", Proc, firstMain, first) catch |e| {
             job.dropProc(first);
             kern.removeConsole(job.con_id);
             job.procs.deinit(m.gpa);
@@ -296,8 +296,8 @@ pub const Machine = struct {
         return m.out_buf[0..n];
     }
 
-    const timeout_note = "hp9: timeout";
-    const stopped_note = "hp9: machine stopped";
+    const timeout_note = "h9: timeout";
+    const stopped_note = "h9: machine stopped";
     const grace_ms = 500;
     /// How long processes have to handle `hangup` (at a timeout, a closed
     /// terminal or SIGTERM) before the machine is torn down. Shorter than
@@ -674,7 +674,7 @@ pub const Machine = struct {
         const m = p.job.m;
         kern.setPlan(&m.plan);
         p.setKproc();
-        const st = m.loop(p) catch |e| Status{ .killed = std.fmt.bufPrint(&p.msg_buf, "hp9: {t}", .{e}) catch "hp9: error" };
+        const st = m.loop(p) catch |e| Status{ .killed = std.fmt.bufPrint(&p.msg_buf, "h9: {t}", .{e}) catch "h9: error" };
         setExits(switch (st) {
             .exited => |t| t,
             .killed => |t| t,
@@ -1126,7 +1126,7 @@ pub const Machine = struct {
             .{ .name = "home", .value = std.fmt.bufPrint(&home_buf, "/usr/{s}", .{user}) catch "/" },
             .{ .name = "cputype", .value = @tagName(m.arch) },
             .{ .name = "objtype", .value = @tagName(m.arch) },
-            .{ .name = "sysname", .value = "hp9" },
+            .{ .name = "sysname", .value = "h9" },
             .{ .name = "service", .value = "terminal" },
         };
         for (defaults) |e| try putEnv(e.name, e.value);
@@ -1204,8 +1204,8 @@ fn dumpFault(w: *std.Io.Writer, u: *const vmm.Ureg, f: vmm.Fault, bytes: []const
 }
 
 fn dumpFaultTo(w: *std.Io.Writer, u: *const vmm.Ureg, f: vmm.Fault, bytes: []const u8) std.Io.Writer.Error!void {
-    try w.print("hp9: fault: {t} addr=0x{x} syndrome=0x{x}\n", .{ f.access, f.addr, f.syndrome });
-    try w.writeAll("hp9: pc ");
+    try w.print("h9: fault: {t} addr=0x{x} syndrome=0x{x}\n", .{ f.access, f.addr, f.syndrome });
+    try w.writeAll("h9: pc ");
     try writeSym(w, bytes, u.pc());
     try w.writeAll("\n");
     switch (u.*) {
@@ -1215,7 +1215,7 @@ fn dumpFaultTo(w: *std.Io.Writer, u: *const vmm.Ureg, f: vmm.Fault, bytes: []con
                 try w.writeAll(if (i % 4 == 3) "\n" else "  ");
             }
             try w.print("\nSP\t0x{x:0>16}  PC\t0x{x:0>16}  PSR\t0x{x:0>16}  TYPE\t0x{x:0>16}\n", .{ r.sp, r.pc, r.psr, r.type });
-            try w.writeAll("hp9: lr ");
+            try w.writeAll("h9: lr ");
             try writeSym(w, bytes, r.r[30]);
             try w.writeAll("\n");
         },

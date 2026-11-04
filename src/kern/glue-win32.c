@@ -8,7 +8,7 @@
 
 /* The host user, which is hostowner. */
 char*
-hp9_hostuser(void)
+h9_hostuser(void)
 {
 	static char user[64];
 	wchar_t w[64];
@@ -22,6 +22,6 @@ hp9_hostuser(void)
 
 /*
  * win32.c's WinMain calls drawterm's main, which dtos.h renames mymain.
- * hp9 has its own entry point, so it's never called.
+ * h9 has its own entry point, so it's never called.
  */
 int mymain(int argc, char **argv) { USED(argc); USED(argv); return 0; }

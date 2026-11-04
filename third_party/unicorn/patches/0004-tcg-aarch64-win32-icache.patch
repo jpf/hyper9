@@ -1,6 +1,6 @@
 Subject: tcg/aarch64: FlushInstructionCache on Windows
 
-Part of hp9 (third_party/unicorn). Modifies Unicorn, so GPLv2 like it.
+Part of h9 (third_party/unicorn). Modifies Unicorn, so GPLv2 like it.
 
 diff --git a/qemu/tcg/aarch64/tcg-target.h b/qemu/tcg/aarch64/tcg-target.h
 index 13993a7..dda4264 100644

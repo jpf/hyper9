@@ -1,13 +1,13 @@
-//! Runs the same programs on every backend built into this hp9 and checks
+//! Runs the same programs on every backend built into this h9 and checks
 //! that each one produces the expected output and syscall trace. Backends
 //! that can't run here (no hypervisor, not built, wrong architecture) are
 //! skipped; the test fails if none can.
 
 const std = @import("std");
-const hp9 = @import("hp9");
+const h9 = @import("h9");
 const hello = @import("hello");
-const vmm = hp9.vmm;
-const aout = hp9.aout;
+const vmm = h9.vmm;
+const aout = h9.aout;
 
 const Result = struct {
     status: []const u8,
@@ -25,7 +25,7 @@ fn runOn(gpa: std.mem.Allocator, kind: vmm.BackendKind, arch: aout.Arch, bytes: 
     var trace: std.Io.Writer.Allocating = .init(gpa);
     defer trace.deinit();
 
-    var m = hp9.Machine.init(gpa, std.testing.io, .{
+    var m = h9.Machine.init(gpa, std.testing.io, .{
         .backend = kind,
         .arch = arch,
         .trace = &trace.writer,
@@ -164,7 +164,7 @@ fn expectKick(arch: aout.Arch, text: []const u8) !void {
         defer b.destroy();
         const as = try b.newAddressSpace();
         defer as.destroy();
-        var img = try hp9.loader.load(gpa, b, as, bytes, &.{"spin"}, 1);
+        var img = try h9.loader.load(gpa, b, as, bytes, &.{"spin"}, 1);
         defer img.segs.release(as);
         var v = try b.createVcpu();
         defer v.destroy();
@@ -212,7 +212,7 @@ fn expectKickRace(arch: aout.Arch, text: []const u8) !void {
         defer b.destroy();
         const as = try b.newAddressSpace();
         defer as.destroy();
-        var img = try hp9.loader.load(gpa, b, as, bytes, &.{"spin"}, 1);
+        var img = try h9.loader.load(gpa, b, as, bytes, &.{"spin"}, 1);
         defer img.segs.release(as);
         var v = try b.createVcpu();
         defer v.destroy();
@@ -252,13 +252,13 @@ test "a kick racing the start of a run isn't lost amd64" {
 
 /// Runs `bytes` as a machine with `pol` on every backend that can, and
 /// returns the statuses.
-fn runPolicy(arch: aout.Arch, bytes: []const u8, pol: hp9.Policy, want: []const u8) !void {
+fn runPolicy(arch: aout.Arch, bytes: []const u8, pol: h9.Policy, want: []const u8) !void {
     const gpa = std.testing.allocator;
     var ran: usize = 0;
     for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        var m = hp9.Machine.init(gpa, std.testing.io, .{
+        var m = h9.Machine.init(gpa, std.testing.io, .{
             .backend = kind,
             .arch = arch,
             .policy = pol,
@@ -283,13 +283,13 @@ fn runPolicy(arch: aout.Arch, bytes: []const u8, pol: hp9.Policy, want: []const 
 test "a timeout stops a spinning process arm64" {
     const bytes = try image(std.testing.allocator, .arm64, &words(&.{0x14000000})); // b .
     defer std.testing.allocator.free(bytes);
-    try runPolicy(.arm64, bytes, .{ .timeout_ns = 100 * std.time.ns_per_ms }, "hp9: timeout");
+    try runPolicy(.arm64, bytes, .{ .timeout_ns = 100 * std.time.ns_per_ms }, "h9: timeout");
 }
 
 test "a timeout stops a spinning process amd64" {
     const bytes = try image(std.testing.allocator, .amd64, &[_]u8{ 0xeb, 0xfe }); // jmp .
     defer std.testing.allocator.free(bytes);
-    try runPolicy(.amd64, bytes, .{ .timeout_ns = 100 * std.time.ns_per_ms }, "hp9: timeout");
+    try runPolicy(.amd64, bytes, .{ .timeout_ns = 100 * std.time.ns_per_ms }, "h9: timeout");
 }
 
 test "a timeout interrupts sleep arm64" {
@@ -305,7 +305,7 @@ test "a timeout interrupts sleep arm64" {
     });
     const img = try image(std.testing.allocator, .arm64, &code);
     defer std.testing.allocator.free(img);
-    try runPolicy(.arm64, img, .{ .timeout_ns = 100 * std.time.ns_per_ms }, "hp9: timeout");
+    try runPolicy(.arm64, img, .{ .timeout_ns = 100 * std.time.ns_per_ms }, "h9: timeout");
 }
 
 /// Runs `bytes` on every backend that can, with an owned and a pooled
@@ -318,7 +318,7 @@ fn expectNotes(arch: aout.Arch, bytes: []const u8, want_status: []const u8, want
         defer out.deinit();
         var err: std.Io.Writer.Allocating = .init(gpa);
         defer err.deinit();
-        var m = hp9.Machine.init(gpa, std.testing.io, .{
+        var m = h9.Machine.init(gpa, std.testing.io, .{
             .backend = kind,
             .arch = arch,
             .policy = .{ .timeout_ns = 10 * std.time.ns_per_s },
@@ -526,7 +526,7 @@ test "a timeout interrupts a console read, and its reader thread is cancelled" {
         in.init(std.testing.io, "", &in_buf);
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        var m = hp9.Machine.init(gpa, std.testing.io, .{
+        var m = h9.Machine.init(gpa, std.testing.io, .{
             .backend = kind,
             .arch = .arm64,
             .policy = .{ .timeout_ns = 100 * std.time.ns_per_ms },
@@ -543,7 +543,7 @@ test "a timeout interrupts a console read, and its reader thread is cancelled" {
         defer m.deinit();
         errdefer std.debug.print("backend {t}\n", .{kind});
         const status = try m.run(.{ .bytes = img }, &.{"t"});
-        try std.testing.expectEqualStrings("hp9: timeout", status.killed);
+        try std.testing.expectEqualStrings("h9: timeout", status.killed);
         try std.testing.expect(!m.stuck);
         try std.testing.expect(in.reads.load(.acquire) >= 1);
         ran += 1;
@@ -560,7 +560,7 @@ test "a console read returns input from the reader thread, and a later run sees 
         var src: std.Io.Reader = .fixed("one\ntwo\n");
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        var m = hp9.Machine.init(gpa, std.testing.io, .{
+        var m = h9.Machine.init(gpa, std.testing.io, .{
             .backend = kind,
             .arch = .arm64,
             .stdio = .{ .in = &src, .out = &out.writer, .err = &out.writer },
@@ -591,7 +591,7 @@ test "the memory cap is exact" {
     for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        var m = hp9.Machine.init(gpa, std.testing.io, .{
+        var m = h9.Machine.init(gpa, std.testing.io, .{
             .backend = kind,
             .arch = .arm64,
             .policy = .{ .memory = 64 << 10 },
@@ -640,7 +640,7 @@ test "segments: fork shares text, copies the stack, and shares data only with RF
             defer gpa.free(bytes);
             const as = try b.newAddressSpace();
             defer as.destroy();
-            var img = try hp9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
+            var img = try h9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
             defer img.segs.release(as);
             // hello has no data or bss, so give it some.
             const data = img.segs.data.?.base;
@@ -688,7 +688,7 @@ test "segments: brk grows and shrinks, and memory above the break is zeroed" {
             defer gpa.free(bytes);
             const as = try b.newAddressSpace();
             defer as.destroy();
-            var img = try hp9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
+            var img = try h9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
             defer img.segs.release(as);
             const s = &img.segs;
             const base = s.brkTop();
@@ -728,7 +728,7 @@ test "segments: the stack grows down to its 16 MiB limit" {
             defer gpa.free(bytes);
             const as = try b.newAddressSpace();
             defer as.destroy();
-            var img = try hp9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
+            var img = try h9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
             defer img.segs.release(as);
             const s = &img.segs;
             const l = aout.layout(.arm64);
@@ -756,7 +756,7 @@ test "segments: releasing a process's segments frees its memory" {
             for (0..200) |_| {
                 const as = try b.newAddressSpace();
                 defer as.destroy();
-                var img = try hp9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
+                var img = try h9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
                 defer img.segs.release(as);
                 try img.segs.brk(img.segs.brkTop() + (1 << 20));
                 _ = img.segs.growStack(img.sp - (1 << 20));
@@ -867,7 +867,7 @@ fn expectPooled(arch: aout.Arch, code: []const u8) !void {
     for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| for ([_]u32{ 0, 1 }) |own| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        var m = hp9.Machine.init(gpa, std.testing.io, .{
+        var m = h9.Machine.init(gpa, std.testing.io, .{
             .backend = kind,
             .arch = arch,
             .owned_vcpus = own,

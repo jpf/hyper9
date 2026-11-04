@@ -1,4 +1,4 @@
-//! hp9: run 9front executables on host hypervisors.
+//! h9: run 9front executables on host hypervisors.
 
 pub const aout = @import("aout.zig");
 pub const vmm = @import("vmm.zig");
@@ -16,7 +16,7 @@ pub const syscall = @import("syscall.zig");
 pub const newns = @import("newns.zig");
 pub const consin = @import("consin.zig");
 
-/// What this hp9 was built from, for `--version`.
+/// What this h9 was built from, for `--version`.
 pub const build_info = struct {
     const o = @import("build_options");
     /// `git describe`, or -Dversion.

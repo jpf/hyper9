@@ -4,11 +4,11 @@
 # updates are merges, so commit or stash work first.
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
-. "$HP9_ROOT/scripts/pins.sh"
-cd "$HP9_ROOT"
+. "$H9_ROOT/scripts/pins.sh"
+cd "$H9_ROOT"
 
 prefix=third_party/drawterm
-src="$HP9_LOCAL/src/drawterm"
+src="$H9_LOCAL/src/drawterm"
 if [ ! -d "$src/.git" ]; then
 	git clone -q "$DRAWTERM_REPO" "$src"
 fi

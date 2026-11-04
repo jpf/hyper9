@@ -1,22 +1,22 @@
-//! Runs real 9front binaries from the root tree through the hp9 CLI and
-//! checks their output and exit status. Each case is a separate hp9 process,
+//! Runs real 9front binaries from the root tree through the h9 CLI and
+//! checks their output and exit status. Each case is a separate h9 process,
 //! so it covers the CLI, root resolution and exit codes end to end.
 //!
-//! The build passes the hp9 binary, the root tree (-Droot, default
-//! .local/9front/root) and the backends to test (HP9_TEST_BACKENDS, the
+//! The build passes the h9 binary, the root tree (-Droot, default
+//! .local/9front/root) and the backends to test (H9_TEST_BACKENDS, the
 //! ones built in) through the environment. Every case runs on each backend
 //! that can run arm64 here. Without a root tree, the tests are skipped.
 //! `zig build install-tests` builds this file for another target, and
 //! `scripts/lima/vm test` runs it in a test VM with the same variables.
 //!
 //! Cases named "M5: ..." (and so on) are for a milestone in progress. They
-//! call `pending`, which skips them unless HP9_TEST_PENDING is set; when
+//! call `pending`, which skips them unless H9_TEST_PENDING is set; when
 //! the milestone is done, drop the prefix and the call. Cases for a done
 //! milestone are tagged "(M4)" and the like, so `zig build m4` can select
 //! them.
 //!
-//! Interactive cases run hp9 on a terminal from tests/term.zig. Their
-//! timeouts are multiplied by HP9_TEST_SLOW (default 1), for emulated VMs.
+//! Interactive cases run h9 on a terminal from tests/term.zig. Their
+//! timeouts are multiplied by H9_TEST_SLOW (default 1), for emulated VMs.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -25,7 +25,7 @@ const Term = @import("term.zig").Term;
 const gpa = std.testing.allocator;
 
 const Env = struct {
-    hp9: []const u8,
+    h9: []const u8,
     root: []const u8,
     backends: []const u8,
 };
@@ -44,24 +44,24 @@ fn getenv(comptime slot: usize, key: []const u8) ?[]const u8 {
 }
 
 fn env() !Env {
-    const hp9 = getenv(0, "HP9_TEST_BIN") orelse return error.SkipZigTest;
-    const root = getenv(1, "HP9_TEST_ROOT") orelse return error.SkipZigTest;
-    // The tree from scripts/mkroot.py is arm64 only, and hp9 runs the
+    const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
+    const root = getenv(1, "H9_TEST_ROOT") orelse return error.SkipZigTest;
+    // The tree from scripts/mkroot.py is arm64 only, and h9 runs the
     // host's architecture, so x86_64 hosts (linux-amd64) skip these.
     if (builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     std.Io.Dir.cwd().access(std.testing.io, try hostPath(root, "arm64/bin/cat"), .{}) catch return error.SkipZigTest;
-    const backends = getenv(2, "HP9_TEST_BACKENDS") orelse "auto";
-    return .{ .hp9 = hp9, .root = root, .backends = backends };
+    const backends = getenv(2, "H9_TEST_BACKENDS") orelse "auto";
+    return .{ .h9 = h9, .root = root, .backends = backends };
 }
 
 /// Skips a case for a milestone that isn't done yet, unless asked for.
 fn pending() !void {
-    if (getenv(3, "HP9_TEST_PENDING") == null) return error.SkipZigTest;
+    if (getenv(3, "H9_TEST_PENDING") == null) return error.SkipZigTest;
 }
 
-/// `ms` scaled by HP9_TEST_SLOW.
+/// `ms` scaled by H9_TEST_SLOW.
 fn slow(ms: u32) u32 {
-    const f = std.fmt.parseInt(u32, getenv(3, "HP9_TEST_SLOW") orelse "1", 10) catch 1;
+    const f = std.fmt.parseInt(u32, getenv(3, "H9_TEST_SLOW") orelse "1", 10) catch 1;
     return ms *| @max(f, 1);
 }
 
@@ -82,7 +82,7 @@ const Result = struct {
     }
 };
 
-/// Runs `hp9 --root <root> args...` on each backend and returns the first
+/// Runs `h9 --root <root> args...` on each backend and returns the first
 /// result, after checking that every backend gave the same one.
 fn run(e: Env, args: []const []const u8) !Result {
     return runIn(e, args, null);
@@ -97,7 +97,7 @@ fn runIn(e: Env, args: []const []const u8, stdin: ?[]const u8) !Result {
         const r = try runOn(e, backend, args, stdin);
         if (first) |f| {
             defer r.deinit();
-            errdefer std.debug.print("backend {s} differs from {s} for hp9 {s}\n", .{ backend, firstBackend(e), args[0] });
+            errdefer std.debug.print("backend {s} differs from {s} for h9 {s}\n", .{ backend, firstBackend(e), args[0] });
             try std.testing.expectEqualStrings(f.out, r.out);
             try std.testing.expectEqual(f.code, r.code);
         } else first = r;
@@ -113,13 +113,13 @@ fn firstBackend(e: Env) []const u8 {
 fn runOn(e: Env, backend: []const u8, args: []const []const u8, stdin: ?[]const u8) !Result {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ e.hp9, "--backend", backend, "--root", e.root });
+    try argv.appendSlice(gpa, &.{ e.h9, "--backend", backend, "--root", e.root });
     try argv.appendSlice(gpa, args);
     const r = try runProcess(argv.items, stdin);
     const code = switch (r.term) {
         .exited => |c| c,
         else => {
-            std.debug.print("hp9 {s}: {any}\n{s}", .{ args[0], r.term, r.stderr });
+            std.debug.print("h9 {s}: {any}\n{s}", .{ args[0], r.term, r.stderr });
             gpa.free(r.stdout);
             gpa.free(r.stderr);
             return error.Crashed;
@@ -191,22 +191,22 @@ test "--check passes with the root tree, and --version and -h print to stdout" {
         try std.testing.expectEqual(0, r.code);
         try std.testing.expect(std.mem.indexOf(u8, r.out, "/bin/echo runs") != null);
     }
-    const missing = try runProcess(&.{ e.hp9, "--root", "/nonexistent-hp9-root", "--check" }, null);
+    const missing = try runProcess(&.{ e.h9, "--root", "/nonexistent-h9-root", "--check" }, null);
     defer gpa.free(missing.stdout);
     defer gpa.free(missing.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 125 }, missing.term);
     try std.testing.expect(std.mem.indexOf(u8, missing.stdout, "not found") != null);
 
-    const v = try runProcess(&.{ e.hp9, "--version" }, null);
+    const v = try runProcess(&.{ e.h9, "--version" }, null);
     defer gpa.free(v.stdout);
     defer gpa.free(v.stderr);
-    try std.testing.expect(std.mem.startsWith(u8, v.stdout, "hp9 "));
+    try std.testing.expect(std.mem.startsWith(u8, v.stdout, "h9 "));
     try std.testing.expect(std.mem.indexOf(u8, v.stdout, "\nbackends: ") != null);
-    const h = try runProcess(&.{ e.hp9, "-h" }, null);
+    const h = try runProcess(&.{ e.h9, "-h" }, null);
     defer gpa.free(h.stdout);
     defer gpa.free(h.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, h.term);
-    try std.testing.expect(std.mem.startsWith(u8, h.stdout, "usage: hp9"));
+    try std.testing.expect(std.mem.startsWith(u8, h.stdout, "usage: h9"));
 }
 
 test "exits string gives status 1 and is printed" {
@@ -261,9 +261,9 @@ fn countDir(e: Env, rel: []const u8) !usize {
 
 test "the host environment isn't imported" {
     const e = try env();
-    const r = try run(e, &.{ "--env", "hp9test=yes", "ls", "/env" });
+    const r = try run(e, &.{ "--env", "h9test=yes", "ls", "/env" });
     defer r.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "/env/hp9test\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "/env/h9test\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "/env/user\n") != null);
     // HOME is set in every host environment that runs these tests.
     try std.testing.expect(std.mem.indexOf(u8, r.out, "/env/HOME") == null);
@@ -325,10 +325,10 @@ test "default profile: the cwd is writable and the root isn't" {
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
     try std.testing.expect(s.exists("f"));
-    const ro = try run(e, &.{ "--cwd", s.path, "touch", "/lib/hp9-test" });
+    const ro = try run(e, &.{ "--cwd", s.path, "touch", "/lib/h9-test" });
     defer ro.deinit();
     try std.testing.expectEqual(1, ro.code);
-    std.Io.Dir.cwd().access(std.testing.io, try hostPath(e.root, "lib/hp9-test"), .{}) catch return;
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(e.root, "lib/h9-test"), .{}) catch return;
     return error.RootWasWritten;
 }
 
@@ -436,7 +436,7 @@ test "--timeout stops the program" {
     const r = try run(e, &.{ "--timeout", "200ms", "sleep", "10" });
     defer r.deinit();
     try std.testing.expectEqual(1, r.code);
-    try std.testing.expect(std.mem.indexOf(u8, r.err, "hp9: timeout") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "h9: timeout") != null);
 }
 
 test "renames and case can't get around the rules" {
@@ -564,7 +564,7 @@ test "--ns replays a namespace file (M3)" {
     try std.testing.expectEqual(0, r.code);
 }
 
-// The terminal. These run hp9 on a pty or pseudoconsole from tests/term.zig.
+// The terminal. These run h9 on a pty or pseudoconsole from tests/term.zig.
 
 /// Enter, as a terminal sends it: cooked mode turns it into a newline on
 /// every host.
@@ -574,11 +574,11 @@ const enter = "\r";
 /// through, and draws the trailing space of "% " as a cursor movement.
 const prompt = "%";
 
-/// Runs `hp9 --backend <backend> --root <root> args...` on a new terminal.
+/// Runs `h9 --backend <backend> --root <root> args...` on a new terminal.
 fn spawnTerm(e: Env, backend: []const u8, args: []const []const u8) !Term {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ e.hp9, "--backend", backend, "--root", e.root });
+    try argv.appendSlice(gpa, &.{ e.h9, "--backend", backend, "--root", e.root });
     try argv.appendSlice(gpa, args);
     return Term.spawn(gpa, argv.items);
 }
@@ -628,9 +628,9 @@ test "--timeout stops a console read on a terminal at once (M4)" {
         defer t.deinit();
         try t.expect("ready", slow(10_000));
         // Before the reader thread, the read held the machine until a
-        // 500 ms grace period ran out, and hp9 exited without freeing it.
+        // 500 ms grace period ran out, and h9 exited without freeing it.
         try std.testing.expectEqual(1, try t.wait(slow(1_500)));
-        try t.expect("hp9: timeout", slow(1_000));
+        try t.expect("h9: timeout", slow(1_000));
     }
 }
 

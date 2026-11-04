@@ -5,8 +5,8 @@
 #   third_party/unicorn/genconfig.sh [name...]
 set -euo pipefail
 . "$(dirname "$0")/../../scripts/env.sh"
-here="$HP9_ROOT/third_party/unicorn"
-src="$HP9_LOCAL/src/unicorn"
+here="$H9_ROOT/third_party/unicorn"
+src="$H9_LOCAL/src/unicorn"
 [ -x "$src/qemu/configure" ] || { echo "genconfig: no $src (run scripts/fetch.sh)" >&2; exit 1; }
 
 # Each host name is also its zig target.
@@ -22,7 +22,7 @@ for name in "$@"; do
 	case $name in *-macos) [ -n "${SDKROOT:-}" ] || { echo "genconfig: SDKROOT unset (scripts/env.sh sets it from xcrun)" >&2; exit 1; }
 		extra="-F$SDKROOT/System/Library/Frameworks -isystem $SDKROOT/usr/include -L$SDKROOT/usr/lib" ;;
 	esac
-	work="$HP9_LOCAL/cache/unicorn-config-$name"
+	work="$H9_LOCAL/cache/unicorn-config-$name"
 	rm -rf "$work" && mkdir -p "$work"
 	# mingw's configure passes -mthreads, which zig cc rejects as unused.
 	cat > "$work/cc" <<CC

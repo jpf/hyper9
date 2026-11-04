@@ -1,4 +1,4 @@
-//! Stands in for a backend that isn't built into this hp9: `create` fails,
+//! Stands in for a backend that isn't built into this h9: `create` fails,
 //! so the other methods are never reached.
 
 const std = @import("std");

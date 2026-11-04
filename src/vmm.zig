@@ -2,7 +2,7 @@
 //!
 //! Each backend module provides Backend, AddressSpace and Vcpu types with the
 //! same methods; the unions below pick one at run time. Backends that aren't
-//! built into this hp9 are replaced by vmm/none.zig.
+//! built into this h9 are replaced by vmm/none.zig.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -43,12 +43,12 @@ pub const Kind = enum {
 };
 
 pub const Error = error{
-    /// The host has no usable hypervisor, or hp9 lacks the access it needs.
+    /// The host has no usable hypervisor, or h9 lacks the access it needs.
     HypervisorUnavailable,
     HypervisorFailed,
     OutOfGuestMemory,
     BadAddress,
-    /// The backend isn't compiled into this hp9.
+    /// The backend isn't compiled into this h9.
     BackendNotBuilt,
     /// The backend can't run binaries for this architecture.
     WrongArch,

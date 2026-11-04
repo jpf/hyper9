@@ -23,10 +23,10 @@
 #include "error.h"
 
 /* Implemented in Zig (src/kern.zig). */
-extern long hp9_cons_read(ulong machine, void *buf, long n);
-extern int hp9_cons_ready(ulong machine);
-extern long hp9_cons_write(ulong machine, int fd, void *buf, long n);
-extern void hp9_cons_raw(ulong machine, int on);
+extern long h9_cons_read(ulong machine, void *buf, long n);
+extern int h9_cons_ready(ulong machine);
+extern long h9_cons_write(ulong machine, int fd, void *buf, long n);
+extern void h9_cons_raw(ulong machine, int on);
 
 enum {
 	Maxcons	= 64,	/* src/kern.zig's max_consoles */
@@ -47,12 +47,12 @@ static Hcons hcons[Maxcons];
 static int
 ready(void *a)
 {
-	return hp9_cons_ready((ulong)((Hcons*)a - hcons));
+	return h9_cons_ready((ulong)((Hcons*)a - hcons));
 }
 
 /* Called by the reader thread (not a Proc) when input arrives. */
 void
-hp9_cons_wake(ulong id)
+h9_cons_wake(ulong id)
 {
 	if(id < Maxcons)
 		wakeup(&hcons[id].r);
@@ -99,7 +99,7 @@ consread(ulong id, void *va, long n)
 		giveturn(h);
 		nexterror();
 	}
-	while((r = hp9_cons_read(id, va, n)) == Wouldblock)
+	while((r = h9_cons_read(id, va, n)) == Wouldblock)
 		sleep(&h->r, ready, h);
 	poperror();
 	giveturn(h);
@@ -112,7 +112,7 @@ enum {
 	Qdir,
 	Qcons,
 	Qconsctl,
-	Qstderr,	/* hp9 extension: writes go to the host stderr */
+	Qstderr,	/* h9 extension: writes go to the host stderr */
 };
 
 static Dirtab hconsdir[] = {
@@ -178,7 +178,7 @@ hconsclose(Chan *c)
 	last = --h->nctl == 0;
 	unlock(&h->lk);
 	if(last)
-		hp9_cons_raw(c->dev, 0);
+		h9_cons_raw(c->dev, 0);
 }
 
 /* consctl: rawon and rawoff, separated by spaces, as drawterm's. */
@@ -193,9 +193,9 @@ consctl(ulong id, char *a, long n)
 	buf[n] = 0;
 	for(a = buf; a != nil;){
 		if(strncmp(a, "rawon", 5) == 0)
-			hp9_cons_raw(id, 1);
+			h9_cons_raw(id, 1);
 		else if(strncmp(a, "rawoff", 6) == 0)
-			hp9_cons_raw(id, 0);
+			h9_cons_raw(id, 0);
 		if((a = strchr(a, ' ')) != nil)
 			a++;
 	}
@@ -224,7 +224,7 @@ hconswrite(Chan *c, void *va, long n, vlong off)
 	switch((ulong)c->qid.path){
 	case Qcons:
 	case Qstderr:
-		r = hp9_cons_write(c->dev, c->qid.path == Qcons ? 1 : 2, va, n);
+		r = h9_cons_write(c->dev, c->qid.path == Qcons ? 1 : 2, va, n);
 		if(r < 0)
 			error(Eio);
 		return r;

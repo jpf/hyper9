@@ -3,7 +3,7 @@
  * "Path resolution"). devfs-posix calls these before touching a host path.
  * Each host path is resolved (symlinks followed, as devfs's own stat and
  * open do) and the resolved path is checked against the calling machine's
- * policy through a Zig leaf, hp9_policy_check, which never raises errors.
+ * policy through a Zig leaf, h9_policy_check, which never raises errors.
  * Checking the resolved path keeps a symlink inside a bound tree from
  * reaching anything the policy doesn't allow.
  */
@@ -27,8 +27,8 @@
 #include "fscheck.h"
 
 /* Implemented in Zig (src/kern.zig): 0 allows, -1 hides, -2 is read-only. */
-extern int hp9_policy_check(char *path, long len, int op);
-extern int hp9_policy_active(void);
+extern int h9_policy_check(char *path, long len, int op);
+extern int h9_policy_active(void);
 
 enum {
 	Hidden = -1,
@@ -117,7 +117,7 @@ check(char *path, int op, int nofollow)
 	char buf[PATH_MAX];
 	struct stat st;
 
-	if(!hp9_policy_active())
+	if(!h9_policy_active())
 		return 0;
 	if(resolve(path, buf, nofollow) < 0)
 		return Hidden;
@@ -125,21 +125,21 @@ check(char *path, int op, int nofollow)
 	 * Creating over an existing symlink writes its target, and over a
 	 * dangling one creates a file wherever it points.
 	 */
-	if(op == HP9_FSCREATE && lstat(buf, &st) == 0 && S_ISLNK(st.st_mode)){
+	if(op == H9_FSCREATE && lstat(buf, &st) == 0 && S_ISLNK(st.st_mode)){
 		char target[PATH_MAX];
 
 		if(realpath(buf, target) == nil)
 			return Hidden;
-		if(hp9_policy_check(target, strlen(target), HP9_FSWRITE) < 0)
+		if(h9_policy_check(target, strlen(target), H9_FSWRITE) < 0)
 			return Hidden;
 	}
-	return hp9_policy_check(buf, strlen(buf), op);
+	return h9_policy_check(buf, strlen(buf), op);
 }
 
 int
-hp9_fs_check(char *path, int op)
+h9_fs_check(char *path, int op)
 {
-	return check(path, op, op == HP9_FSCREATE || op == HP9_FSREMOVE || op == HP9_FSRENAME);
+	return check(path, op, op == H9_FSCREATE || op == H9_FSREMOVE || op == H9_FSRENAME);
 }
 
 #else
@@ -195,7 +195,7 @@ checkw(wchar_t *path, int op, int nofollow)
 	wchar_t parent[MAX_PATH*4], *slash;
 	int n, len;
 
-	if(!hp9_policy_active())
+	if(!h9_policy_active())
 		return 0;
 	/* The list of drives, and the drives themselves, can be walked. */
 	if(path[0] == 0 || (path[1] == L':' && path[2] == 0)){
@@ -207,12 +207,12 @@ checkw(wchar_t *path, int op, int nofollow)
 			buf[2] = ':';
 			buf[3] = 0;
 		}
-		return hp9_policy_check(buf, strlen(buf), op);
+		return h9_policy_check(buf, strlen(buf), op);
 	}
 	if(!nofollow){
 		if(final(path, buf, sizeof buf) < 0)
 			return Hidden;
-		return hp9_policy_check(buf, strlen(buf), op);
+		return h9_policy_check(buf, strlen(buf), op);
 	}
 	/*
 	 * An existing entry is checked by its own canonical name (case, short
@@ -222,10 +222,10 @@ checkw(wchar_t *path, int op, int nofollow)
 	if(finalflags(path, buf, sizeof buf, FILE_FLAG_OPEN_REPARSE_POINT) == 0){
 		char target[MAX_PATH*4*UTFmax];
 
-		if(op == HP9_FSCREATE && final(path, target, sizeof target) == 0
-		&& strcmp(target, buf) != 0 && hp9_policy_check(target, strlen(target), HP9_FSWRITE) < 0)
+		if(op == H9_FSCREATE && final(path, target, sizeof target) == 0
+		&& strcmp(target, buf) != 0 && h9_policy_check(target, strlen(target), H9_FSWRITE) < 0)
 			return Hidden;
-		return hp9_policy_check(buf, strlen(buf), op);
+		return h9_policy_check(buf, strlen(buf), op);
 	}
 	slash = wcsrchr(path, L'\\');
 	if(slash == nil || slash-path >= nelem(parent))
@@ -242,19 +242,19 @@ checkw(wchar_t *path, int op, int nofollow)
 	if(WideCharToMultiByte(CP_UTF8, 0, slash+1, -1, name, sizeof buf - len - 1, nil, nil) == 0)
 		return Hidden;
 	buf[len] = '/';
-	return hp9_policy_check(buf, strlen(buf), op);
+	return h9_policy_check(buf, strlen(buf), op);
 }
 
 int
-hp9_fs_checkw(wchar_t *path, int op)
+h9_fs_checkw(wchar_t *path, int op)
 {
-	return checkw(path, op, op == HP9_FSCREATE || op == HP9_FSREMOVE || op == HP9_FSRENAME);
+	return checkw(path, op, op == H9_FSCREATE || op == H9_FSREMOVE || op == H9_FSRENAME);
 }
 
 void
-hp9_fs_allow(wchar_t *path, int op)
+h9_fs_allow(wchar_t *path, int op)
 {
-	switch(hp9_fs_checkw(path, op)){
+	switch(h9_fs_checkw(path, op)){
 	case 0:
 		return;
 	case Readonly:
@@ -268,9 +268,9 @@ hp9_fs_allow(wchar_t *path, int op)
 
 #ifndef WINDOWS
 void
-hp9_fs_allow(char *path, int op)
+h9_fs_allow(char *path, int op)
 {
-	switch(hp9_fs_check(path, op)){
+	switch(h9_fs_check(path, op)){
 	case 0:
 		return;
 	case Readonly:

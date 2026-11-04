@@ -4,9 +4,9 @@
 //! zig build bench builds it with ReleaseFast and runs it.
 
 const std = @import("std");
-const hp9 = @import("hp9");
-const vmm = hp9.vmm;
-const aout = hp9.aout;
+const h9 = @import("h9");
+const vmm = h9.vmm;
+const aout = h9.aout;
 
 const loop_iters = 1_000_000_000;
 const syscall_iters = 1_000_000;
@@ -133,7 +133,7 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, kind: vmm.BackendKind, c: Case) !?
 
     var discard: std.Io.Writer.Discarding = .init(&.{});
     const start: std.Io.Timestamp = .now(io, .awake);
-    var m = hp9.Machine.init(gpa, io, .{
+    var m = h9.Machine.init(gpa, io, .{
         .backend = kind,
         .arch = c.arch,
         .stdio = .{ .out = &discard.writer, .err = &discard.writer },

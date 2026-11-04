@@ -1,5 +1,5 @@
 /*
- * hp9's per-process records (proc.c), shared with devproc.c. See proc.c.
+ * h9's per-process records (proc.c), shared with devproc.c. See proc.c.
  */
 
 enum
@@ -24,7 +24,7 @@ enum
 	NNOTE		= 5,	/* queued notes, as 9front */
 };
 
-/* hp9_kern_popnote's results. */
+/* h9_kern_popnote's results. */
 enum
 {
 	Nnone,		/* no note to act on */
@@ -34,17 +34,17 @@ enum
 };
 
 /* devenv.c */
-extern void	*hp9_egrpnew(void);
-extern void	*hp9_egrpcopy(void*);
-extern void	hp9_egrpincref(void*);
-extern void	hp9_egrpclose(void*);
+extern void	*h9_egrpnew(void);
+extern void	*h9_egrpcopy(void*);
+extern void	h9_egrpincref(void*);
+extern void	h9_egrpclose(void*);
 
 typedef struct Hwait Hwait;
 typedef struct Hproc Hproc;
 typedef struct Hmach Hmach;
 typedef struct Hnote Hnote;
 
-/* A machine: the processes descended from one hp9_kern_spawn. */
+/* A machine: the processes descended from one h9_kern_spawn. */
 struct Hmach
 {
 	Ref	ref;		/* one per record */
@@ -109,22 +109,22 @@ struct Hproc
 };
 
 
-/* proc.c, for devproc.c. Lookups take a reference; release it with hp9_putproc. */
-Hproc*	hp9_uphproc(void);
-Hproc*	hp9_pidlookup(Hmach*, ulong);
-void	hp9_putproc(Hproc*);
-Hnote*	hp9_mknote(char*, int);
-void	hp9_freenote(Hnote*);
-int	hp9_pushnote(Hproc*, Hnote*);
-void	hp9_postnotepg(Hmach*, ulong, char*, int);
-int	hp9_setnoteid(Hproc*, ulong);
-void	hp9_killproc(Hproc*);
-void	hp9_fgrpclose(Fgrp*);
-int	hp9_pids(Hmach*, ulong*, int);
+/* proc.c, for devproc.c. Lookups take a reference; release it with h9_putproc. */
+Hproc*	h9_uphproc(void);
+Hproc*	h9_pidlookup(Hmach*, ulong);
+void	h9_putproc(Hproc*);
+Hnote*	h9_mknote(char*, int);
+void	h9_freenote(Hnote*);
+int	h9_pushnote(Hproc*, Hnote*);
+void	h9_postnotepg(Hmach*, ulong, char*, int);
+int	h9_setnoteid(Hproc*, ulong);
+void	h9_killproc(Hproc*);
+void	h9_fgrpclose(Fgrp*);
+int	h9_pids(Hmach*, ulong*, int);
 
 /*
  * Set by the Zig side: the state (a syscall's name, "Running"...) and the
  * mapped memory in KiB of Zig process aux. Called with the record's nlk
  * held, and only while its aux is set.
  */
-extern void	(*hp9_procstatus)(void*, char*, int, ulong*);
+extern void	(*h9_procstatus)(void*, char*, int, ulong*);

@@ -19,7 +19,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const hp9 = @import("hp9");
+const h9 = @import("h9");
 
 const is_windows = builtin.os.tag == .windows;
 
@@ -28,7 +28,7 @@ var current: ?*Host = null;
 
 pub const Host = struct {
     io: std.Io,
-    signals: hp9.Machine.Signals = .{},
+    signals: h9.Machine.Signals = .{},
     /// When the last Ctrl-C came, for the "second within a second" rule;
     /// in ms on the awake clock, 0 for none.
     last_interrupt_ms: i64 = 0,
@@ -49,7 +49,7 @@ pub const Host = struct {
     }
 
     /// For `Machine.Stdio.raw`.
-    pub fn raw(h: *Host) hp9.Machine.Raw {
+    pub fn raw(h: *Host) h9.Machine.Raw {
         return .{ .ctx = h, .set = setRaw };
     }
 
