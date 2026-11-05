@@ -859,9 +859,14 @@ test "/proc/n/ctl kill stops a process [baseline]" {
 
 test "notepg reaches the note group and not a new one [baseline]" {
     const e = try env(@src());
-    // The block in braces makes its own note group (rfork s), so the
-    // hangup posted to rc's group doesn't reach it; sleep 1000 is in rc's.
-    const r = try run(e, &.{ "--timeout", "20s", "--rc", "fn sighup {}; { rfork s; sleep 1; echo survived } & sleep 1000 & echo hangup >/proc/$pid/notepg; wait; echo done" });
+    // rc moves itself to a new note group (rfork s) after starting the
+    // block in braces, so the hangup posted to rc's new group doesn't
+    // reach the block; sleep 1000 is in the new group. sighup is defined
+    // only after sleep's rc is forked: a hangup that lands before that rc
+    // execs sleep must kill it, not be caught and leave sleep 1000 for
+    // --timeout to end. Starting the block in the old group, rather than
+    // having it rfork s itself, leaves no window where it can be hit.
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", "{ sleep 1; echo survived } & rfork s; sleep 1000 & fn sighup {}; echo hangup >/proc/$pid/notepg; wait; echo done" });
     defer r.deinit();
     try std.testing.expectEqualStrings("survived\ndone\n", r.out);
 }
