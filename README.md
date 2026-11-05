@@ -19,15 +19,15 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [segattach](design/0004-segattach.md) | implemented |  | segattach and shared segments |
 | [net-policy](design/0005-net-policy.md) | accepted | ready | Outbound-only network by default, and --net-allow |
 | [ephemeral-writes](design/0006-ephemeral-writes.md) | accepted | ready | Ephemeral writes and a private /tmp |
-| [go-compat](design/0007-go-compat.md) | draft | needs semaphores | Go compatibility |
-| [devsrv](design/0008-devsrv.md) | draft | needs semaphores | devsrv, /srv and mount |
+| [go-compat](design/0007-go-compat.md) | accepted | needs semaphores | Go compatibility |
+| [devsrv](design/0008-devsrv.md) | accepted | needs semaphores | devsrv, /srv and mount |
 | [i386](design/0009-i386.md) | accepted | ready | 386 binaries |
 | [self-host](design/0010-self-host.md) | draft |  | Self-hosting |
 | [overlay](design/0011-overlay.md) | accepted | needs ephemeral-writes | Copy-on-write overlay as the root's default |
 | [browser-host](design/0012-browser-host.md) | draft | needs i386 | A browser host on wasm, with v86 |
 | [9p-roots](design/0013-9p-roots.md) | draft | needs semaphores | 9P roots |
 | [image-roots](design/0014-image-roots.md) | draft | needs devsrv, 9p-roots | Disk-image roots |
-| [gfx](design/0015-gfx.md) | draft | needs devsrv | Graphics (--gfx) |
+| [gfx](design/0015-gfx.md) | accepted | needs devsrv | Graphics (--gfx) |
 | [kvm](design/0016-kvm.md) | draft |  | KVM backend |
 | [whp](design/0017-whp.md) | draft | needs kvm | WHP backend |
 | [linux-personality](design/0018-linux-personality.md) | draft |  | Linux personality |
@@ -48,15 +48,15 @@ flowchart LR
   p_segattach["#35;4 segattach<br/>implemented"]:::implemented
   p_net_policy["#35;5 net-policy<br/>accepted"]:::accepted
   p_ephemeral_writes["#35;6 ephemeral-writes<br/>accepted"]:::accepted
-  p_go_compat["#35;7 go-compat<br/>draft"]:::draft
-  p_devsrv["#35;8 devsrv<br/>draft"]:::draft
+  p_go_compat["#35;7 go-compat<br/>accepted"]:::accepted
+  p_devsrv["#35;8 devsrv<br/>accepted"]:::accepted
   p_i386["#35;9 i386<br/>accepted"]:::accepted
   p_self_host["#35;10 self-host<br/>draft"]:::draft
   p_overlay["#35;11 overlay<br/>accepted"]:::accepted
   p_browser_host["#35;12 browser-host<br/>draft"]:::draft
   p_9p_roots["#35;13 9p-roots<br/>draft"]:::draft
   p_image_roots["#35;14 image-roots<br/>draft"]:::draft
-  p_gfx["#35;15 gfx<br/>draft"]:::draft
+  p_gfx["#35;15 gfx<br/>accepted"]:::accepted
   p_kvm["#35;16 kvm<br/>draft"]:::draft
   p_whp["#35;17 whp<br/>draft"]:::draft
   p_linux_personality["#35;18 linux-personality<br/>draft"]:::draft
