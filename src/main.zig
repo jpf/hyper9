@@ -106,6 +106,7 @@ pub fn main(init: std.process.Init) !u8 {
         .read_deny = resolveAll(arena, io, cfg.read_deny, true) catch |e| return pathError(e),
         .write = cfg.write,
         .net = cfg.net,
+        .net_allow = cfg.net_allow,
         .memory = cfg.memory,
         .timeout_ns = cfg.timeout_ns,
         .pids = cfg.pids,

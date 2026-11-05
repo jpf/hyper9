@@ -619,8 +619,9 @@ pub fn semrelease(addr: *i32, count: i32) Error!i32 {
     return v;
 }
 
-/// The sandbox plan devfs checks for the calling thread's process (see
-/// src/kern/fscheck.c). Each guest process runs on its own thread, so the
+/// The sandbox plan devfs and devip check for the calling thread's
+/// process (see src/kern/fscheck.c and src/kern/netcheck.h). Each guest
+/// process runs on its own thread, so the
 /// plan is per thread; kernel threads without one aren't restricted.
 threadlocal var fs_plan: ?*const policy.Plan = null;
 
@@ -804,6 +805,9 @@ comptime {
         @export(&h9_cons_raw, .{ .name = "h9_cons_raw" });
         @export(&h9_policy_active, .{ .name = "h9_policy_active" });
         @export(&h9_policy_check, .{ .name = "h9_policy_check" });
+        @export(&h9_net_check, .{ .name = "h9_net_check" });
+        @export(&h9_net_lookup, .{ .name = "h9_net_lookup" });
+        @export(&h9_net_resolved, .{ .name = "h9_net_resolved" });
     }
 }
 
@@ -815,6 +819,42 @@ fn h9_policy_check(path: [*]const u8, len: c_long, op: c_int) callconv(.c) c_int
     const p = fs_plan orelse return 0;
     const o = std.enums.fromInt(policy.Op, op) orelse return @intFromEnum(policy.Verdict.hidden);
     return @intFromEnum(p.check(path[0..@intCast(len)], o));
+}
+
+// devip's sandbox hooks (src/kern/netcheck.h): leaves that return a
+// verdict, 0 or -1, against the calling thread's plan. Kernel threads
+// without a plan aren't restricted.
+
+fn netProto(proto: c_int) ?policy.NetProto {
+    return std.enums.fromInt(policy.NetProto, proto);
+}
+
+fn netPort(port: c_int) ?u16 {
+    return std.math.cast(u16, port);
+}
+
+fn h9_net_check(op: c_int, proto: c_int, addr: [*]const u8, port: c_int) callconv(.c) c_int {
+    const p = fs_plan orelse return 0;
+    const o = std.enums.fromInt(policy.NetOp, op) orelse return -1;
+    // A port outside 0-65535 matches no pattern; without patterns only
+    // the address matters.
+    const pt: u16 = netPort(port) orelse blk: {
+        if (p.net_allow.len > 0) return -1;
+        break :blk 0;
+    };
+    return if (p.netCheck(o, netProto(proto), addr[0..16], pt)) 0 else -1;
+}
+
+fn h9_net_lookup(proto: c_int, name: [*:0]const u8, port: c_int) callconv(.c) c_int {
+    const p = fs_plan orelse return 0;
+    const pt = netPort(port) orelse return -1;
+    return if (p.netLookup(netProto(proto), std.mem.span(name), pt)) 0 else -1;
+}
+
+fn h9_net_resolved(proto: c_int, name: [*:0]const u8, port: c_int, addrs: [*]const [16]u8, n: c_int) callconv(.c) void {
+    const p = fs_plan orelse return;
+    const pt = netPort(port) orelse return;
+    p.netResolved(netProto(proto), std.mem.span(name), pt, addrs[0..@intCast(@max(n, 0))]);
 }
 
 /// Returns the bytes read, 0 at EOF, -1 on error, or -2 when the caller

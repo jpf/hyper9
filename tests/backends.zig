@@ -1200,3 +1200,84 @@ test "an unmapped semaphore address is a bad address [3]" {
 test "a note interrupts rendezvous and semacquire, and the handler runs [3]" {
     try expectRun(@embedFile("sema_interrupt"), null, 300 * std.time.ns_per_ms, "killed h9: timeout", "hhrinterrupted");
 }
+
+/// Runs net fixture `text` (tests/fixtures/net) with `argv` and `pol` on
+/// every backend that can, and checks its exit status. The machine has
+/// no root tree; the fixtures name `#I` directly.
+fn expectNet(text: []const u8, argv: []const []const u8, pol: h9.Policy, want_status: []const u8) !void {
+    const gpa = std.testing.allocator;
+    const bytes = try image(gpa, .arm64, text);
+    defer gpa.free(bytes);
+    var p = pol;
+    p.timeout_ns = 10 * std.time.ns_per_s;
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        var m = h9.Machine.init(gpa, std.testing.io, .{
+            .backend = kind,
+            .arch = .arm64,
+            .policy = p,
+            .stdio = .{ .out = &out.writer, .err = &out.writer },
+        }) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
+            else => return e,
+        };
+        defer m.deinit();
+        const status = try m.run(.{ .bytes = bytes }, argv);
+        errdefer std.debug.print("backend {t}\n", .{kind});
+        var sb: [300]u8 = undefined;
+        try std.testing.expectEqualStrings(want_status, switch (status) {
+            .exited => |t| try std.fmt.bufPrint(&sb, "exited {s}", .{t}),
+            .killed => |t| try std.fmt.bufPrint(&sb, "killed {s}", .{t}),
+        });
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+const net_ctl = @embedFile("net_ctl");
+const net_cs = @embedFile("net_cs");
+const denied = "exited permission denied";
+/// What the host says for a connect to a closed loopback port: the
+/// policy let it through.
+const refused = "exited Connection refused";
+
+// devip binds only for a nonzero port, so the announces name one.
+test "the default profile refuses announce, and enable allows it [5]" {
+    try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "announce 127.0.0.1!39517" }, .{}, denied);
+    try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "announce 127.0.0.1!39517" }, .{ .net = .enable }, "exited ");
+}
+
+test "a UDP announce is refused under outbound [5]" {
+    try expectNet(net_ctl, &.{ "t", "#I/udp/clone", "announce 127.0.0.1!39517" }, .{}, denied);
+}
+
+test "outbound allows connect, except to link-local [5]" {
+    try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "connect 127.0.0.1!1" }, .{}, refused);
+    try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "connect 169.254.169.254!80" }, .{}, denied);
+    try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "connect 169.254.169.254!80" }, .{ .net = .enable }, denied);
+    try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "connect ::ffff:169.254.169.254!80" }, .{}, denied);
+    try expectNet(net_ctl, &.{ "t", "#I/udp/clone", "connect fe80::1!53" }, .{}, denied);
+}
+
+test "--net-allow allows a matching CIDR and port, and refuses the rest [5]" {
+    const pol: h9.Policy = .{ .net_allow = &.{"tcp!127.0.0.0/8!1-2"} };
+    try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "connect 127.0.0.1!1" }, pol, refused);
+    try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "connect 127.0.0.1!3" }, pol, denied);
+    try expectNet(net_ctl, &.{ "t", "#I/udp/clone", "connect 127.0.0.1!1" }, pol, denied);
+    // A refused connect binds nothing first.
+    try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "connect 127.0.0.1!3 4000" }, pol, denied);
+}
+
+test "a name outside --net-allow isn't resolved [5]" {
+    try expectNet(net_ctl, &.{ "t", "#I/cs", "tcp!localhost!1" }, .{ .net_allow = &.{"tcp!127.0.0.1!1"} }, "exited no translation for host found");
+    try expectNet(net_ctl, &.{ "t", "#I/cs", "tcp!127.0.0.1!1" }, .{ .net_allow = &.{"tcp!127.0.0.1!1"} }, "exited ");
+}
+
+test "a name pattern allows a connect through cs, and only through cs [5]" {
+    const pol: h9.Policy = .{ .net_allow = &.{"tcp!localhost!1"} };
+    try expectNet(net_cs, &.{ "t", "tcp!localhost!1" }, pol, refused);
+    try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "connect 127.0.0.1!1" }, pol, denied);
+    try expectNet(net_cs, &.{ "t", "tcp!localhost!2" }, pol, "exited no translation for host found");
+}

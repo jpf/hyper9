@@ -1,7 +1,8 @@
 //! The sandbox policy (DESIGN.md, "Sandbox policy"): profiles and explicit
 //! settings, compiled into a Plan that the machine's namespace builder
 //! follows and `--print` shows. The Plan's access rules are what devfs
-//! checks through `h9_fs_check` (src/kern.zig).
+//! checks through `h9_fs_check` (src/kern.zig), and its network patterns
+//! are what devip checks through `h9_net_check` and `h9_net_lookup`.
 //!
 //! All host paths here are absolute and already resolved (symlinks
 //! followed); the CLI resolves them before building a Policy.
@@ -24,7 +25,7 @@ pub const WriteMode = enum {
 
 pub const NetMode = enum {
     disable,
-    /// Clients work, `announce` is refused (design/0005-net-policy.md; not enforced yet).
+    /// Clients work, `announce` is refused (design/0005-net-policy.md).
     outbound,
     enable,
 };
@@ -42,8 +43,11 @@ pub const Policy = struct {
     read_deny: []const []const u8 = &.{},
     /// Null means the profile's default (scope).
     write: ?WriteMode = null,
-    /// Null means the profile's default.
+    /// Null means the profile's default: outbound, or disable for tight.
     net: ?NetMode = null,
+    /// Egress allowlist of dial-string patterns (`tcp!10.0.0.0/8!564`);
+    /// when non-empty, every connect and cs lookup must match one.
+    net_allow: []const []const u8 = &.{},
     /// Cap on guest memory in bytes; null means the backend's region size.
     memory: ?u64 = null,
     /// Machine deadline; null means the profile's default.
@@ -101,6 +105,7 @@ pub const Capability = enum {
     @"fs.write.scope",
     @"ipc.restrict",
     @"kernel.isolation",
+    @"net.allow",
     @"net.disable",
     @"net.outbound",
     @"proc.timeout",
@@ -111,7 +116,7 @@ pub const Capability = enum {
     /// Whether this build can enforce it.
     pub fn enforceable(c: Capability) bool {
         return switch (c) {
-            .@"fs.write.ephemeral", .@"fs.write.overlay", .@"net.outbound" => false,
+            .@"fs.write.ephemeral", .@"fs.write.overlay" => false,
             else => true,
         };
     }
@@ -127,6 +132,10 @@ pub const Plan = struct {
     timeout_ns: ?u64,
     pids: ?u32,
     cpus: ?u32,
+    /// The --net-allow patterns; empty means no allowlist.
+    net_allow: []const NetPattern = &.{},
+    /// The machine's resolved-name table, when a pattern names hosts.
+    names: ?*NameTable = null,
     /// Device letters masked after the namespace is built.
     devmask: []const u8,
     binds: []const Bind,
@@ -141,6 +150,37 @@ pub const Plan = struct {
     /// Checks `op` on the resolved host path `path`.
     pub fn check(p: *const Plan, path: []const u8, op: Op) Verdict {
         return checkRules(p.rules, path, op);
+    }
+
+    /// Whether a connect or announce is allowed. `addr` is devip's
+    /// 16-byte form, with IPv4 as IPv4-mapped IPv6.
+    pub fn netCheck(p: *const Plan, op: NetOp, proto: ?NetProto, addr: *const [16]u8, port: u16) bool {
+        if (p.net == .disable) return false;
+        switch (op) {
+            .announce => return p.net == .enable,
+            .connect => {},
+        }
+        if (p.net_allow.len == 0) return !isLinkLocal(addr);
+        const pr = proto orelse return false;
+        for (p.net_allow) |pat| if (pat.matchAddr(pr, addr, port)) return true;
+        const names = p.names orelse return false;
+        return names.allows(p.net_allow, pr, addr, port);
+    }
+
+    /// Whether devip's cs may resolve `name` for proto and port.
+    pub fn netLookup(p: *const Plan, proto: ?NetProto, name: []const u8, port: u16) bool {
+        if (p.net == .disable) return false;
+        if (p.net_allow.len == 0) return true;
+        const pr = proto orelse return false;
+        for (p.net_allow) |pat| if (pat.matchName(pr, name, port)) return true;
+        return false;
+    }
+
+    /// Records the addresses cs resolved for an allowed name.
+    pub fn netResolved(p: *const Plan, proto: ?NetProto, name: []const u8, port: u16, addrs: []const [16]u8) void {
+        const names = p.names orelse return;
+        const pr = proto orelse return;
+        for (addrs) |*a| names.record(pr, a, port, name);
     }
 
     /// Prints the plan in the format of DESIGN.md, "Plan output".
@@ -164,7 +204,12 @@ pub const Plan = struct {
         try w.writeAll("\n");
         try w.writeAll("devmask: ");
         for (p.devmask) |d| try w.print(" #{c}", .{d});
-        try w.writeAll("\nnamespace:\n");
+        try w.writeAll("\n");
+        if (p.net_allow.len > 0) {
+            try w.writeAll("net-allow:\n");
+            for (p.net_allow) |pat| try w.print("  {s}\n", .{pat.text});
+        }
+        try w.writeAll("namespace:\n");
         for (p.binds) |b| {
             var line: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
             defer line.deinit();
@@ -213,11 +258,11 @@ pub const Inputs = struct {
 pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]const u8) CompileError!Plan {
     const tight = pol.profile == .tight;
     const write_req = pol.write orelse .scope;
-    const net_req = pol.net orelse (if (tight) NetMode.disable else .enable);
+    const net = pol.net orelse (if (tight) NetMode.disable else .outbound);
 
     var unenforced: CapSet = .initEmpty();
     // Unenforceable modes fall back to the safer choice: writes are denied
-    // rather than persisted, and outbound leaves the network as it is.
+    // rather than persisted.
     const write: WriteMode = switch (write_req) {
         .ephemeral => blk: {
             unenforced.insert(.@"fs.write.ephemeral");
@@ -229,15 +274,30 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         },
         else => write_req,
     };
-    const net: NetMode = if (net_req == .outbound) blk: {
-        unenforced.insert(.@"net.outbound");
-        break :blk .enable;
-    } else net_req;
 
     if (write_req == .none and pol.writable.len > 0) {
         err_msg.* = "--write=none conflicts with --writable";
         return error.Conflict;
     }
+    if (net == .disable and pol.net_allow.len > 0) {
+        err_msg.* = "--net-allow conflicts with --net=disable";
+        return error.Conflict;
+    }
+    const net_allow = try arena.alloc(NetPattern, pol.net_allow.len);
+    var name_patterns = false;
+    for (pol.net_allow, net_allow) |text, *pat| {
+        var why: []const u8 = "";
+        pat.* = parseNetPattern(text, &why) catch {
+            err_msg.* = try std.fmt.allocPrint(arena, "--net-allow '{s}': {s}", .{ text, why });
+            return error.Conflict;
+        };
+        if (pat.host == .name or pat.host == .suffix) name_patterns = true;
+    }
+    const names: ?*NameTable = if (name_patterns) blk: {
+        const nt = try arena.create(NameTable);
+        nt.* = .{};
+        break :blk nt;
+    } else null;
 
     const can_write = write == .scope;
     const cwd_rw = can_write and (pol.cwd_writable orelse !tight);
@@ -353,6 +413,8 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     if (!pol.host_fs) enforces.insert(.@"fs.read.scope");
     if (pol.read_deny.len > 0) enforces.insert(.@"fs.read.deny");
     if (net == .disable) enforces.insert(.@"net.disable");
+    if (net == .outbound) enforces.insert(.@"net.outbound");
+    if (net_allow.len > 0) enforces.insert(.@"net.allow");
     if (pol.memory != null) enforces.insert(.@"res.memory");
     if (pol.pids != null) enforces.insert(.@"res.pids");
     if (pol.cpus != null) enforces.insert(.@"res.cpu");
@@ -368,7 +430,15 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         try caveats.append(arena, "writes to writable paths are not capped (no res.disk)");
     }
     try caveats.append(arena, "paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check");
-    if (net != .disable) try caveats.append(arena, "the network is not restricted beyond --net=disable");
+    if (net != .disable) {
+        if (net_allow.len == 0) {
+            try caveats.append(arena, "outbound connections can reach any address the host can except link-local, including its loopback and local network");
+            try caveats.append(arena, "refusing link-local doesn't cover every cloud metadata endpoint: some, such as fd00:ec2::254 and 100.100.100.200, use other ranges");
+            try caveats.append(arena, "the guest can make the host resolve any name");
+        }
+        if (name_patterns) try caveats.append(arena, "name patterns trust the host's resolver: a name is allowed to reach whatever address it resolves to");
+        if (net == .enable) try caveats.append(arena, "servers in the guest are reachable by anything that can reach the host's ports");
+    }
     if (pol.host_cmd) try caveats.append(arena, "#C runs host commands with the host user's rights");
     if (pol.host_fs) try caveats.append(arena, "--host-fs exposes the whole host filesystem");
     try caveats.append(arena, "/proc/n/ns shows the host paths of bound host trees");
@@ -382,6 +452,8 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         .timeout_ns = timeout,
         .pids = pol.pids,
         .cpus = pol.cpus,
+        .net_allow = net_allow,
+        .names = names,
         .devmask = devmask.items,
         .binds = binds.items,
         .rules = rules.items,
@@ -502,6 +574,291 @@ fn writeDuration(n: u64, w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.print("{d}ns", .{n});
 }
 
+// The network policy (design/0005-net-policy.md).
+
+/// devip's operations, matching H9_NETCONNECT and H9_NETANNOUNCE in
+/// src/kern/netcheck.h.
+pub const NetOp = enum(c_int) { connect = 0, announce = 1 };
+
+/// devip's protocols, matching S_TCP and S_UDP in devip.h.
+pub const NetProto = enum(c_int) { tcp = 0, udp = 1 };
+
+/// One --net-allow pattern, `proto!host!port`.
+pub const NetPattern = struct {
+    /// Null for `net` or `*`: both protocols.
+    proto: ?NetProto,
+    host: Host,
+    port_lo: u16,
+    port_hi: u16,
+    /// The pattern as given, for `--print`.
+    text: []const u8,
+
+    pub const Host = union(enum) {
+        /// `*`: every address and every name.
+        any,
+        /// An address or CIDR range. IPv4 is kept IPv4-mapped, with `bits`
+        /// counted over all 128.
+        cidr: struct { addr: [16]u8, bits: u8, v4: bool },
+        /// A host name, matched without regard to case.
+        name: []const u8,
+        /// `*.example.com`, kept as `.example.com`: one or more labels
+        /// before it.
+        suffix: []const u8,
+    };
+
+    fn matchProtoPort(pat: NetPattern, proto: NetProto, port: u16) bool {
+        if (pat.proto) |pp| if (pp != proto) return false;
+        return port >= pat.port_lo and port <= pat.port_hi;
+    }
+
+    /// Whether the pattern allows a connect to an address by itself.
+    pub fn matchAddr(pat: NetPattern, proto: NetProto, addr: *const [16]u8, port: u16) bool {
+        if (!pat.matchProtoPort(proto, port)) return false;
+        return switch (pat.host) {
+            .any => true,
+            .cidr => |c| c.v4 == isV4(addr) and prefixMatch(&c.addr, addr, c.bits),
+            .name, .suffix => false,
+        };
+    }
+
+    /// Whether the pattern allows cs to resolve `name`.
+    pub fn matchName(pat: NetPattern, proto: NetProto, name: []const u8, port: u16) bool {
+        if (!pat.matchProtoPort(proto, port)) return false;
+        const n = std.mem.trimEnd(u8, name, ".");
+        return switch (pat.host) {
+            .any => true,
+            .cidr => false,
+            .name => |want| std.ascii.eqlIgnoreCase(n, want),
+            .suffix => |suf| n.len > suf.len and std.ascii.eqlIgnoreCase(n[n.len - suf.len ..], suf),
+        };
+    }
+};
+
+/// Parses a --net-allow pattern. `why` says what's wrong on error.
+pub fn parseNetPattern(text: []const u8, why: *[]const u8) error{Invalid}!NetPattern {
+    var it = std.mem.splitScalar(u8, text, '!');
+    const proto_s = it.next().?;
+    const host_s = it.next() orelse return invalid(why, "want proto!host!port");
+    const port_s = it.next() orelse return invalid(why, "want proto!host!port");
+    if (it.next() != null) return invalid(why, "want proto!host!port");
+
+    const proto: ?NetProto = if (std.mem.eql(u8, proto_s, "tcp"))
+        .tcp
+    else if (std.mem.eql(u8, proto_s, "udp"))
+        .udp
+    else if (std.mem.eql(u8, proto_s, "net") or std.mem.eql(u8, proto_s, "*"))
+        null
+    else
+        return invalid(why, "the protocol must be tcp, udp, net or *");
+
+    var lo: u16 = 0;
+    var hi: u16 = 65535;
+    if (!std.mem.eql(u8, port_s, "*")) {
+        const bad = "the port must be a number, a range such as 8000-8099, or *";
+        if (std.mem.indexOfScalar(u8, port_s, '-')) |dash| {
+            lo = parsePort(port_s[0..dash]) orelse return invalid(why, bad);
+            hi = parsePort(port_s[dash + 1 ..]) orelse return invalid(why, bad);
+            if (lo > hi) return invalid(why, "the port range is backwards");
+        } else {
+            lo = parsePort(port_s) orelse return invalid(why, bad);
+            hi = lo;
+        }
+    }
+
+    const host = try parseHost(host_s, why);
+    return .{ .proto = proto, .host = host, .port_lo = lo, .port_hi = hi, .text = text };
+}
+
+fn invalid(why: *[]const u8, msg: []const u8) error{Invalid} {
+    why.* = msg;
+    return error.Invalid;
+}
+
+fn parsePort(s: []const u8) ?u16 {
+    if (s.len == 0) return null;
+    for (s) |ch| if (!std.ascii.isDigit(ch)) return null;
+    return std.fmt.parseInt(u16, s, 10) catch null;
+}
+
+fn parseHost(s: []const u8, why: *[]const u8) error{Invalid}!NetPattern.Host {
+    if (s.len == 0) return invalid(why, "the host is empty");
+    if (std.mem.eql(u8, s, "*")) return .any;
+    if (std.mem.indexOfScalar(u8, s, '/')) |slash| {
+        const a = parseIp(s[0..slash]) orelse return invalid(why, "a CIDR range needs an IPv4 or IPv6 address before the /");
+        const v4 = isV4(&a);
+        const max: u8 = if (v4) 32 else 128;
+        const bits_s = s[slash + 1 ..];
+        if (bits_s.len == 0) return invalid(why, "the prefix length is missing");
+        for (bits_s) |ch| if (!std.ascii.isDigit(ch)) return invalid(why, "the prefix length must be a number");
+        const bits = std.fmt.parseInt(u8, bits_s, 10) catch return invalid(why, "the prefix length is too long");
+        if (bits > max) return invalid(why, if (v4) "an IPv4 prefix is at most 32 bits" else "an IPv6 prefix is at most 128 bits");
+        return .{ .cidr = .{ .addr = a, .bits = if (v4) bits + 96 else bits, .v4 = v4 } };
+    }
+    if (parseIp(s)) |a| return .{ .cidr = .{ .addr = a, .bits = 128, .v4 = isV4(&a) } };
+    const n = std.mem.trimEnd(u8, s, ".");
+    if (std.mem.startsWith(u8, n, "*.")) {
+        if (!validName(n[2..])) return invalid(why, "not an address, a CIDR range, * or a host name");
+        return .{ .suffix = n[1..] };
+    }
+    if (!validName(n)) return invalid(why, "not an address, a CIDR range, * or a host name");
+    return .{ .name = n };
+}
+
+/// Letters, digits, hyphens and underscores, in dot-separated labels.
+fn validName(s: []const u8) bool {
+    if (s.len == 0 or s.len > 253) return false;
+    var labels = std.mem.splitScalar(u8, s, '.');
+    while (labels.next()) |l| {
+        if (l.len == 0 or l.len > 63) return false;
+        for (l) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_')) return false;
+    }
+    return true;
+}
+
+const v4_prefix = [12]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+
+/// Whether a 16-byte address is IPv4-mapped.
+pub fn isV4(a: *const [16]u8) bool {
+    return std.mem.eql(u8, a[0..12], &v4_prefix);
+}
+
+fn prefixMatch(p: *const [16]u8, a: *const [16]u8, bits: u8) bool {
+    const whole = bits / 8;
+    if (!std.mem.eql(u8, p[0..whole], a[0..whole])) return false;
+    const rest: u3 = @intCast(bits % 8);
+    if (rest == 0) return true;
+    const mask: u8 = @as(u8, 0xff) << @intCast(8 - @as(u4, rest));
+    return (p[whole] & mask) == (a[whole] & mask);
+}
+
+/// 169.254.0.0/16 and fe80::/10, refused without --net-allow.
+pub fn isLinkLocal(a: *const [16]u8) bool {
+    if (isV4(a)) return a[12] == 169 and a[13] == 254;
+    return a[0] == 0xfe and (a[1] & 0xc0) == 0x80;
+}
+
+/// Parses an IPv4 or IPv6 address into devip's 16-byte form, IPv4 as
+/// IPv4-mapped. IPv4-mapped IPv6 spellings come out as IPv4.
+pub fn parseIp(s: []const u8) ?[16]u8 {
+    var out: [16]u8 = undefined;
+    if (std.mem.indexOfScalar(u8, s, ':') == null) {
+        @memcpy(out[0..12], &v4_prefix);
+        if (!parseV4(s, out[12..16])) return null;
+        return out;
+    }
+    // IPv6: up to eight groups, one `::`, and an optional IPv4 tail.
+    var head: [16]u8 = @splat(0);
+    var tail: [16]u8 = @splat(0);
+    var nhead: usize = 0;
+    var ntail: usize = 0;
+    var gap = false;
+    var rest = s;
+    if (std.mem.startsWith(u8, rest, "::")) {
+        gap = true;
+        rest = rest[2..];
+    } else if (std.mem.startsWith(u8, rest, ":")) return null;
+    while (rest.len > 0) {
+        const end = std.mem.indexOfScalar(u8, rest, ':') orelse rest.len;
+        const group = rest[0..end];
+        const buf = if (gap) &tail else &head;
+        const n = if (gap) &ntail else &nhead;
+        if (end == rest.len and std.mem.indexOfScalar(u8, group, '.') != null) {
+            if (n.* + 4 > 16) return null;
+            if (!parseV4(group, buf[n.*..][0..4])) return null;
+            n.* += 4;
+            rest = rest[end..];
+            break;
+        }
+        if (group.len == 0 or group.len > 4) return null;
+        const v = std.fmt.parseInt(u16, group, 16) catch return null;
+        if (n.* + 2 > 16) return null;
+        buf[n.*] = @intCast(v >> 8);
+        buf[n.* + 1] = @truncate(v);
+        n.* += 2;
+        rest = rest[end..];
+        if (rest.len == 0) break;
+        rest = rest[1..];
+        if (std.mem.startsWith(u8, rest, ":")) {
+            if (gap) return null;
+            gap = true;
+            rest = rest[1..];
+        } else if (rest.len == 0) return null;
+    }
+    if (gap) {
+        if (nhead + ntail > 14) return null;
+    } else if (nhead != 16) return null;
+    out = @splat(0);
+    @memcpy(out[0..nhead], head[0..nhead]);
+    @memcpy(out[16 - ntail ..], tail[0..ntail]);
+    return out;
+}
+
+fn parseV4(s: []const u8, out: *[4]u8) bool {
+    var parts = std.mem.splitScalar(u8, s, '.');
+    var i: usize = 0;
+    while (parts.next()) |part| : (i += 1) {
+        if (i == 4 or part.len == 0 or part.len > 3) return false;
+        for (part) |ch| if (!std.ascii.isDigit(ch)) return false;
+        out[i] = std.fmt.parseInt(u8, part, 10) catch return false;
+    }
+    return i == 4;
+}
+
+/// What devip's cs resolved for allowed names, so a later connect to
+/// one of the addresses can be matched against name patterns. One per
+/// machine; it keeps the most recent `capacity` entries.
+pub const NameTable = struct {
+    lock: std.atomic.Mutex = .unlocked,
+    entries: [capacity]Entry = undefined,
+    /// Entries recorded so far; the oldest is overwritten once full.
+    count: usize = 0,
+
+    pub const capacity = 1024;
+    pub const max_name = 255;
+
+    pub const Entry = struct {
+        proto: NetProto,
+        port: u16,
+        addr: [16]u8,
+        name_len: u8,
+        name_buf: [max_name]u8,
+
+        pub fn name(e: *const Entry) []const u8 {
+            return e.name_buf[0..e.name_len];
+        }
+    };
+
+    fn acquire(nt: *NameTable) void {
+        while (!nt.lock.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    pub fn record(nt: *NameTable, proto: NetProto, addr: *const [16]u8, port: u16, name: []const u8) void {
+        if (name.len > max_name) return;
+        nt.acquire();
+        defer nt.lock.unlock();
+        const e = &nt.entries[nt.count % capacity];
+        e.* = .{ .proto = proto, .port = port, .addr = addr.*, .name_len = @intCast(name.len), .name_buf = undefined };
+        @memcpy(e.name_buf[0..name.len], name);
+        nt.count += 1;
+    }
+
+    /// Whether a name that resolved to addr for proto and port matches a
+    /// name pattern.
+    pub fn allows(nt: *NameTable, pats: []const NetPattern, proto: NetProto, addr: *const [16]u8, port: u16) bool {
+        nt.acquire();
+        defer nt.lock.unlock();
+        const n = @min(nt.count, capacity);
+        for (nt.entries[0..n]) |*e| {
+            if (e.proto != proto or e.port != port or !std.mem.eql(u8, &e.addr, addr)) continue;
+            for (pats) |pat| switch (pat.host) {
+                .name, .suffix => if (pat.matchName(proto, e.name(), port)) return true,
+                else => {},
+            };
+        }
+        return false;
+    }
+};
+
 const t = std.testing;
 
 test "rules: deny wins, longest allow decides, ancestors are read-only" {
@@ -572,7 +929,8 @@ test "compile: unenforceable modes fall back and are reported" {
     const in: Inputs = .{ .root = "/r", .cwd = "/w", .arch = .arm64 };
     const p = try compile(arena.allocator(), in, .{ .write = .overlay, .net = .outbound }, &msg);
     try t.expect(p.unenforced.contains(.@"fs.write.overlay"));
-    try t.expect(p.unenforced.contains(.@"net.outbound"));
+    try t.expect(!p.unenforced.contains(.@"net.outbound"));
+    try t.expect(p.enforces.contains(.@"net.outbound"));
     try t.expectEqual(WriteMode.none, p.write);
     try t.expectEqual(Verdict.read_only, p.check("/w/f", .create));
     try t.expectError(error.Conflict, compile(arena.allocator(), in, .{ .write = .none, .writable = &.{"/w"} }, &msg));
@@ -604,4 +962,185 @@ test "sizes and durations" {
     try t.expectEqual(@as(?u64, std.time.ns_per_min), parseDuration("1m"));
     try t.expectEqual(@as(?u64, 5 * std.time.ns_per_s), parseDuration("5"));
     try t.expectEqual(@as(?u64, null), parseDuration("1y"));
+}
+
+fn tip(s: []const u8) [16]u8 {
+    return parseIp(s).?;
+}
+
+fn tpat(s: []const u8) !NetPattern {
+    var why: []const u8 = "";
+    return parseNetPattern(s, &why);
+}
+
+test "net: address parsing" {
+    try t.expect(isV4(&tip("10.0.0.5")));
+    try t.expect(isV4(&tip("::ffff:10.0.0.5")));
+    try t.expectEqualSlices(u8, &tip("10.0.0.5"), &tip("::ffff:10.0.0.5"));
+    try t.expect(!isV4(&tip("::1")));
+    try t.expectEqual(@as(u8, 1), tip("::1")[15]);
+    try t.expectEqualSlices(u8, &tip("fe80:0:0:0:0:0:0:1"), &tip("fe80::1"));
+    try t.expectEqual(@as(u8, 0xfd), tip("fd00:ec2::254")[0]);
+    try t.expectEqual(@as(u8, 0x54), tip("fd00:ec2::254")[15]);
+    for ([_][]const u8{ "1.2.3", "1.2.3.4.5", "256.0.0.1", "1..2.3", ":::", "1::2::3", "1:2:3:4:5:6:7:8:9", "12345::", ":1::", "1:" }) |bad| {
+        try t.expectEqual(@as(?[16]u8, null), parseIp(bad));
+    }
+}
+
+test "net: pattern parsing" {
+    const a = try tpat("tcp!10.0.0.0/8!564");
+    try t.expectEqual(@as(?NetProto, .tcp), a.proto);
+    try t.expectEqual(@as(u16, 564), a.port_lo);
+    try t.expectEqual(@as(u8, 104), a.host.cidr.bits);
+    const b = try tpat("net!*.example.com!8000-8099");
+    try t.expectEqual(@as(?NetProto, null), b.proto);
+    try t.expectEqualStrings(".example.com", b.host.suffix);
+    try t.expectEqual(@as(u16, 8099), b.port_hi);
+    const c = try tpat("*!*!*");
+    try t.expect(c.host == .any and c.port_lo == 0 and c.port_hi == 65535);
+    try t.expectEqualStrings("api.example.com", (try tpat("udp!api.example.com.!53")).host.name);
+    var why: []const u8 = "";
+    for ([_][]const u8{ "tcp!1.2.3.4", "il!1.2.3.4!1", "tcp!1.2.3.4!http", "tcp!1.2.3.4!9-1", "tcp!1.2.3.4!70000", "tcp!10.0.0.0/33!1", "tcp!::/129!1", "tcp!a*b.com!1", "tcp!!1", "tcp!1.2.3.4!1!r" }) |bad| {
+        try t.expectError(error.Invalid, parseNetPattern(bad, &why));
+        try t.expect(why.len > 0);
+    }
+}
+
+test "net: CIDR edges and IPv4-mapped matching" {
+    const v4 = try tpat("tcp!10.0.0.0/8!*");
+    try t.expect(v4.matchAddr(.tcp, &tip("10.255.255.255"), 1));
+    try t.expect(v4.matchAddr(.tcp, &tip("::ffff:10.1.2.3"), 1));
+    try t.expect(!v4.matchAddr(.tcp, &tip("11.0.0.0"), 1));
+    try t.expect(!v4.matchAddr(.udp, &tip("10.0.0.1"), 1));
+    const odd = try tpat("tcp!192.168.4.0/22!*");
+    try t.expect(odd.matchAddr(.tcp, &tip("192.168.7.255"), 1));
+    try t.expect(!odd.matchAddr(.tcp, &tip("192.168.8.0"), 1));
+    const v6 = try tpat("tcp!fd00::/8!*");
+    try t.expect(v6.matchAddr(.tcp, &tip("fdff::1"), 1));
+    try t.expect(!v6.matchAddr(.tcp, &tip("fe00::1"), 1));
+    // An IPv6 pattern never matches an IPv4 address.
+    const all6 = try tpat("tcp!::/0!*");
+    try t.expect(all6.matchAddr(.tcp, &tip("::1"), 1));
+    try t.expect(!all6.matchAddr(.tcp, &tip("10.0.0.1"), 1));
+    const all4 = try tpat("tcp!0.0.0.0/0!*");
+    try t.expect(all4.matchAddr(.tcp, &tip("10.0.0.1"), 1));
+    try t.expect(!all4.matchAddr(.tcp, &tip("::1"), 1));
+    const one = try tpat("tcp!10.0.0.5!443");
+    try t.expect(one.matchAddr(.tcp, &tip("10.0.0.5"), 443));
+    try t.expect(!one.matchAddr(.tcp, &tip("10.0.0.6"), 443));
+    try t.expect(!one.matchAddr(.tcp, &tip("10.0.0.5"), 444));
+    // Link-local, however IPv4 is written.
+    try t.expect(isLinkLocal(&tip("169.254.169.254")));
+    try t.expect(isLinkLocal(&tip("::ffff:169.254.0.1")));
+    try t.expect(isLinkLocal(&tip("fe80::1")));
+    try t.expect(isLinkLocal(&tip("febf::1")));
+    try t.expect(!isLinkLocal(&tip("fec0::1")));
+    try t.expect(!isLinkLocal(&tip("::a9fe:a9fe")));
+    try t.expect(!isLinkLocal(&tip("127.0.0.1")));
+}
+
+test "net: port ranges and name wildcards" {
+    const r = try tpat("tcp!*!8000-8099");
+    try t.expect(r.matchAddr(.tcp, &tip("1.2.3.4"), 8000));
+    try t.expect(r.matchAddr(.tcp, &tip("1.2.3.4"), 8099));
+    try t.expect(!r.matchAddr(.tcp, &tip("1.2.3.4"), 7999));
+    try t.expect(!r.matchAddr(.tcp, &tip("1.2.3.4"), 8100));
+    const w = try tpat("tcp!*.example.com!443");
+    try t.expect(w.matchName(.tcp, "a.example.com", 443));
+    try t.expect(w.matchName(.tcp, "a.b.EXAMPLE.com.", 443));
+    try t.expect(!w.matchName(.tcp, "example.com", 443));
+    try t.expect(!w.matchName(.tcp, "badexample.com", 443));
+    try t.expect(!w.matchName(.tcp, "a.example.com", 80));
+    try t.expect(!w.matchAddr(.tcp, &tip("1.2.3.4"), 443));
+    const n = try tpat("net!localhost!*");
+    try t.expect(n.matchName(.udp, "LocalHost", 9));
+    try t.expect(!n.matchName(.tcp, "localhost.example", 9));
+    const a = try tpat("tcp!127.0.0.1!*");
+    try t.expect(!a.matchName(.tcp, "localhost", 1));
+}
+
+test "net: the plan's checks" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var msg: []const u8 = "";
+    const in: Inputs = .{ .root = "/r", .cwd = "/w", .arch = .arm64 };
+
+    const d = try compile(arena.allocator(), in, .{}, &msg);
+    try t.expectEqual(NetMode.outbound, d.net);
+    try t.expect(d.enforces.contains(.@"net.outbound"));
+    try t.expect(!d.enforces.contains(.@"net.allow"));
+    try t.expect(d.netCheck(.connect, .tcp, &tip("127.0.0.1"), 80));
+    try t.expect(!d.netCheck(.connect, .tcp, &tip("169.254.169.254"), 80));
+    try t.expect(!d.netCheck(.connect, .udp, &tip("fe80::1"), 53));
+    try t.expect(!d.netCheck(.announce, .tcp, &tip("127.0.0.1"), 8080));
+    try t.expect(d.netLookup(.tcp, "anything.example", 80));
+
+    const e = try compile(arena.allocator(), in, .{ .net = .enable }, &msg);
+    try t.expect(e.netCheck(.announce, .udp, &tip("0.0.0.0"), 53));
+    try t.expect(!e.netCheck(.connect, .tcp, &tip("169.254.169.254"), 80));
+
+    // Patterns are the whole policy.
+    const ll = try compile(arena.allocator(), in, .{ .net_allow = &.{"tcp!169.254.0.0/16!*"} }, &msg);
+    try t.expect(ll.netCheck(.connect, .tcp, &tip("169.254.169.254"), 80));
+    try t.expect(!ll.netCheck(.connect, .tcp, &tip("127.0.0.1"), 80));
+    try t.expect(!ll.netLookup(.tcp, "localhost", 80));
+    try t.expect(ll.names == null);
+    try t.expect(ll.enforces.contains(.@"net.allow"));
+
+    const nm = try compile(arena.allocator(), in, .{ .net_allow = &.{ "tcp!*.example.com!443", "udp!10.0.0.53!53" } }, &msg);
+    try t.expect(nm.netLookup(.tcp, "api.example.com", 443));
+    try t.expect(!nm.netLookup(.tcp, "api.example.com", 80));
+    try t.expect(!nm.netLookup(.udp, "api.example.com", 443));
+    try t.expect(!nm.netLookup(.tcp, "example.org", 443));
+    try t.expect(!nm.netCheck(.connect, .tcp, &tip("93.184.216.34"), 443));
+    nm.netResolved(.tcp, "api.example.com", 443, &.{ tip("93.184.216.34"), tip("2606:2800::1") });
+    try t.expect(nm.netCheck(.connect, .tcp, &tip("93.184.216.34"), 443));
+    try t.expect(nm.netCheck(.connect, .tcp, &tip("2606:2800::1"), 443));
+    try t.expect(!nm.netCheck(.connect, .tcp, &tip("93.184.216.34"), 80));
+    try t.expect(!nm.netCheck(.connect, .udp, &tip("93.184.216.34"), 443));
+    try t.expect(nm.netCheck(.connect, .udp, &tip("10.0.0.53"), 53));
+    try t.expect(!nm.netCheck(.connect, null, &tip("10.0.0.53"), 53));
+
+    try t.expectError(error.Conflict, compile(arena.allocator(), in, .{ .net = .disable, .net_allow = &.{"tcp!*!*"} }, &msg));
+    try t.expectError(error.Conflict, compile(arena.allocator(), in, .{ .net_allow = &.{"tcp!x!y"} }, &msg));
+    try t.expect(std.mem.indexOf(u8, msg, "tcp!x!y") != null);
+}
+
+test "net: the resolved-name table keeps the most recent entries" {
+    const nt = try t.allocator.create(NameTable);
+    defer t.allocator.destroy(nt);
+    nt.* = .{};
+    const pats = [_]NetPattern{try tpat("tcp!*.example.com!443")};
+    nt.record(.tcp, &tip("10.0.0.1"), 443, "first.example.com");
+    try t.expect(nt.allows(&pats, .tcp, &tip("10.0.0.1"), 443));
+    var i: u32 = 0;
+    while (i < NameTable.capacity) : (i += 1) {
+        var a = tip("10.1.0.0");
+        a[14] = @truncate(i >> 8);
+        a[15] = @truncate(i);
+        nt.record(.tcp, &a, 443, "later.example.com");
+    }
+    // The first entry was evicted; the newest are kept.
+    try t.expect(!nt.allows(&pats, .tcp, &tip("10.0.0.1"), 443));
+    try t.expect(nt.allows(&pats, .tcp, &tip("10.1.3.255"), 443));
+    try t.expect(nt.allows(&pats, .tcp, &tip("10.1.0.0"), 443));
+    // A name that no longer matches a pattern allows nothing.
+    nt.record(.tcp, &tip("10.2.0.1"), 443, "other.org");
+    try t.expect(!nt.allows(&pats, .tcp, &tip("10.2.0.1"), 443));
+}
+
+test "net: --print shows patterns and caveats" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var msg: []const u8 = "";
+    const p = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .arm64 }, .{ .net_allow = &.{ "tcp!*.example.com!443", "udp!10.0.0.53!53" } }, &msg);
+    var out: std.Io.Writer.Allocating = .init(t.allocator);
+    defer out.deinit();
+    try p.print(&out.writer);
+    const s = out.written();
+    try t.expect(std.mem.indexOf(u8, s, "net.allow net.outbound") != null);
+    try t.expect(std.mem.indexOf(u8, s, "net=outbound") != null);
+    try t.expect(std.mem.indexOf(u8, s, "net-allow:\n  tcp!*.example.com!443\n  udp!10.0.0.53!53\nnamespace:") != null);
+    try t.expect(std.mem.indexOf(u8, s, "name patterns trust the host's resolver") != null);
+    try t.expect(std.mem.indexOf(u8, s, "not restricted beyond") == null);
 }

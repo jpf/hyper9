@@ -122,6 +122,10 @@ const sema_fixtures = [_][]const u8{
     "rendezvous", "semacquire", "count", "badarg", "odd", "unmapped", "interrupt",
 };
 
+/// Programs in tests/fixtures/net, for tests/backends.zig. They share
+/// tests/fixtures/segattach/lib.S.
+const net_fixtures = [_][]const u8{ "ctl", "cs" };
+
 /// Runs tests/integration.zig against the h9 binary. `filters` selects
 /// cases by name; with `pending`, cases tagged with a proposal that isn't
 /// implemented run instead of skipping.
@@ -387,7 +391,7 @@ pub fn build(b: *std.Build) void {
     kern.root_module.addIncludePath(b.path(drawterm));
     kern.root_module.addIncludePath(b.path(drawterm ++ "/include"));
     kern.root_module.addIncludePath(b.path(drawterm ++ "/kern"));
-    kern.root_module.addIncludePath(b.path("src/kern")); // fscheck.h, for devfs
+    kern.root_module.addIncludePath(b.path("src/kern")); // fscheck.h and netcheck.h, for devfs and devip
     const flags: []const []const u8 = if (os == .windows) &kern_flags_win32 else &kern_flags;
     kern.root_module.addCSourceFiles(.{
         .root = b.path(drawterm ++ "/kern"),
@@ -406,7 +410,7 @@ pub fn build(b: *std.Build) void {
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "fscheck.c", "tsleep.c", "sema.c" },
+        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "fscheck.c", "netcheck.c", "tsleep.c", "sema.c" },
         .flags = flags,
     });
     for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
@@ -632,9 +636,13 @@ pub fn build(b: *std.Build) void {
         backend_tests.root_module.linkFramework("Hypervisor", .{});
     }
     linkUnicorn(backend_tests);
-    // The segattach fixtures, assembled freestanding as the shim is, and
+    // The segattach, sema and net fixtures, assembled freestanding as the shim is, and
     // embedded as raw text for tests/backends.zig to wrap in an a.out.
-    for (segattach_fixtures) |name| {
+    for ([_]struct { dir: []const u8, prefix: []const u8, names: []const []const u8 }{
+        .{ .dir = "segattach", .prefix = "seg", .names = &segattach_fixtures },
+        .{ .dir = "sema", .prefix = "sema", .names = &sema_fixtures },
+        .{ .dir = "net", .prefix = "net", .names = &net_fixtures },
+    }) |set| for (set.names) |name| {
         const obj = b.addObject(.{
             .name = name,
             .root_module = b.createModule(.{
@@ -642,24 +650,11 @@ pub fn build(b: *std.Build) void {
                 .optimize = .ReleaseSmall,
             }),
         });
-        obj.root_module.addAssemblyFile(b.path(b.fmt("tests/fixtures/segattach/{s}.S", .{name})));
+        obj.root_module.addAssemblyFile(b.path(b.fmt("tests/fixtures/{s}/{s}.S", .{ set.dir, name })));
         obj.root_module.addIncludePath(b.path("tests/fixtures/segattach"));
         const bin = b.addObjCopy(obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
-        backend_tests.root_module.addAnonymousImport(b.fmt("seg_{s}", .{name}), .{ .root_source_file = bin.getOutput() });
-    }
-    for (sema_fixtures) |name| {
-        const obj = b.addObject(.{
-            .name = name,
-            .root_module = b.createModule(.{
-                .target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .freestanding }),
-                .optimize = .ReleaseSmall,
-            }),
-        });
-        obj.root_module.addAssemblyFile(b.path(b.fmt("tests/fixtures/sema/{s}.S", .{name})));
-        obj.root_module.addIncludePath(b.path("tests/fixtures/segattach"));
-        const bin = b.addObjCopy(obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
-        backend_tests.root_module.addAnonymousImport(b.fmt("sema_{s}", .{name}), .{ .root_source_file = bin.getOutput() });
-    }
+        backend_tests.root_module.addAnonymousImport(b.fmt("{s}_{s}", .{ set.prefix, name }), .{ .root_source_file = bin.getOutput() });
+    };
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
     // The design tool's tests read tools/testdata from the repository root.

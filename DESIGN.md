@@ -189,7 +189,7 @@ The answer (`src/cpupool.zig`) is a hybrid. A process creates and owns its vCPU 
 
 We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, libmemlayer, libsec, libmp, libip, libauthsrv) and its GUI backends. Its `sysfile.c` already implements the file syscalls with Plan 9 semantics, so most syscall handlers are a decode followed by one call. We keep the vendored tree close to upstream so 9front fixes keep merging cleanly.
 
-**Reused as-is:** chan/dev/mount machinery, devroot, devcons (for everything but `cons` itself), devmnt (the 9P client), devfs-posix and devfs-win32 (the host filesystem), devpipe, devip, devtls, devssl, devdraw, devmouse, devaudio, devcmd, qio, and the auth code. We compile drawterm's `.c` files but not its `kern/devtab.c` or `kern/devenv.c`; our own copies live in `src/kern/`, so the vendored tree stays unmodified.
+**Reused as-is:** chan/dev/mount machinery, devroot, devcons (for everything but `cons` itself), devmnt (the 9P client), devfs-posix and devfs-win32 (the host filesystem, with h9's sandbox hook calls), devpipe, devip (with h9's network hook calls), devtls, devssl, devdraw, devmouse, devaudio, devcmd, qio, and the auth code. We compile drawterm's `.c` files but not its `kern/devtab.c` or `kern/devenv.c`; our own copies live in `src/kern/`, so the vendored tree stays unmodified.
 
 **Added by us**
 
@@ -203,6 +203,7 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 | devdup `#d` | `/fd/N` |
 | `tsleep` (`src/kern/tsleep.c`) | drawterm's `sleep` has no timeout. `tsleep` has 9front's contract and uses only drawterm's public `sleep` and `wakeup`: it puts a timer on its own stack into a list sorted by host monotonic time, and the timer kproc wakes it at the deadline. The list is guarded by a host lock (`glue.c`, `glue-win32.c`) that the kproc holds while it calls `wakeup`, and `tsleep` always takes its timer out under that lock before returning, so no Proc fields are needed and `kern/dat.h` stays unmodified. |
 | Semaphores and `rendezvous` (`src/kern/sema.c`) | drawterm has no semaphores. 9front's code is ported closely, with the wait lists in 64 hashed buckets keyed by the host address of the semaphore word rather than in the segment, since h9's segments are Zig objects; the word is changed with host atomics. `src/syscall.zig` checks the address first (aligned, mapped, in a writable segment), and the pages it names never move while it's shared. `rendezvous` is 9front's on drawterm's Rgrp, so `procinterrupt` still pulls a process out of it, but it also checks for a note that arrived before the process was on the list. |
+| Sandbox hooks (`src/kern/fscheck.c`, `src/kern/netcheck.c`) | The C side of the policy checks devfs and devip call; see Sandbox policy, "Vendor hooks" |
 
 **Zig/C seam rules**
 
@@ -245,11 +246,15 @@ Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths
 | `fs.read.scope`, `fs.write.scope` | The namespace is an allowlist: only listed host paths are bound from `#U`, each read-only or read-write |
 | `fs.read.deny` | Unbound paths don't exist; denied paths inside a bound tree are filtered in devfs |
 | `net.disable` | `#I` is masked in the init Pgrp (drawterm's `devmasked`), so the guest can't re-attach it |
+| `net.outbound` | devip refuses `announce`, TCP and UDP, so the guest can dial out but not serve |
+| `net.allow` | devip checks each `connect` against dial-string patterns (`tcp!10.0.0.0/8!564`, `tcp!*.example.com!443`), and devip's `cs` refuses to resolve names no pattern covers; an egress allowlist isobox can't offer |
 | `res.memory` | A cap on the guest-physical page allocator; exact, not a watchdog |
 | `proc.timeout` | A machine deadline: a `hangup` note to every process, then a hard teardown after a 2 s grace period |
 | `res.pids`, `res.cpu` | A cap on live processes in `rfork`; a cap on vCPUs running guest code at once |
 
-**Vendor hooks.** The policy lives in Zig. drawterm calls it through leaf functions, following seam rule 3. devfs-posix and devfs-win32 call `h9_fs_check(path, op)` (in `src/kern/fscheck.c`) before each walk, open, create, remove, wstat and directory entry. It resolves the host path and asks the Zig leaf `h9_policy_check` for a verdict: allowed, hidden (the walk fails, or the entry is left out of the listing) or read-only ("permission denied"). The machine's compiled plan is set per host thread, because each guest process runs on its own thread. The leaves return an int and never raise kernel errors themselves.
+**Vendor hooks.** The policy lives in Zig. drawterm calls it through leaf functions, following seam rule 3. devfs-posix and devfs-win32 call `h9_fs_check(path, op)` (in `src/kern/fscheck.c`) before each walk, open, create, remove, wstat and directory entry. It resolves the host path and asks the Zig leaf `h9_policy_check` for a verdict: allowed, hidden (the walk fails, or the entry is left out of the listing) or read-only ("permission denied"). devip calls `h9_net_check(op, proto, addr, port)` (declared in `src/kern/netcheck.h`) when a ctl file's `connect` or `announce` is parsed, before a port is bound or the host is dialed, and raises "permission denied" on a refusal. Its `cs` calls `h9_net_lookup(proto, name, port)` before the host's resolver, raising "no translation for host found" for a name no pattern covers, and `h9_net_resolved` after it. The machine's compiled plan is set per host thread, because each guest process runs on its own thread. The leaves return an int and never raise kernel errors themselves.
+
+**Network rules.** Under `--net=outbound` (the default profile's setting) `announce` is refused; `--net=enable` allows it. Without `--net-allow`, a `connect` to link-local addresses (169.254.0.0/16, fe80::/10) is refused in both modes, which keeps the common cloud metadata endpoint out of reach, and everything else is allowed. With patterns, the patterns are the whole policy: a `connect` must match one, by protocol (`tcp`, `udp`, or `net`/`*`), address (an address, a CIDR range or `*`) and port (a number, a range or `*`). IPv4 is matched as IPv4, however devip spelled it. A name pattern (`api.example.com`, or `*.example.com` for one or more labels) can't be checked at `connect`, whose message is numeric, so `cs` resolves only names a pattern covers and records what each returned in the machine's resolved-name table (the 1024 most recent entries). A later `connect` to a recorded address is allowed if its name matches a name pattern with that protocol and port. `--net-allow` with `--net=disable`, or a bad pattern, is exit 2.
 
 **Access rules.** The plan's rules are the root, the cwd, `/tmp`, each `--readable` and `--writable` path and each `--read-deny` path, all as resolved host paths. A deny rule covering a path wins. Otherwise the longest allow rule covering the path decides between read-only and read-write. Ancestors of allowed paths can be walked and listed but not changed, so `/mnt/term/<path>` works when the host's `/` is unioned after the tree's `/mnt/term`. Anything else is hidden. Bind-level read-only (no `MCREATE`) is a second, coarser check.
 
@@ -263,7 +268,7 @@ Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths
 | Host cwd (`/mnt/term/cwd`) | Read-write |
 | Rest of the host filesystem | Not visible |
 | `/tmp` | The host temp dir |
-| Network | Full |
+| Network | Outbound: clients can connect anywhere except link-local, servers can't announce |
 | Host commands (`#C`) | Masked |
 | Environment | Only the default guest variables plus `--env` |
 | Memory | The guest-physical region size (1 GiB; `--memory` sets it, up to 32 GiB) |
@@ -303,7 +308,7 @@ caveats:
   - the h9 process itself is not host-sandboxed
 ```
 
-Requested capabilities the build can't enforce yet are listed on an `unenforced:` line, and the setting falls back to the safer choice: `--write=ephemeral` and `--write=overlay` deny writes, and `--net=outbound` leaves the network as it is. `--strict` refuses them with exit 2 instead.
+`--net-allow` patterns are printed in a `net-allow:` section after `devmask:`. Requested capabilities the build can't enforce yet are listed on an `unenforced:` line, and the setting falls back to the safer choice: `--write=ephemeral` and `--write=overlay` deny writes. `--strict` refuses them with exit 2 instead.
 
 **Examples**
 
@@ -314,6 +319,8 @@ h9 --memory 256m --pids 32 --cpus 2 --timeout 30s rc       # resource caps
 h9 --readable ~/src/proj --read-deny ~/src/proj/.env \
     --rc 'grep -n TODO /mnt/term/$home/src/proj/*.c'       # read a tree, hide secrets
 h9 --strict --write=overlay mk                             # usage error, exit 2: overlay isn't enforced yet
+h9 --net=enable aux/listen1 -t tcp!*!8080 /bin/cat           # a server needs --net=enable
+h9 --net-allow 'tcp!*.example.com!443' myclient              # egress by name, through cs
 ```
 
 Host paths given to `--readable` and `--writable` appear in the guest under `/mnt/term/<host path>`, as in drawterm; the cwd stays at `/mnt/term/cwd`.
@@ -374,7 +381,8 @@ h9 --version | --check | --help      # tool functions; -h alone is --help
 | `--writable PATH` (repeatable) | Binds a host path read-write; under the cwd it overrides a read-only cwd |
 | `--read-deny PATH` (repeatable) | Hides a host path inside a bound tree |
 | `--write none\|scope\|ephemeral\|overlay` | Deny writes, or persist only writable paths. `ephemeral` and `overlay` are accepted but not enforced yet, and deny writes ([ephemeral-writes](design/0006-ephemeral-writes.md), [overlay](design/0011-overlay.md)) |
-| `--net disable\|outbound\|enable` | Network policy. `outbound` is accepted but not enforced yet, and leaves the network as it is ([net-policy](design/0005-net-policy.md)) |
+| `--net disable\|outbound\|enable` | Network policy: mask `#I`, refuse `announce` (the default profile's default), or allow it |
+| `--net-allow PATTERN` (repeatable) | Allows `connect` only to matching addresses, and `cs` lookups only of matching names (`proto!host!port`) |
 | `--memory SIZE` | Caps guest memory (`512m`, `2g`) |
 | `--pids N`, `--cpus N` | Caps processes and concurrently running vCPUs |
 | `--timeout DURATION` | Posts `hangup` at a deadline, waits up to 2 s, then tears down the machine |

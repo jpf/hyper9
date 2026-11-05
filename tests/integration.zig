@@ -1019,3 +1019,241 @@ test "--timeout stops processes blocked in rendezvous and semacquire [3]" {
     // Hangup or the teardown 2 s later; one run per backend.
     try std.testing.expect(took < 10_000 * @as(i64, @intCast(std.mem.count(u8, e.backends, ",") + 1)));
 }
+
+// The network policy (design/0005-net-policy.md). The cases listen on
+// 127.0.0.1 themselves, and the guest writes /net ctl files from rc, so
+// they need no client program the root tree doesn't have.
+
+/// A TCP listener on an ephemeral port of 127.0.0.1.
+fn listenLocal() !std.Io.net.Server {
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    return addr.listen(std.testing.io, .{ .reuse_address = true });
+}
+
+/// An rc command that dials `addr` (`a.b.c.d!port`) through
+/// /net/tcp/clone and writes `line` to the connection.
+fn rcDial(buf: []u8, addr: []const u8, line: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "<>[3] /net/tcp/clone {{ n=`{{read <[0=3]}}; echo 'connect {s}' >[1=3] && echo {s} >/net/tcp/$n/data }}", .{ addr, line });
+}
+
+/// Accepts the next queued connection and reads a line from it.
+fn acceptLine(srv: *std.Io.net.Server, buf: []u8) ![]const u8 {
+    const io = std.testing.io;
+    const s = try srv.accept(io);
+    defer s.close(io);
+    var rbuf: [256]u8 = undefined;
+    var r = s.reader(io, &rbuf);
+    const n = r.interface.readSliceShort(buf) catch 0;
+    return std.mem.trimEnd(u8, buf[0..n], "\n");
+}
+
+/// Checks that nothing reached `srv` before this call: the first
+/// connection accepted is one the test makes itself.
+fn expectNoConnection(srv: *std.Io.net.Server) !void {
+    const io = std.testing.io;
+    const c = try srv.socket.address.connect(io, .{ .mode = .stream });
+    defer c.close(io);
+    var wbuf: [64]u8 = undefined;
+    var w = c.writer(io, &wbuf);
+    try w.interface.writeAll("marker\n");
+    try w.interface.flush();
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("marker", try acceptLine(srv, &buf));
+}
+
+test "the default profile refuses announce [5]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "aux/listen1", "-t", "tcp!127.0.0.1!39517", "/bin/cat" });
+    defer r.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "announce tcp!127.0.0.1!39517: permission denied") != null);
+    try std.testing.expect(r.code != 0);
+}
+
+test "--net=enable allows a server [5]" {
+    const e = try env(@src());
+    const io = std.testing.io;
+    var probe = try listenLocal();
+    const port = probe.socket.address.getPort();
+    probe.deinit(io);
+    var addr_buf: [64]u8 = undefined;
+    const addr = try std.fmt.bufPrint(&addr_buf, "tcp!127.0.0.1!{d}", .{port});
+    var it = std.mem.tokenizeScalar(u8, e.backends, ',');
+    while (it.next()) |backend| {
+        var child = try std.process.spawn(io, .{
+            .argv = &.{ e.h9, "--backend", backend, "--root", e.root, "--net=enable", "--timeout", "20s", "aux/listen1", "-1", "-t", addr, "/bin/cat" },
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+            .create_no_window = true,
+        });
+        defer child.kill(io);
+        const ip = try std.Io.net.IpAddress.parse("127.0.0.1", port);
+        var tries: u32 = 0;
+        const c = while (true) : (tries += 1) {
+            break ip.connect(io, .{ .mode = .stream }) catch |err| {
+                if (tries >= slow(100)) return err;
+                try io.sleep(.fromMilliseconds(100), .awake);
+                continue;
+            };
+        };
+        defer c.close(io);
+        var wbuf: [64]u8 = undefined;
+        var w = c.writer(io, &wbuf);
+        try w.interface.writeAll("ping\n");
+        try w.interface.flush();
+        var rbuf: [64]u8 = undefined;
+        var r = c.reader(io, &rbuf);
+        var got: [64]u8 = undefined;
+        const n = try r.interface.readSliceShort(got[0..5]);
+        try std.testing.expectEqualStrings("ping\n", got[0..n]);
+    }
+}
+
+test "outbound allows connect [5]" {
+    const e = try env(@src());
+    var srv = try listenLocal();
+    defer srv.deinit(std.testing.io);
+    var addr_buf: [64]u8 = undefined;
+    var cmd_buf: [256]u8 = undefined;
+    const addr = try std.fmt.bufPrint(&addr_buf, "127.0.0.1!{d}", .{srv.socket.address.getPort()});
+    var it = std.mem.tokenizeScalar(u8, e.backends, ',');
+    while (it.next()) |backend| {
+        const r = try runOn(e, backend, &.{ "--rc", try rcDial(&cmd_buf, addr, "hello") }, null);
+        defer r.deinit();
+        try std.testing.expectEqualStrings("", r.err);
+        try std.testing.expectEqual(0, r.code);
+        var buf: [64]u8 = undefined;
+        try std.testing.expectEqualStrings("hello", try acceptLine(&srv, &buf));
+    }
+}
+
+test "outbound refuses link-local without patterns [5]" {
+    const e = try env(@src());
+    var cmd_buf: [256]u8 = undefined;
+    const cmd = try rcDial(&cmd_buf, "169.254.169.254!80", "x");
+    for ([_][]const u8{ "--net=outbound", "--net=enable" }) |mode| {
+        const r = try run(e, &.{ mode, "--rc", cmd });
+        defer r.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, r.err, "write error: permission denied") != null);
+        try std.testing.expect(r.code != 0);
+    }
+}
+
+test "a pattern allows link-local [5]" {
+    const e = try env(@src());
+    var cmd_buf: [256]u8 = undefined;
+    // Nothing listens there, so the connect fails, but not by the policy.
+    const r = try run(e, &.{ "--net-allow", "tcp!169.254.0.0/16!*", "--timeout", "20s", "--rc", try rcDial(&cmd_buf, "169.254.169.254!80", "x") });
+    defer r.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "permission denied") == null);
+}
+
+test "--net-allow refuses a connect outside it, and the host sees nothing [5]" {
+    const e = try env(@src());
+    var srv = try listenLocal();
+    defer srv.deinit(std.testing.io);
+    var addr_buf: [64]u8 = undefined;
+    var cmd_buf: [256]u8 = undefined;
+    const addr = try std.fmt.bufPrint(&addr_buf, "127.0.0.1!{d}", .{srv.socket.address.getPort()});
+    const r = try run(e, &.{ "--net-allow", "tcp!10.0.0.0/8!*", "--rc", try rcDial(&cmd_buf, addr, "leak") });
+    defer r.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "write error: permission denied") != null);
+    try expectNoConnection(&srv);
+}
+
+test "--net-allow allows a matching CIDR and port [5]" {
+    const e = try env(@src());
+    var srv = try listenLocal();
+    defer srv.deinit(std.testing.io);
+    const port = srv.socket.address.getPort();
+    var addr_buf: [64]u8 = undefined;
+    var pat_buf: [64]u8 = undefined;
+    var cmd_buf: [256]u8 = undefined;
+    const addr = try std.fmt.bufPrint(&addr_buf, "127.0.0.1!{d}", .{port});
+    const pat = try std.fmt.bufPrint(&pat_buf, "tcp!127.0.0.0/8!{d}-{d}", .{ port, port });
+    var it = std.mem.tokenizeScalar(u8, e.backends, ',');
+    while (it.next()) |backend| {
+        const r = try runOn(e, backend, &.{ "--net-allow", pat, "--rc", try rcDial(&cmd_buf, addr, "cidr") }, null);
+        defer r.deinit();
+        try std.testing.expectEqualStrings("", r.err);
+        var buf: [64]u8 = undefined;
+        try std.testing.expectEqualStrings("cidr", try acceptLine(&srv, &buf));
+    }
+}
+
+test "a name pattern allows a connect through cs [5]" {
+    const e = try env(@src());
+    var srv = try listenLocal();
+    defer srv.deinit(std.testing.io);
+    const port = srv.socket.address.getPort();
+    var pat_buf: [64]u8 = undefined;
+    var addr_buf: [64]u8 = undefined;
+    var dial_buf: [256]u8 = undefined;
+    var cmd_buf: [384]u8 = undefined;
+    const pat = try std.fmt.bufPrint(&pat_buf, "tcp!localhost!{d}", .{port});
+    const addr = try std.fmt.bufPrint(&addr_buf, "127.0.0.1!{d}", .{port});
+    // Without the lookup, the address isn't in the resolved-name table.
+    const refused = try run(e, &.{ "--net-allow", pat, "--rc", try rcDial(&dial_buf, addr, "early") });
+    defer refused.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, refused.err, "write error: permission denied") != null);
+    const cmd = try std.fmt.bufPrint(&cmd_buf, "ndb/csquery /net/cs '{s}' >/dev/null && {s}", .{ pat, try rcDial(&dial_buf, addr, "named") });
+    var it = std.mem.tokenizeScalar(u8, e.backends, ',');
+    while (it.next()) |backend| {
+        const r = try runOn(e, backend, &.{ "--net-allow", pat, "--rc", cmd }, null);
+        defer r.deinit();
+        try std.testing.expectEqualStrings("", r.err);
+        var buf: [64]u8 = undefined;
+        try std.testing.expectEqualStrings("named", try acceptLine(&srv, &buf));
+    }
+}
+
+test "a name outside --net-allow isn't resolved [5]" {
+    const e = try env(@src());
+    // localhost resolves on every host, so the refusal comes before the
+    // host's resolver.
+    const r = try run(e, &.{ "--net-allow", "tcp!127.0.0.1!80", "ndb/csquery", "/net/cs", "tcp!localhost!80" });
+    defer r.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "translating tcp!localhost!80: no translation for host found") != null);
+}
+
+test "a UDP announce is refused under outbound [5]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--rc", "<>[3] /net/udp/clone { echo 'announce 127.0.0.1!39517' >[1=3] }" });
+    defer r.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "write error: permission denied") != null);
+    try std.testing.expect(r.code != 0);
+}
+
+test "--net-allow with --net=disable is a usage error [5]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--net=disable", "--net-allow", "tcp!*!*", "echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(2, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "--net-allow conflicts with --net=disable") != null);
+    const bad = try run(e, &.{ "--net-allow", "tcp!10.0.0.0/33!*", "echo" });
+    defer bad.deinit();
+    try std.testing.expectEqual(2, bad.code);
+    try std.testing.expect(std.mem.indexOf(u8, bad.err, "tcp!10.0.0.0/33!*") != null);
+}
+
+test "--print shows net-allow patterns and caveats [5]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--print", "--net-allow", "tcp!*.example.com!443", "--net-allow", "udp!10.0.0.53!53", "echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "net.allow net.outbound") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "net=outbound") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "net-allow:\n  tcp!*.example.com!443\n  udp!10.0.0.53!53\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "name patterns trust the host's resolver") != null);
+    const d = try run(e, &.{ "--print", "echo" });
+    defer d.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, d.out, "except link-local") != null);
+}
+
+test "--strict accepts --net=outbound [5]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--strict", "--net=outbound", "echo", "ok" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("ok\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}

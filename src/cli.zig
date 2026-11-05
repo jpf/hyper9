@@ -10,6 +10,7 @@ pub const usage =
     \\           [--env name=value]... [--profile default|tight] [--sandbox DIR]
     \\           [--readable PATH]... [--writable PATH]... [--read-deny PATH]...
     \\           [--write none|scope|ephemeral|overlay] [--net disable|outbound|enable]
+    \\           [--net-allow PATTERN]...
     \\           [--memory SIZE] [--timeout DURATION] [--pids N] [--cpus N]
     \\           [--ns FILE] [--host-fs] [--host-cmd]
     \\           [--strict] [--print] [--trace[=FILE]] [--dump-on-fault]
@@ -53,6 +54,8 @@ pub const Config = struct {
     read_deny: []const []const u8 = &.{},
     write: ?policy.WriteMode = null,
     net: ?policy.NetMode = null,
+    /// --net-allow patterns, checked when the policy is compiled.
+    net_allow: []const []const u8 = &.{},
     memory: ?u64 = null,
     timeout_ns: ?u64 = null,
     pids: ?u32 = null,
@@ -93,6 +96,7 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     var readable: std.ArrayList([]const u8) = .empty;
     var writable: std.ArrayList([]const u8) = .empty;
     var read_deny: std.ArrayList([]const u8) = .empty;
+    var net_allow: std.ArrayList([]const u8) = .empty;
     // Long flags only (DESIGN.md, "Parsing rules"); -h is accepted alone,
     // where it can't be a program's flag.
     if (args.len == 2 and std.mem.eql(u8, args[1], "-h")) return .{ .mode = .help, .argv = &.{} };
@@ -150,6 +154,8 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             try read_deny.append(gpa, v orelse return error.Usage);
         } else if (value(args, &i, "--write")) |v| {
             c.write = try enumValue(policy.WriteMode, v);
+        } else if (value(args, &i, "--net-allow")) |v| {
+            try net_allow.append(gpa, v orelse return error.Usage);
         } else if (value(args, &i, "--net")) |v| {
             c.net = try enumValue(policy.NetMode, v);
         } else if (value(args, &i, "--memory")) |v| {
@@ -181,6 +187,7 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     c.readable = try readable.toOwnedSlice(gpa);
     c.writable = try writable.toOwnedSlice(gpa);
     c.read_deny = try read_deny.toOwnedSlice(gpa);
+    c.net_allow = try net_allow.toOwnedSlice(gpa);
     c.argv = args[i..];
     return c;
 }
@@ -265,6 +272,17 @@ test "policy flags" {
     try t.expect(c.strict and c.print and c.dump_on_fault);
     try t.expectEqualStrings("t.log", c.trace.?);
     try t.expectEqualStrings("mk", c.argv[0]);
+}
+
+test "--net-allow is repeatable" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const c = try parse(arena.allocator(), &.{ "h9", "--net-allow", "tcp!*.example.com!443", "--net-allow=udp!10.0.0.53!53", "--net", "enable", "x" });
+    try t.expectEqual(@as(usize, 2), c.net_allow.len);
+    try t.expectEqualStrings("tcp!*.example.com!443", c.net_allow[0]);
+    try t.expectEqualStrings("udp!10.0.0.53!53", c.net_allow[1]);
+    try t.expectEqual(@as(?policy.NetMode, .enable), c.net);
+    try t.expectError(error.Usage, parse(arena.allocator(), &.{ "h9", "--net-allow" }));
 }
 
 test "--sandbox and --rc" {
