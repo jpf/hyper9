@@ -61,8 +61,7 @@ fn parseLine(argv: []const []const u8) Error!Op {
     }
     var rest = argv[i..];
     // --print's access column.
-    if (rest.len == 3 and std.mem.eql(u8, cmd, "bind") and isAccess(rest[2]))
-    {
+    if (rest.len == 3 and std.mem.eql(u8, cmd, "bind") and isAccess(rest[2])) {
         rest = rest[0 .. rest.len - 1];
     }
     if (std.mem.eql(u8, cmd, "bind") and rest.len == 2) return .{ .bind = .{ .from = rest[0], .to = rest[1], .flag = flag } };
