@@ -2,7 +2,7 @@
 id: 5
 slug: net-policy
 title: Outbound-only network by default, and --net-allow
-status: draft
+status: accepted
 created: 2026-11-03
 authors: [progrium]
 depends: []
@@ -10,6 +10,8 @@ areas: [sandbox, cli, kern]
 ---
 
 # Proposal: outbound-only network by default, and --net-allow
+
+Nov 5, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
 
 ## Abstract
 
