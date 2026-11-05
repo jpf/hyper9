@@ -32,6 +32,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [whp](design/0017-whp.md) | draft | needs kvm | WHP backend |
 | [linux-personality](design/0018-linux-personality.md) | draft |  | Linux personality |
 | [zig-interpreter](design/0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
+| [websocket-9p](design/0021-websocket-9p.md) | draft | needs net-policy, devsrv, 9p-roots | 9P over WebSocket |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-sandbox](design/host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
@@ -61,6 +62,7 @@ flowchart LR
   p_whp["#35;17 whp<br/>draft"]:::draft
   p_linux_personality["#35;18 linux-personality<br/>draft"]:::draft
   p_zig_interpreter["#35;19 zig-interpreter<br/>draft"]:::draft
+  p_websocket_9p["#35;21 websocket-9p<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
@@ -73,6 +75,9 @@ flowchart LR
   p_9p_roots --> p_image_roots
   p_devsrv --> p_gfx
   p_kvm --> p_whp
+  p_net_policy --> p_websocket_9p
+  p_devsrv --> p_websocket_9p
+  p_9p_roots --> p_websocket_9p
   p_kvm --> p_host_sandbox
   p_whp --> p_host_sandbox
 ```
