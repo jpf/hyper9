@@ -852,3 +852,35 @@ test "/proc/n has status, fd, ns and args [baseline]" {
     defer ls.deinit();
     try std.testing.expect(try std.fmt.parseInt(usize, std.mem.trim(u8, ls.out, " \n"), 10) >= 2);
 }
+
+test "seg attaches a shared segment and reads zero [4]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "seg", "-r", "shared", "0x1000", "0" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("0x0\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "seg attaches a memory segment and writes a word [4]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "seg", "-L", "-w", "memory", "0x1000", "8", "0x12345678" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("", r.err);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "an unknown class is a bad arg [4]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "seg", "-r", "tmu", "0x1000", "0" });
+    defer r.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "segattach: bad arg in system call") != null);
+    try std.testing.expectEqual(1, r.code);
+}
+
+test "--memory caps segattach [4]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--memory", "8m", "seg", "-r", "memory", "0x2000000", "0" });
+    defer r.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "virtual memory allocation failed") != null);
+    try std.testing.expectEqual(1, r.code);
+}

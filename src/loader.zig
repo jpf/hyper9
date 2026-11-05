@@ -58,7 +58,7 @@ pub fn load(gpa: std.mem.Allocator, b: vmm.Backend, as: vmm.AddressSpace, bytes:
     if (ssize > l.stack_size / 2) return error.BadExec;
     const stack_len = pageRound(ssize + segment.stack_slack);
 
-    var segs: segment.Segs = .{ .stack_floor = stack_base };
+    var segs: segment.Segs = .{ .stack_floor = stack_base, .ustktop = l.ustktop, .seg_max = l.seg_max };
     errdefer segs.release(as);
 
     const text = try segment.Segment.create(gpa, b, .text, .{ .exec = true }, l.utzero, pageRound(file_text));

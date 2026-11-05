@@ -8,7 +8,7 @@
  * looked up in the caller's machine on every open, read and write.
  *
  * Served: args, ctl (kill, hang, nohang, close, closefiles), fd, note,
- * noteid, notepg, ns, ppid, status and wait. mem, regs, fpregs, segment
+ * noteid, notepg, ns, ppid, segment, status and wait. mem, regs, fpregs
  * and text (acid) wait for design/0010-self-host.md; kregs, kfpregs, proc, profile, syscall,
  * trace and watchpt have no meaning here. The CPU times in status are 0.
  *
@@ -36,6 +36,7 @@ enum
 	Qnotepg,
 	Qns,
 	Qppid,
+	Qsegment,
 	Qstatus,
 	Qwait,
 };
@@ -70,6 +71,7 @@ Dirtab procdir[] =
 	"notepg",	{Qnotepg},	0,			0000,
 	"ns",		{Qns},		0,			0444,
 	"ppid",		{Qppid},	0,			0444,
+	"segment",	{Qsegment},	0,			0444,
 	"status",	{Qstatus},	0,			0444,
 	"wait",		{Qwait},	0,			0400,
 };
@@ -205,6 +207,7 @@ procopen(Chan *c, int omode0)
 	switch(QID(c->qid)){
 	case Qstatus:
 	case Qppid:
+	case Qsegment:
 	case Qns:
 	case Qfd:
 		if(omode != OREAD)
@@ -474,6 +477,14 @@ procread(Chan *c, void *va, long n, vlong off)
 
 	case Qargs:
 		j = procargs(h, statbuf, sizeof statbuf);
+		goto statbufread;
+
+	case Qsegment:
+		j = 0;
+		lock(&h->nlk);
+		if(h->p != nil && h->aux != nil && h9_procsegment != nil)
+			j = h9_procsegment(h->aux, statbuf, sizeof statbuf);
+		unlock(&h->nlk);
 		goto statbufread;
 
 	case Qwait:

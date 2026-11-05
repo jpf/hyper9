@@ -128,3 +128,9 @@ int	h9_pids(Hmach*, ulong*, int);
  * held, and only while its aux is set.
  */
 extern void	(*h9_procstatus)(void*, char*, int, ulong*);
+
+/*
+ * Set by the Zig side: /proc/n/segment's text for Zig process aux, in
+ * 9front's format; returns its length. Called as h9_procstatus is.
+ */
+extern int	(*h9_procsegment)(void*, char*, int);

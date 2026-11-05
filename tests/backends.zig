@@ -888,3 +888,268 @@ fn expectPooled(arch: aout.Arch, code: []const u8) !void {
     };
     if (ran == 0) return error.SkipZigTest;
 }
+
+/// Runs segattach fixture `text` (tests/fixtures/segattach) on every
+/// backend that can, and checks its status and output. A `want_status`
+/// ending in "pc=" is a fault note, matched up to the pc. `root`, if
+/// given, is the guest's /.
+fn expectSeg(text: []const u8, root: ?[]const u8, want_status: []const u8, want_out: []const u8) !void {
+    const gpa = std.testing.allocator;
+    const bytes = try image(gpa, .arm64, text);
+    defer gpa.free(bytes);
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        var err: std.Io.Writer.Allocating = .init(gpa);
+        defer err.deinit();
+        var m = h9.Machine.init(gpa, std.testing.io, .{
+            .backend = kind,
+            .arch = .arm64,
+            .root = root,
+            .policy = .{ .timeout_ns = 10 * std.time.ns_per_s },
+            .stdio = .{ .out = &out.writer, .err = &err.writer },
+        }) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
+            else => return e,
+        };
+        defer m.deinit();
+        const status = try m.run(.{ .bytes = bytes }, &.{"t"});
+        errdefer std.debug.print("backend {t}\n", .{kind});
+        var sb: [300]u8 = undefined;
+        const got = switch (status) {
+            .exited => |t| try std.fmt.bufPrint(&sb, "exited {s}", .{t}),
+            .killed => |t| try std.fmt.bufPrint(&sb, "killed {s}", .{t}),
+        };
+        if (std.mem.endsWith(u8, want_status, "pc=")) {
+            if (!std.mem.startsWith(u8, got, want_status)) {
+                std.debug.print("status: want prefix \"{s}\", got \"{s}\"\n", .{ want_status, got });
+                return error.TestUnexpectedResult;
+            }
+        } else try std.testing.expectEqualStrings(want_status, got);
+        try std.testing.expectEqualStrings(want_out, out.written());
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+/// Where segattach with va 0 puts the first segment on arm64: just below
+/// the stack's 16 MiB.
+const seg_low = "0x7fefef000";
+
+test "a shared segment is the same pages in an rfork child [4]" {
+    try expectSeg(@embedFile("seg_shared_rfork"), null, "exited ", "");
+}
+
+test "a memory segment is copied by rfork and shared with RFMEM [4]" {
+    try expectSeg(@embedFile("seg_memory_rfork"), null, "exited ", "");
+}
+
+test "segattach at 0 goes below the stack, and an overlap fails [4]" {
+    try expectSeg(@embedFile("seg_place"), null, "exited segments overlap", "");
+}
+
+test "a sixth segment fails with virtual memory allocation failed [4]" {
+    try expectSeg(@embedFile("seg_sixth"), null, "exited virtual memory allocation failed", "");
+}
+
+test "segdetach unmaps, and the stack can't be detached [4]" {
+    try expectSeg(@embedFile("seg_detach"), null, "killed sys: trap: fault read addr=" ++ seg_low ++ " pc=", "");
+}
+
+test "segbrk grows and shrinks, and won't shrink a shared segment [4]" {
+    try expectSeg(@embedFile("seg_segbrk"), null, "exited device or object already in use", "");
+}
+
+test "segfree zeroes the span [4]" {
+    try expectSeg(@embedFile("seg_segfree"), null, "exited ", "");
+}
+
+test "a write to an SG_RONLY segment faults [4]" {
+    try expectSeg(@embedFile("seg_ronly"), null, "killed sys: trap: fault write addr=" ++ seg_low ++ " pc=", "");
+}
+
+test "executing from an attached segment posts an exec fault [4]" {
+    try expectSeg(@embedFile("seg_execfault"), null, "killed sys: trap: fault exec addr=" ++ seg_low ++ " pc=", "");
+}
+
+test "segattach just above the break trims the headroom, and the data survives [4]" {
+    try expectSeg(@embedFile("seg_headroom"), null, "exited ", "");
+}
+
+test "exec keeps segments and drops SG_CEXEC ones [4]" {
+    // exec_a execs /b, which is exec_b.
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "dev");
+    const b = try image(gpa, .arm64, @embedFile("seg_exec_b"));
+    defer gpa.free(b);
+    try tmp.dir.writeFile(io, .{ .sub_path = "b", .data = b });
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &buf);
+    try expectSeg(@embedFile("seg_exec_a"), buf[0..n], "killed sys: trap: fault read addr=0x100100000 pc=", "");
+}
+
+test "brk stops below an attached segment [4]" {
+    try expectSeg(@embedFile("seg_brkstop"), null, "exited segments overlap", "");
+}
+
+test "a detached shared segment stays mapped in a sibling [4]" {
+    try expectSeg(@embedFile("seg_sibling"), null, "killed sys: trap: fault read addr=" ++ seg_low ++ " pc=", "ok");
+}
+
+test "/proc/n/segment lists every segment [4]" {
+    try expectSeg(@embedFile("seg_procseg"), null, "exited ",
+        \\Stack     7feff0000 7ffff0000    1
+        \\Text   R     10000    11000    1
+        \\Data         20000    20000    1
+        \\Shared    7fefef000 7feff0000    1
+        \\
+    );
+}
+
+/// Loads hello into `as`, for the segment tests below.
+fn loadHello(b: vmm.Backend, as: vmm.AddressSpace) !h9.loader.Image {
+    const gpa = std.testing.allocator;
+    const bytes = try image(gpa, .arm64, &hello.arm64_text);
+    defer gpa.free(bytes);
+    return h9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
+}
+
+const segment = h9.segment;
+
+test "segments: segattach trims the data headroom, splitting a chunk, and won't for a shared data segment" {
+    try eachBackend(struct {
+        fn f(b: vmm.Backend) !void {
+            const gpa = std.testing.allocator;
+            const as = try b.newAddressSpace();
+            defer as.destroy();
+            var img = try loadHello(b, as);
+            defer img.segs.release(as);
+            const s = &img.segs;
+            const d = s.data.?;
+            // One chunk mapped well past a break that ends mid-chunk.
+            try s.brk(d.base + 3 * vmm.page_size);
+            try std.testing.expect(d.top > d.base + 4 * vmm.page_size);
+            try std.testing.expectEqual(@as(usize, 1), d.chunks.items.len);
+            setByte(as, d.base + 2 * vmm.page_size, 9);
+            const above = d.base + 3 * vmm.page_size;
+
+            // An RFMEM sibling shares the data, so its headroom can't be cut.
+            const cas = try b.newAddressSpace();
+            defer cas.destroy();
+            var c = try s.fork(cas, true);
+            try std.testing.expectError(error.Overlap, s.segattach(gpa, b, as, .memory, 0, above, vmm.page_size));
+            c.release(cas);
+
+            const va = try s.segattach(gpa, b, as, .memory, 0, above, vmm.page_size);
+            try std.testing.expectEqual(above, va);
+            try std.testing.expectEqual(above, d.top);
+            try std.testing.expectEqual(@as(?u8, 9), byteAt(as, d.base + 2 * vmm.page_size));
+            try std.testing.expectEqual(@as(?u8, 0), byteAt(as, above));
+            // The break can't grow into it now.
+            try std.testing.expectError(error.Overlap, s.brk(above + 1));
+            try s.segdetach(as, va);
+            try s.brk(above + 1);
+        }
+    }.f);
+}
+
+test "segments: segbrk stops at the next segment and the stack, and frees what it shrinks" {
+    try eachBackend(struct {
+        fn f(b: vmm.Backend) !void {
+            const gpa = std.testing.allocator;
+            const as = try b.newAddressSpace();
+            defer as.destroy();
+            var img = try loadHello(b, as);
+            defer img.segs.release(as);
+            const s = &img.segs;
+            const lo = try s.segattach(gpa, b, as, .memory, 0, 1 << 32, vmm.page_size);
+            const hi = try s.segattach(gpa, b, as, .shared, 0, (1 << 32) + 4 * vmm.page_size, vmm.page_size);
+            try std.testing.expectEqual(lo, try s.segbrk(lo, 0));
+            try std.testing.expectEqual(@as(u64, 0), try s.segbrk(lo, hi));
+            try std.testing.expectError(error.Overlap, s.segbrk(lo, hi + 1));
+            try std.testing.expectError(error.Overlap, s.segbrk(hi, s.ustktop + 1));
+            try std.testing.expectError(error.Overlap, s.segbrk(hi, s.stack_floor + 1));
+            try std.testing.expectError(error.NoVmem, s.segbrk(lo, lo - 1));
+            try std.testing.expectError(error.BadArg, s.segbrk(s.text.?.base, s.text.?.top));
+            try std.testing.expectError(error.BadArg, s.segbrk(s.brkTop() - 1, s.brkTop()));
+            try std.testing.expectEqual(@as(u64, 0), try s.segbrk(lo, lo + 1));
+            try std.testing.expectEqual(@as(?u8, null), byteAt(as, lo + vmm.page_size));
+            // More than --memory, with nothing in the way.
+            try s.segdetach(as, hi);
+            try std.testing.expectError(error.NoVmem, s.segbrk(lo, lo + (128 << 20)));
+            try std.testing.expectError(error.NoVmem, s.segattach(gpa, b, as, .memory, 0, 0, 128 << 20));
+            // Bigger than SEGMAXSIZE, wherever it'd go.
+            try std.testing.expectError(error.NoVmem, s.segattach(gpa, b, as, .memory, 0, 0, 9 << 30));
+        }
+    }.f);
+}
+
+test "segments: fork shares shared segments and copies memory ones, and exec keeps those without SG_CEXEC" {
+    try eachBackend(struct {
+        fn f(b: vmm.Backend) !void {
+            const gpa = std.testing.allocator;
+            const as = try b.newAddressSpace();
+            defer as.destroy();
+            var img = try loadHello(b, as);
+            defer img.segs.release(as);
+            const s = &img.segs;
+            const sh = try s.segattach(gpa, b, as, .shared, 0, 0, vmm.page_size);
+            const mem = try s.segattach(gpa, b, as, .memory, 0, 0, vmm.page_size);
+            const cx = try s.segattach(gpa, b, as, .memory, segment.SG_CEXEC, 0, vmm.page_size);
+            // A gap in the slots is kept by fork.
+            try s.segdetach(as, mem);
+            const mem2 = try s.segattach(gpa, b, as, .memory, 0, 0, vmm.page_size);
+            try std.testing.expectEqual(mem, mem2);
+
+            for ([_]bool{ false, true }) |share| {
+                const cas = try b.newAddressSpace();
+                defer cas.destroy();
+                var c = try s.fork(cas, share);
+                defer c.release(cas);
+                for (s.extra, c.extra) |p, q| try std.testing.expectEqual(p == null, q == null);
+                setByte(cas, sh, 1);
+                setByte(cas, mem, 1);
+                try std.testing.expectEqual(@as(?u8, 1), byteAt(as, sh));
+                try std.testing.expectEqual(@as(?u8, if (share) 1 else 0), byteAt(as, mem));
+                setByte(as, sh, 0);
+                setByte(as, mem, 0);
+            }
+
+            // exec: a new image, and the old segments carried into it.
+            const nas = try b.newAddressSpace();
+            defer nas.destroy();
+            var n = try loadHello(b, nas);
+            defer n.segs.release(nas);
+            try n.segs.inherit(s, nas);
+            try std.testing.expect(byteAt(nas, sh) != null);
+            try std.testing.expect(byteAt(nas, mem) != null);
+            try std.testing.expectEqual(@as(?u8, null), byteAt(nas, cx));
+        }
+    }.f);
+}
+
+test "segments: /proc/n/segment's text" {
+    try eachBackend(struct {
+        fn f(b: vmm.Backend) !void {
+            const gpa = std.testing.allocator;
+            const as = try b.newAddressSpace();
+            defer as.destroy();
+            var img = try loadHello(b, as);
+            defer img.segs.release(as);
+            const s = &img.segs;
+            _ = try s.segattach(gpa, b, as, .memory, segment.SG_RONLY, 0, vmm.page_size);
+            var buf: [512]u8 = undefined;
+            try std.testing.expectEqualStrings(
+                \\Stack     7feff0000 7ffff0000    1
+                \\Text   R     10000    11000    1
+                \\Data         20000    20000    1
+                \\Bss    R  7fefef000 7feff0000    1
+                \\
+            , buf[0..s.segmentText(&buf)]);
+        }
+    }.f);
+}

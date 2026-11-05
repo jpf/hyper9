@@ -10,10 +10,10 @@ const drawterm = "third_party/drawterm";
 const kern_sources = [_][]const u8{
     "alloc.c",    "allocb.c",        "chan.c",   "data.c",     "dev.c",
     "devaudio.c", "devaudio-none.c", "devcmd.c", "devcons.c",  "devdraw.c",
-    "devip.c",    "devkbd.c",        "devmnt.c", "devmouse.c",
-    "devroot.c",  "devssl.c",        "devtls.c", "error.c",    "parse.c",
-    "pgrp.c",     "procinit.c",      "rwlock.c", "sleep.c",    "stub.c",
-    "sysfile.c",  "qio.c",           "qlock.c",  "term.c",     "waserror.c",
+    "devip.c",    "devkbd.c",        "devmnt.c", "devmouse.c", "devroot.c",
+    "devssl.c",   "devtls.c",        "error.c",  "parse.c",    "pgrp.c",
+    "procinit.c", "rwlock.c",        "sleep.c",  "stub.c",     "sysfile.c",
+    "qio.c",      "qlock.c",         "term.c",   "waserror.c",
 };
 // drawterm files that post notes, built so their notes reach h9's note
 // queue (src/kern/proc.c) instead of drawterm's postnote.
@@ -109,6 +109,13 @@ const kern_flags_win32 = kern_flags_common ++ [_][]const u8{ "-DWINDOWS", "-DUNI
 
 /// Zig's own macOS SDK detection runs xcodebuild, which fails in some
 /// environments; SDKROOT (set by scripts/env.sh) is used when present.
+/// Programs in tests/fixtures/segattach, for tests/backends.zig.
+const segattach_fixtures = [_][]const u8{
+    "shared_rfork", "memory_rfork", "place",  "sixth",     "detach",
+    "segbrk",       "segfree",      "ronly",  "execfault", "headroom",
+    "brkstop",      "exec_a",       "exec_b", "sibling",   "procseg",
+};
+
 /// Runs tests/integration.zig against the h9 binary. `filters` selects
 /// cases by name; with `pending`, cases tagged with a proposal that isn't
 /// implemented run instead of skipping.
@@ -619,6 +626,21 @@ pub fn build(b: *std.Build) void {
         backend_tests.root_module.linkFramework("Hypervisor", .{});
     }
     linkUnicorn(backend_tests);
+    // The segattach fixtures, assembled freestanding as the shim is, and
+    // embedded as raw text for tests/backends.zig to wrap in an a.out.
+    for (segattach_fixtures) |name| {
+        const obj = b.addObject(.{
+            .name = name,
+            .root_module = b.createModule(.{
+                .target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .freestanding }),
+                .optimize = .ReleaseSmall,
+            }),
+        });
+        obj.root_module.addAssemblyFile(b.path(b.fmt("tests/fixtures/segattach/{s}.S", .{name})));
+        obj.root_module.addIncludePath(b.path("tests/fixtures/segattach"));
+        const bin = b.addObjCopy(obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
+        backend_tests.root_module.addAnonymousImport(b.fmt("seg_{s}", .{name}), .{ .root_source_file = bin.getOutput() });
+    }
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
     // The design tool's tests read tools/testdata from the repository root.

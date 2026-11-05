@@ -18,12 +18,14 @@ pub const Layout = struct {
     ustktop: u64,
     stack_size: u64,
     data_align: u64,
+    /// 9front's SEGMAXSIZE: the largest segment segattach makes.
+    seg_max: u64,
 };
 
 pub fn layout(arch: Arch) Layout {
     return switch (arch) {
-        .arm64 => .{ .utzero = 0x10000, .ustktop = 0x7FFFF0000, .stack_size = 16 << 20, .data_align = 64 << 10 },
-        .amd64 => .{ .utzero = 0x200000, .ustktop = 0x7FFFFFFFF000, .stack_size = 16 << 20, .data_align = 2 << 20 },
+        .arm64 => .{ .utzero = 0x10000, .ustktop = 0x7FFFF0000, .stack_size = 16 << 20, .data_align = 64 << 10, .seg_max = 8 << 30 },
+        .amd64 => .{ .utzero = 0x200000, .ustktop = 0x7FFFFFFFF000, .stack_size = 16 << 20, .data_align = 2 << 20, .seg_max = 64 << 30 },
     };
 }
 
