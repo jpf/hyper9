@@ -238,3 +238,6 @@ Demo: in a copy of a 9front source directory, `h9 --write=ephemeral --rc 'rm -f 
   - Zig makes instances with `h9_overlay_newpath(path)`, which resolves the lower directory with `namec` and reports errors as the `sys*` wrappers do, and frees one that's never attached with `h9_overlay_drop(n)`. The namespace builder resolves each overlay's lower tree from `#U<host path>`, the path in the plan's comment; a namespace file's bare `#O` overlays its target, as proposed.
   - Copies, and directories in memory, are checked by their owner permission bits, as devfs presents every host file as the guest's own: a file without write permission can't be opened for writing, and creating, removing or renaming needs write permission on the directory.
   - A file in memory is limited to about 1 GiB (8 blocks in the node and two levels of index pages), and a name to 1023 bytes.
+  - A directory with more than 64 entries keeps a hash table of them in host memory, so filling `/tmp` with empty files isn't quadratic.
+  - A process closes its fds and namespace before it tells the machine it's done, so an overlay's last chan is closed while the machine's pages are still there.
+  - HVF allows one VM per host process, so in the two-machine backend case the second machine is always the emulator.
