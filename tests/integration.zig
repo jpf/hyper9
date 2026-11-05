@@ -861,14 +861,20 @@ test "notepg reaches the note group and not a new one [baseline]" {
     const e = try env(@src());
     // rc moves itself to a new note group (rfork s) after starting the
     // block in braces, so the hangup posted to rc's new group doesn't
-    // reach the block; sleep 1000 is in the new group. sighup is defined
-    // only after sleep's rc is forked: a hangup that lands before that rc
-    // execs sleep must kill it, not be caught and leave sleep 1000 for
-    // --timeout to end. Starting the block in the old group, rather than
-    // having it rfork s itself, leaves no window where it can be hit.
-    const r = try run(e, &.{ "--timeout", "20s", "--rc", "{ sleep 1; echo survived } & rfork s; sleep 1000 & fn sighup {}; echo hangup >/proc/$pid/notepg; wait; echo done" });
+    // reach the block; sleep 1000 is in the new group. exec drops the
+    // notes queued before it (as 9front's does), so rc waits until sleep's
+    // args show it has exec'd before posting; otherwise the hangup can be
+    // lost and sleep 1000 runs until --timeout. sighup is defined after
+    // sleep's rc is forked, so that rc dies of an early hangup too.
+    const script =
+        "{ sleep 1; echo survived } & rfork s; sleep 1000 & fn sighup {}; " ++
+        "fn execd { a=`{cat /proc/$apid/args}; ~ $a(1) sleep }; while(! execd) sleep 0; " ++
+        "echo hangup >/proc/$pid/notepg; wait; echo done";
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", script });
     defer r.deinit();
     try std.testing.expectEqualStrings("survived\ndone\n", r.out);
+    // A run that only ends at --timeout prints the same, but fails.
+    try std.testing.expectEqual(0, r.code);
 }
 
 test "/proc/n has status, fd, ns and args [baseline]" {
