@@ -1657,3 +1657,62 @@ test "#O overlays a host tree in memory and never writes it" {
         if (tmp.dir.access(io, p, .{})) |_| return error.HostWritten else |_| {}
     }
 }
+
+test "#O finds, removes and lists the children of a large directory" {
+    if (!available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try tmp.dir.createDirPath(io, "mem");
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &buf);
+    buf[n] = 0;
+    const count = 20000;
+    const T = struct {
+        root: [:0]u8,
+        err: ?anyerror = null,
+        done: std.atomic.Value(bool) = .init(false),
+        listed: usize = 0,
+
+        fn run(t: *@This()) void {
+            defer t.done.store(true, .release);
+            t.body() catch |e| {
+                t.err = e;
+            };
+        }
+        fn body(t: *@This()) !void {
+            var spec: [std.fs.max_path_bytes + 16]u8 = undefined;
+            try bind(try std.fmt.bufPrintZ(&spec, "#U{s}", .{t.root}), "/", MREPL);
+            const id = try overlayNew(null);
+            try bind(try std.fmt.bufPrintZ(&spec, "#O{d}", .{id}), "/mem", MREPL | MCREATE);
+            var p: [32]u8 = undefined;
+            for (0..count) |i| close(try create(try std.fmt.bufPrintZ(&p, "/mem/f{d}", .{i}), OWRITE, 0o664)) catch {};
+            // Every other one goes, from the middle of the list and its ends.
+            var i: usize = 0;
+            while (i < count) : (i += 2) try remove(try std.fmt.bufPrintZ(&p, "/mem/f{d}", .{i}));
+            for (0..count) |j| {
+                const name = try std.fmt.bufPrintZ(&p, "/mem/f{d}", .{j});
+                if (open(name, OREAD)) |fd| {
+                    close(fd) catch {};
+                    if (j % 2 == 0) return error.StillThere;
+                } else |e| if (j % 2 == 1) return e;
+            }
+            const d = try open("/mem", OREAD);
+            defer close(d) catch {};
+            var dbuf: [8192]u8 = undefined;
+            var off: i64 = 0;
+            while (true) {
+                const k = try pread(d, &dbuf, off);
+                if (k == 0) break;
+                off += @intCast(k);
+                var j: usize = 0;
+                while (j + 2 <= k) : (t.listed += 1) j += std.mem.readInt(u16, dbuf[j..][0..2], .little) + 2;
+            }
+        }
+    };
+    var t: T = .{ .root = buf[0..n :0] };
+    try spawn("test", T, T.run, &t);
+    while (!t.done.load(.acquire)) std.Thread.yield() catch {};
+    if (t.err) |e| return e;
+    try std.testing.expectEqual(@as(usize, count / 2), t.listed);
+}
