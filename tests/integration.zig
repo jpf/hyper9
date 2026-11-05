@@ -884,3 +884,116 @@ test "--memory caps segattach [4]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "virtual memory allocation failed") != null);
     try std.testing.expectEqual(1, r.code);
 }
+
+// rendezvous and semaphores (design/0003-semaphores.md). The programs are
+// tests/fixtures/sema/sema.c, one per argument, built inside the guest
+// with 7c and 7l into a scratch directory given with --sandbox.
+
+/// Builds sema.c into `s` as `sema`, on each backend.
+fn buildSema(e: Env, s: *Scratch) !void {
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "sema.c", .data = @embedFile("fixtures/sema/sema.c") });
+    const r = try run(e, &.{ "--sandbox", s.path, "--rc", "7c sema.c && 7l -o sema sema.7" });
+    defer r.deinit();
+    errdefer std.debug.print("7c and 7l: {s}{s}", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+}
+
+/// Runs `./sema test` in `s`, with h9 flags `flags` first.
+fn runSema(e: Env, s: *Scratch, flags: []const []const u8, cmd: []const u8) !Result {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ "--sandbox", s.path, "--timeout", "60s" });
+    try argv.appendSlice(gpa, flags);
+    try argv.appendSlice(gpa, &.{ "--rc", cmd });
+    return run(e, argv.items);
+}
+
+/// Builds sema.c and runs `./sema test`, expecting `want` and status 0.
+fn expectSema(e: Env, flags: []const []const u8, cmd: []const u8, want: []const u8) !void {
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try buildSema(e, &s);
+    const r = try runSema(e, &s, flags, cmd);
+    defer r.deinit();
+    errdefer std.debug.print("{s}: {s}", .{ cmd, r.err });
+    try std.testing.expectEqualStrings(want, r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "rendezvous swaps values between two processes [3]" {
+    const e = try env(@src());
+    try expectSema(e, &.{}, "./sema swap", "child got 11\nparent got 22\n");
+}
+
+test "contended qlock parks and wakes through rendezvous [3]" {
+    const e = try env(@src());
+    try expectSema(e, &.{}, "./sema qlock", "2000\n");
+}
+
+test "semacquire waits for semrelease across RFMEM processes [3]" {
+    const e = try env(@src());
+    try expectSema(e, &.{}, "./sema wait", "semacquire 1 waited\n");
+}
+
+test "semaphores keep a shared counter exact under contention [3]" {
+    const e = try env(@src());
+    try expectSema(e, &.{}, "./sema count", "2000 1\n");
+    try expectSema(e, &.{ "--cpus", "1" }, "./sema count", "2000 1\n");
+}
+
+test "semacquire without block and tsemacquire with 0 ms don't wait [3]" {
+    const e = try env(@src());
+    try expectSema(e, &.{}, "./sema nowait", "0 0 1 1 0 at once\n");
+}
+
+test "tsemacquire times out, or returns early on semrelease [3]" {
+    const e = try env(@src());
+    try expectSema(e, &.{}, "./sema timeout", "timeout 0 in time\nrelease 1 early\n");
+}
+
+test "a note interrupts rendezvous and semacquire, and the handler runs [3]" {
+    const e = try env(@src());
+    try expectSema(e, &.{}, "./sema interrupt", "rendezvous ~0, handled 1\nsemacquire -1 'interrupted', handled 2\n");
+}
+
+test "bad semaphore addresses and values fail as on 9front [3]" {
+    const e = try env(@src());
+    try expectSema(e, &.{}, "./sema badaddr",
+        \\odd -1 'bad arg in system call'
+        \\text -1 'bad arg in system call'
+        \\negative -1 'bad arg in system call'
+        \\negative -1 'bad arg in system call'
+        \\negative -1 'bad arg in system call'
+        \\count -1 'bad arg in system call'
+        \\unmapped -1 'bad arg in system call'
+        \\notes sys: odd address;sys: bad address in syscall;
+        \\
+    );
+}
+
+test "ps shows processes blocked in Rendezvous and Semacquire [3]" {
+    const e = try env(@src());
+    // ps cuts the state to 8 characters. The parent waits for both.
+    try expectSema(e, &.{},
+        \\./sema block & sleep 1; ps | awk '$7 == "sema" { print $6 }' | sort; kill sema | rc; wait
+    , "Await\nRendezvo\nSemacqui\n");
+}
+
+test "--timeout stops processes blocked in rendezvous and semacquire [3]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try buildSema(e, &s);
+    const io = std.testing.io;
+    const t0 = std.Io.Timestamp.now(io, .awake);
+    const r = try runSema(e, &s, &.{ "--timeout", "500ms" }, "./sema block");
+    defer r.deinit();
+    const took = t0.untilNow(io, .awake).toMilliseconds();
+    errdefer std.debug.print("took {d} ms: {s}", .{ took, r.err });
+    try std.testing.expectEqual(1, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "h9: timeout") != null);
+    // Hangup or the teardown 2 s later; one run per backend.
+    try std.testing.expect(took < 10_000 * @as(i64, @intCast(std.mem.count(u8, e.backends, ",") + 1)));
+}

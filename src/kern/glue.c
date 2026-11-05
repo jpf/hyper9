@@ -5,6 +5,12 @@
  */
 
 #include "u.h"
+
+#ifndef WINDOWS
+#include <pthread.h>
+#include <time.h>
+#endif
+
 #include "lib.h"
 #include "dat.h"
 #include "fns.h"
@@ -15,6 +21,7 @@
 #include <memdraw.h>
 #include <cursor.h>
 #include "screen.h"
+#include "tsleep.h"
 
 #ifndef WINDOWS
 #include <pwd.h>
@@ -186,3 +193,79 @@ h9_fd2path(int fd, char *buf, uint nbuf)
 	poperror();
 	return 0;
 }
+
+#ifndef WINDOWS
+/*
+ * The host side of tsleep's timer kproc (tsleep.c): a lock, and a wait on
+ * a condition variable until a deadline on the monotonic clock. The
+ * Windows version is in glue-win32.c.
+ */
+static pthread_mutex_t tmu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t tcond;
+
+void
+h9_tinit(void)
+{
+	pthread_condattr_t a;
+
+	pthread_condattr_init(&a);
+#ifndef __APPLE__
+	/* macOS has no clock attribute; its relative wait is on a monotonic clock. */
+	pthread_condattr_setclock(&a, CLOCK_MONOTONIC);
+#endif
+	pthread_cond_init(&tcond, &a);
+	pthread_condattr_destroy(&a);
+}
+
+uvlong
+h9_tnow(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uvlong)ts.tv_sec*1000000000ULL + ts.tv_nsec;
+}
+
+void
+h9_tlock(void)
+{
+	pthread_mutex_lock(&tmu);
+}
+
+void
+h9_tunlock(void)
+{
+	pthread_mutex_unlock(&tmu);
+}
+
+void
+h9_tsignal(void)
+{
+	pthread_cond_signal(&tcond);
+}
+
+void
+h9_twait(uvlong when)
+{
+	struct timespec ts;
+	uvlong now;
+
+	if(when == 0){
+		pthread_cond_wait(&tcond, &tmu);
+		return;
+	}
+	now = h9_tnow();
+	if(when <= now)
+		return;
+#ifdef __APPLE__
+	when -= now;
+	ts.tv_sec = when / 1000000000ULL;
+	ts.tv_nsec = when % 1000000000ULL;
+	pthread_cond_timedwait_relative_np(&tcond, &tmu, &ts);
+#else
+	ts.tv_sec = when / 1000000000ULL;
+	ts.tv_nsec = when % 1000000000ULL;
+	pthread_cond_timedwait(&tcond, &tmu, &ts);
+#endif
+}
+#endif

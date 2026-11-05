@@ -25,3 +25,68 @@ h9_hostuser(void)
  * h9 has its own entry point, so it's never called.
  */
 int mymain(int argc, char **argv) { USED(argc); USED(argv); return 0; }
+
+/*
+ * The host side of tsleep's timer kproc (tsleep.c), as glue.c has it for
+ * POSIX hosts: a lock, and a wait on a condition variable until a
+ * deadline on the monotonic clock.
+ */
+static CRITICAL_SECTION tcs;
+static CONDITION_VARIABLE tcond;
+
+void
+h9_tinit(void)
+{
+	InitializeCriticalSection(&tcs);
+	InitializeConditionVariable(&tcond);
+}
+
+uvlong
+h9_tnow(void)
+{
+	static LARGE_INTEGER freq;
+	LARGE_INTEGER c;
+
+	if(freq.QuadPart == 0)
+		QueryPerformanceFrequency(&freq);
+	QueryPerformanceCounter(&c);
+	return (uvlong)(c.QuadPart / freq.QuadPart) * 1000000000ULL
+		+ (uvlong)(c.QuadPart % freq.QuadPart) * 1000000000ULL / freq.QuadPart;
+}
+
+void
+h9_tlock(void)
+{
+	EnterCriticalSection(&tcs);
+}
+
+void
+h9_tunlock(void)
+{
+	LeaveCriticalSection(&tcs);
+}
+
+void
+h9_tsignal(void)
+{
+	WakeConditionVariable(&tcond);
+}
+
+void
+h9_twait(uvlong when)
+{
+	uvlong now, ms;
+
+	if(when == 0){
+		SleepConditionVariableCS(&tcond, &tcs, INFINITE);
+		return;
+	}
+	now = h9_tnow();
+	if(when <= now)
+		return;
+	/* Rounded up, so the kproc doesn't wake just before the deadline. */
+	ms = (when - now + 999999) / 1000000;
+	if(ms >= INFINITE)
+		ms = INFINITE - 1;
+	SleepConditionVariableCS(&tcond, &tcs, (DWORD)ms);
+}

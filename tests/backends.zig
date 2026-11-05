@@ -894,6 +894,11 @@ fn expectPooled(arch: aout.Arch, code: []const u8) !void {
 /// ending in "pc=" is a fault note, matched up to the pc. `root`, if
 /// given, is the guest's /.
 fn expectSeg(text: []const u8, root: ?[]const u8, want_status: []const u8, want_out: []const u8) !void {
+    return expectRun(text, root, 10 * std.time.ns_per_s, want_status, want_out);
+}
+
+/// `expectSeg`, with the machine's timeout.
+fn expectRun(text: []const u8, root: ?[]const u8, timeout_ns: u64, want_status: []const u8, want_out: []const u8) !void {
     const gpa = std.testing.allocator;
     const bytes = try image(gpa, .arm64, text);
     defer gpa.free(bytes);
@@ -907,7 +912,7 @@ fn expectSeg(text: []const u8, root: ?[]const u8, want_status: []const u8, want_
             .backend = kind,
             .arch = .arm64,
             .root = root,
-            .policy = .{ .timeout_ns = 10 * std.time.ns_per_s },
+            .policy = .{ .timeout_ns = timeout_ns },
             .stdio = .{ .out = &out.writer, .err = &err.writer },
         }) catch |e| switch (e) {
             error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
@@ -1152,4 +1157,35 @@ test "segments: /proc/n/segment's text" {
             , buf[0..s.segmentText(&buf)]);
         }
     }.f);
+}
+
+// rendezvous and semaphores (design/0003-semaphores.md), from the programs
+// in tests/fixtures/sema.
+
+test "rendezvous swaps values between an rfork child and its parent [3]" {
+    try expectRun(@embedFile("sema_rendezvous"), null, 10 * std.time.ns_per_s, "exited ", "cp");
+}
+
+test "semacquire waits for an RFMEM child's semrelease, and the non-blocking and timed forms [3]" {
+    try expectRun(@embedFile("sema_semacquire"), null, 10 * std.time.ns_per_s, "exited ", "");
+}
+
+test "a semaphore keeps a shared counter exact under contention [3]" {
+    try expectRun(@embedFile("sema_count"), null, 60 * std.time.ns_per_s, "exited ", "");
+}
+
+test "semaphores in text, negative values and negative counts are bad args [3]" {
+    try expectRun(@embedFile("sema_badarg"), null, 10 * std.time.ns_per_s, "exited bad arg in system call", "");
+}
+
+test "an odd semaphore address posts sys: odd address [3]" {
+    try expectRun(@embedFile("sema_odd"), null, 10 * std.time.ns_per_s, "killed sys: odd address pc=", "");
+}
+
+test "an unmapped semaphore address is a bad address [3]" {
+    try expectRun(@embedFile("sema_unmapped"), null, 10 * std.time.ns_per_s, "killed sys: bad address in syscall pc=", "");
+}
+
+test "a note interrupts rendezvous and semacquire, and the handler runs [3]" {
+    try expectRun(@embedFile("sema_interrupt"), null, 300 * std.time.ns_per_ms, "killed h9: timeout", "hhrinterrupted");
 }

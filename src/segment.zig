@@ -8,7 +8,10 @@
 //! data, is mapped into all of them. It's freed when the last one detaches.
 //!
 //! Pages come in chunks, one backend allocation and one mapping each, so a
-//! segment grows without copying. The stack grows down on demand, as
+//! segment grows without copying. Semaphore wait lists (src/kern/sema.c)
+//! are keyed by the host address of the guest word, so they rely on a
+//! segment's pages never moving while it's shared; copy-on-write or
+//! compaction would have to change that key (design/0003-semaphores.md). The stack grows down on demand, as
 //! 9front's does: it starts with what the arguments need plus some
 //! headroom, and `Segs.growStack` extends it on faults and at syscalls.
 
