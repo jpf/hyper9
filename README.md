@@ -21,10 +21,10 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [ephemeral-writes](design/0006-ephemeral-writes.md) | accepted | ready | Ephemeral writes and a private /tmp |
 | [go-compat](design/0007-go-compat.md) | accepted | ready | Go compatibility |
 | [devsrv](design/0008-devsrv.md) | accepted | ready | devsrv, /srv and mount |
-| [i386](design/0009-i386.md) | accepted | ready | 386 binaries |
+| [i386](design/0009-i386.md) | implemented |  | 386 binaries |
 | [self-host](design/0010-self-host.md) | draft |  | Self-hosting |
 | [overlay](design/0011-overlay.md) | accepted | needs ephemeral-writes | Copy-on-write overlay as the root's default |
-| [browser-host](design/0012-browser-host.md) | draft | needs i386 | A browser host on wasm, with v86 |
+| [browser-host](design/0012-browser-host.md) | draft |  | A browser host on wasm, with v86 |
 | [9p-roots](design/0013-9p-roots.md) | draft |  | 9P roots |
 | [image-roots](design/0014-image-roots.md) | draft | needs devsrv, 9p-roots | Disk-image roots |
 | [gfx](design/0015-gfx.md) | accepted | needs devsrv | Graphics (--gfx) |
@@ -57,7 +57,7 @@ flowchart LR
   p_ephemeral_writes["#35;6 ephemeral-writes<br/>accepted"]:::accepted
   p_go_compat["#35;7 go-compat<br/>accepted"]:::accepted
   p_devsrv["#35;8 devsrv<br/>accepted"]:::accepted
-  p_i386["#35;9 i386<br/>accepted"]:::accepted
+  p_i386["#35;9 i386<br/>implemented"]:::implemented
   p_self_host["#35;10 self-host<br/>draft"]:::draft
   p_overlay["#35;11 overlay<br/>accepted"]:::accepted
   p_browser_host["#35;12 browser-host<br/>draft"]:::draft
