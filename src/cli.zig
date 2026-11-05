@@ -6,7 +6,8 @@ const vmm = @import("h9").vmm;
 const policy = @import("h9").policy;
 
 pub const usage =
-    \\usage: h9 [--backend auto|hvf|kvm|whp|emu] [--root DIR] [--cwd DIR]
+    \\usage: h9 [--backend auto|hvf|kvm|whp|emu] [--arch arm64|amd64|386]
+    \\           [--root DIR] [--cwd DIR]
     \\           [--env name=value]... [--profile default|tight] [--sandbox DIR]
     \\           [--readable PATH]... [--writable PATH]... [--read-deny PATH]...
     \\           [--write none|scope|ephemeral|overlay] [--net disable|outbound|enable]
@@ -35,6 +36,9 @@ pub const Mode = enum {
 pub const Config = struct {
     mode: Mode = .run,
     backend: vmm.BackendKind = .auto,
+    /// --arch: the architecture of the binaries to run; null means a host
+    /// program's own, or the host's for a guest one.
+    arch: ?vmm.Arch = null,
     /// --trace: null for none, "" for stderr, else a file.
     trace: ?[]const u8 = null,
     dump_on_fault: bool = false,
@@ -129,6 +133,8 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             c.mode = .help;
         } else if (value(args, &i, "--backend")) |v| {
             c.backend = try enumValue(vmm.BackendKind, v);
+        } else if (value(args, &i, "--arch")) |v| {
+            c.arch = vmm.Arch.fromName(v orelse return error.Usage) orelse return error.Usage;
         } else if (value(args, &i, "--root")) |v| {
             c.root = v orelse return error.Usage;
         } else if (value(args, &i, "--cwd")) |v| {
@@ -221,6 +227,14 @@ test "flags stop at the first non-flag" {
     try t.expectEqualStrings("--trace", c.argv[1]);
 }
 
+test "--arch" {
+    try t.expectEqual(vmm.Arch.i386, (try parse(t.allocator, &.{ "h9", "--arch", "386", "/bin/echo" })).arch.?);
+    try t.expectEqual(vmm.Arch.amd64, (try parse(t.allocator, &.{ "h9", "--arch=amd64", "/bin/echo" })).arch.?);
+    try t.expectEqual(@as(?vmm.Arch, null), (try parse(t.allocator, &.{ "h9", "/bin/echo" })).arch);
+    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--arch", "i386", "x" }));
+    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--arch" }));
+}
+
 test "--backend=value and --" {
     const c = try parse(t.allocator, &.{ "h9", "--backend=hvf", "--", "--weird" });
     defer t.allocator.free(c.env);
@@ -250,7 +264,7 @@ test "policy flags" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const c = try parse(arena.allocator(), &.{
-        "h9",      "--profile=tight", "--writable",    "./out",           "--readable=/src", "--read-deny", "/src/.env",
+        "h9",       "--profile=tight", "--writable",    "./out",           "--readable=/src", "--read-deny", "/src/.env",
         "--memory", "512m",            "--timeout",     "1m",              "--net=disable",   "--write",     "scope",
         "--strict", "--print",         "--trace=t.log", "--dump-on-fault", "mk",
     });

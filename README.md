@@ -118,6 +118,11 @@ tars the file system out onto a scratch disk, and unpacks it into
 image itself isn't modified. It's the host-tree root h9 serves as `/`.
 Boot kernels, `/sys/doc` and `/sys/src` are left out; pass `--src` to keep
 `/sys/src`, which [self-hosting](design/0010-self-host.md) needs.
+`--arch 386,amd64` also fills `/386` or `/amd64` by cross-compiling
+`/sys/src` inside h9 (`objtype=386 mk install`), which takes a built
+`zig-out/bin/h9` (or `$H9`) and a few minutes per architecture; on an existing
+tree it only adds them. `zig build integration -Darch=386` then runs the
+integration cases with the 386 binaries on the emulator.
 
 Pinned upstream versions are in [scripts/pins.sh](scripts/pins.sh).
 
@@ -204,7 +209,7 @@ zig-out/bin/h9 ./hello                    # ./ and ../ are host paths
 A program starting with `./` or `../` is read from the host. Anything else is
 a guest path or name in the machine's namespace: `/` is the root tree
 (`--root`, else `$H9ROOT`, else `.local/9front/root` next to a development
-build), `/bin` is `/arm64/bin` plus `/rc/bin`, and the host cwd (or `--cwd`)
+build), `/bin` is `/$cputype/bin` (`/arm64/bin` on arm64) plus `/rc/bin`, and the host cwd (or `--cwd`)
 is at `/mnt/term/cwd` and is the guest's cwd. The host environment isn't
 imported: the guest gets `user`, `home`, `cputype`, `objtype`, `sysname`,
 `service`, `path` and `timezone`, plus any `--env`. Exit codes: 0 for an empty
@@ -219,7 +224,7 @@ tree. It exits 0 if h9 can run programs from the root, and 125 otherwise.
 Release builds report the release's version; development builds report `git
 describe` (`-Dversion=V` overrides it).
 
-Flags: `--backend auto|hvf|kvm|whp|emu`, `--root DIR`, `--cwd DIR`, `--env
+Flags: `--backend auto|hvf|kvm|whp|emu`, `--arch arm64|amd64|386`, `--root DIR`, `--cwd DIR`, `--env
 name=value` (repeatable), `--rc 'cmd'`, `--ns FILE`, `--trace[=FILE]`,
 `--dump-on-fault`, and the sandbox flags below. `--rc` runs `/bin/rc -c`.
 `--ns FILE` replays a namespace file in newns syntax (`bind`, `mount`,
@@ -229,7 +234,10 @@ saved and replayed as is.
 
 `--backend auto` (the default) uses the host hypervisor and otherwise falls
 back to the emulator with a warning. The emulator also runs amd64 binaries on
-arm64 hosts, for testing; HVF runs arm64 only.
+arm64 hosts, for testing, and 386 binaries on every host; HVF runs arm64 only.
+`--arch` picks the architecture: a host program otherwise runs as its header
+says, and a guest one as the host's, so `h9 --arch 386 /bin/echo hi` runs
+`/386/bin/echo` from a root that has it.
 
 Syscalls go through drawterm's kern: open, create, close, dup, pread, pwrite,
 seek, stat, fstat, wstat, fwstat, fd2path, bind, chdir, remove, errstr, brk_,

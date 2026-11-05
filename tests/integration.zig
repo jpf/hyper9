@@ -32,12 +32,14 @@ const Env = struct {
     h9: []const u8,
     root: []const u8,
     backends: []const u8,
+    /// H9_TEST_ARCH (-Darch), passed to h9 as --arch; null for the host's.
+    arch: ?[]const u8,
 };
 
-var env_buf: [4][std.Io.Dir.max_path_bytes]u8 = undefined;
+var env_buf: [5][std.Io.Dir.max_path_bytes]u8 = undefined;
 
 /// An environment variable, on every host (getPosix doesn't build on
-/// Windows). Values live in one of four slots, chosen by the caller.
+/// Windows). Values live in one of five slots, chosen by the caller.
 fn getenv(comptime slot: usize, key: []const u8) ?[]const u8 {
     var map = std.testing.environ.createMap(gpa) catch return null;
     defer map.deinit();
@@ -53,12 +55,16 @@ fn env(comptime src: std.builtin.SourceLocation) !Env {
     try skipPending(src.fn_name);
     const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
     const root = getenv(1, "H9_TEST_ROOT") orelse return error.SkipZigTest;
-    // The tree from scripts/mkroot.py is arm64 only, and h9 runs the
-    // host's architecture, so x86_64 hosts (linux-amd64) skip these.
-    if (builtin.cpu.arch != .aarch64) return error.SkipZigTest;
-    std.Io.Dir.cwd().access(std.testing.io, try hostPath(root, "arm64/bin/cat"), .{}) catch return error.SkipZigTest;
+    // The tree from scripts/mkroot.py is arm64, plus the architectures its
+    // --arch adds. Without H9_TEST_ARCH, h9 runs the host's architecture,
+    // so x86_64 hosts (linux-amd64) skip these.
+    const arch = getenv(4, "H9_TEST_ARCH");
+    if (arch == null and builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var cat_buf: [32]u8 = undefined;
+    const cat = try std.fmt.bufPrint(&cat_buf, "{s}/bin/cat", .{arch orelse "arm64"});
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(root, cat), .{}) catch return error.SkipZigTest;
     const backends = getenv(2, "H9_TEST_BACKENDS") orelse "auto";
-    return .{ .h9 = h9, .root = root, .backends = backends };
+    return .{ .h9 = h9, .root = root, .backends = backends, .arch = arch };
 }
 
 /// Skips a case tagged with a proposal that isn't implemented, unless
@@ -137,6 +143,7 @@ fn runOn(e: Env, backend: []const u8, args: []const []const u8, stdin: ?[]const 
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
     try argv.appendSlice(gpa, &.{ e.h9, "--backend", backend, "--root", e.root });
+    if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, args);
     const r = try runProcess(argv.items, stdin);
     const code = switch (r.term) {
@@ -493,7 +500,9 @@ test "ls /bin | wc -l (demo) [baseline]" {
     const r = try run(e, &.{ "--rc", "ls /bin | wc -l" });
     defer r.deinit();
     try std.testing.expectEqualStrings("", r.err);
-    const want = try countDir(e, "arm64/bin") + try countDir(e, "rc/bin");
+    var bin_buf: [32]u8 = undefined;
+    const bin = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{e.arch orelse "arm64"});
+    const want = try countDir(e, bin) + try countDir(e, "rc/bin");
     const got = try std.fmt.parseInt(usize, std.mem.trim(u8, r.out, " \n"), 10);
     try std.testing.expectEqual(want, got);
     try std.testing.expectEqual(0, r.code);
@@ -626,6 +635,7 @@ fn spawnTerm(e: Env, backend: []const u8, args: []const []const u8) !Term {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
     try argv.appendSlice(gpa, &.{ e.h9, "--backend", backend, "--root", e.root });
+    if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, args);
     return Term.spawn(gpa, argv.items);
 }
@@ -664,7 +674,6 @@ test "a write to a closed pipe kills the writer with the note and its pc [baseli
     try std.testing.expect(std.mem.indexOf(u8, lines.next().?, ": sys: write on closed pipe pc=0x") != null);
     try std.testing.expectEqual(0, r.code);
 }
-
 
 test "--timeout stops a console read on a terminal at once [baseline]" {
     const e = try env(@src());

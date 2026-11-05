@@ -1,5 +1,5 @@
 //! The M0/M1 test program: pwrite(1, "hello\n", 6, -1) then exits(nil), as
-//! arm64 and amd64 text segments. Zig no longer links Plan 9 a.out, so the
+//! arm64, amd64 and 386 text segments. Zig no longer links Plan 9 a.out, so the
 //! instructions are encoded by hand; aout.image wraps them in a header.
 
 const std = @import("std");
@@ -38,14 +38,37 @@ const amd64_code = [_]u8{
     0xeb, 0xfe, // jmp   .
 };
 
+// The syscall number goes in AX and INT $64 enters the kernel; arguments
+// are 4-byte words on the stack from SP+4, and the vlong offset takes two.
+// call/pop finds the message without a PC-relative load.
+const i386_code = [_]u8{
+    0x83, 0xec, 0x20, // subl  $0x20, %esp
+    0xc7, 0x44, 0x24, 0x04, 0x01, 0x00, 0x00, 0x00, // movl  $1, 4(%esp)        fd
+    0xe8, 0x00, 0x00, 0x00, 0x00, // call  1f
+    0x58, // 1: popl  %eax
+    0x05, 0x3a, 0x00, 0x00, 0x00, // addl  $(msg-1b), %eax
+    0x89, 0x44, 0x24, 0x08, // movl  %eax, 8(%esp)      buf
+    0xc7, 0x44, 0x24, 0x0c, 0x06, 0x00, 0x00, 0x00, // movl  $6, 12(%esp)       n
+    0xc7, 0x44, 0x24, 0x10, 0xff, 0xff, 0xff, 0xff, // movl  $-1, 16(%esp)      offset (low)
+    0xc7, 0x44, 0x24, 0x14, 0xff, 0xff, 0xff, 0xff, // movl  $-1, 20(%esp)      offset (high)
+    0xb8, 0x33, 0x00, 0x00, 0x00, // movl  $51, %eax          PWRITE
+    0xcd, 0x40, // int   $64
+    0xc7, 0x44, 0x24, 0x04, 0x00, 0x00, 0x00, 0x00, // movl  $0, 4(%esp)        nil
+    0xb8, 0x08, 0x00, 0x00, 0x00, // movl  $8, %eax           EXITS
+    0xcd, 0x40, // int   $64
+    0xeb, 0xfe, // jmp   .
+};
+
 pub const msg = "hello\n";
 
 comptime {
     // leaq's displacement (0x30) is relative to the end of the leaq.
     std.debug.assert(amd64_code.len == 20 + 0x30);
+    // addl's 0x3a is from the popped return address (offset 0x10) to msg.
+    std.debug.assert(i386_code.len == 0x10 + 0x3a);
 }
 
-/// Text segments (code then the message) for arm64 and amd64. The entry
+/// Text segments (code then the message) for arm64, amd64 and 386. The entry
 /// point is the start of text, just after the header.
 pub const arm64_text = blk: {
     var text: [arm64_code.len * 4 + msg.len]u8 = undefined;
@@ -54,3 +77,4 @@ pub const arm64_text = blk: {
     break :blk text;
 };
 pub const amd64_text = amd64_code ++ msg.*;
+pub const i386_text = i386_code ++ msg.*;

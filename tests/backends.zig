@@ -45,9 +45,10 @@ fn runOn(gpa: std.mem.Allocator, kind: vmm.BackendKind, arch: aout.Arch, bytes: 
 }
 
 fn image(gpa: std.mem.Allocator, arch: aout.Arch, text: []const u8) ![]u8 {
-    const buf = try gpa.alloc(u8, aout.header_size + text.len);
-    aout.writeTextHeader(buf[0..aout.header_size], arch, text.len);
-    @memcpy(buf[aout.header_size..], text);
+    const hsize = arch.headerSize();
+    const buf = try gpa.alloc(u8, hsize + text.len);
+    aout.writeTextHeader(buf[0..hsize], arch, text.len);
+    @memcpy(buf[hsize..], text);
     return buf;
 }
 
@@ -92,6 +93,12 @@ test "hello amd64" {
     try expectAll(.amd64, bytes, hello_result);
 }
 
+test "hello 386 [9]" {
+    const bytes = try image(std.testing.allocator, .i386, &hello.i386_text);
+    defer std.testing.allocator.free(bytes);
+    try expectAll(.i386, bytes, hello_result);
+}
+
 const exits_msg = "failed\x00";
 const exits_result: Result = .{ .status = "exited \"failed\"", .out = "", .trace = "1 exits \"failed\"\n" };
 
@@ -123,11 +130,29 @@ test "exits with a message amd64" {
     try expectAll(.amd64, bytes, exits_result);
 }
 
+test "exits with a message 386 [9]" {
+    // The syscall number in AX, arguments from SP+4; call/pop finds msg.
+    const code = [_]u8{
+        0x83, 0xec, 0x10, // subl  $0x10, %esp
+        0xe8, 0x00, 0x00, 0x00, 0x00, // call  1f
+        0x58, // 1: popl  %eax
+        0x05, 0x13, 0x00, 0x00, 0x00, // addl  $(msg-1b), %eax
+        0x89, 0x44, 0x24, 0x04, // movl  %eax, 4(%esp)
+        0xb8, 0x08, 0x00, 0x00, 0x00, // movl  $8, %eax   EXITS
+        0xcd, 0x40, // int   $64
+        0xeb, 0xfe, // jmp   .
+    };
+    comptime std.debug.assert(code.len == 8 + 0x13);
+    const bytes = try image(std.testing.allocator, .i386, &(code ++ exits_msg.*));
+    defer std.testing.allocator.free(bytes);
+    try expectAll(.i386, bytes, exits_result);
+}
+
 fn expectFault(arch: aout.Arch, text: []const u8, pc_off: u64) !void {
     const bytes = try image(std.testing.allocator, arch, text);
     defer std.testing.allocator.free(bytes);
     var buf: [128]u8 = undefined;
-    const pc = aout.layout(arch).utzero + aout.header_size + pc_off;
+    const pc = aout.layout(arch).utzero + arch.headerSize() + pc_off;
     try expectAll(arch, bytes, .{
         .status = try std.fmt.bufPrint(&buf, "killed \"sys: trap: fault read addr=0x0 pc=0x{x}\"", .{pc}),
         .out = "",
@@ -146,6 +171,13 @@ test "fault on unmapped memory amd64" {
     try expectFault(.amd64, &[_]u8{
         0x31, 0xc9, // xorl  %ecx, %ecx
         0x48, 0x8b, 0x01, // movq  (%rcx), %rax
+    }, 2);
+}
+
+test "fault on unmapped memory 386 [9]" {
+    try expectFault(.i386, &[_]u8{
+        0x31, 0xc9, // xorl  %ecx, %ecx
+        0x8b, 0x01, // movl  (%ecx), %eax
     }, 2);
 }
 
@@ -194,6 +226,10 @@ test "kick interrupts a running vcpu arm64" {
 
 test "kick interrupts a running vcpu amd64" {
     try expectKick(.amd64, &[_]u8{ 0xeb, 0xfe }); // jmp .
+}
+
+test "kick interrupts a running vcpu 386 [9]" {
+    try expectKick(.i386, &[_]u8{ 0xeb, 0xfe }); // jmp .
 }
 
 /// Kicks with no delay, many times over, so some kicks land while `run` is
@@ -248,6 +284,10 @@ test "a kick racing the start of a run isn't lost arm64" {
 
 test "a kick racing the start of a run isn't lost amd64" {
     try expectKickRace(.amd64, &[_]u8{ 0xeb, 0xfe }); // jmp .
+}
+
+test "a kick racing the start of a run isn't lost 386 [9]" {
+    try expectKickRace(.i386, &[_]u8{ 0xeb, 0xfe }); // jmp .
 }
 
 /// Runs `bytes` as a machine with `pol` on every backend that can, and
@@ -426,6 +466,52 @@ test "a note handler catches a note and noted(NCONT) resumes amd64" {
     const img = try image(std.testing.allocator, .amd64, &code);
     defer std.testing.allocator.free(img);
     try expectNotes(.amd64, img, "exited ", "sys: bad sys call");
+}
+
+/// As noteProgramArm64, for 386: the handler finds its Ureg at SP+4 and
+/// the note at SP+8, with no register carrying either.
+fn noteProgramI386(comptime with_handler: bool) [0x74]u8 {
+    return .{
+        0x83, 0xec, 0x20, // subl  $0x20, %esp
+        0xe8, 0x00, 0x00, 0x00, 0x00, // call  1f
+        0x58, // 1: popl  %eax
+        0x05, 0x29, 0x00, 0x00, 0x00, // addl  $(handler-1b), %eax
+        0x89, 0x44, 0x24, 0x04, // movl  %eax, 4(%esp)
+        0xb8, 0x1c, 0x00, 0x00, 0x00, // movl  $28, %eax          NOTIFY
+    } ++ (if (with_handler) [2]u8{ 0xcd, 0x40 } else [2]u8{ 0x90, 0x90 }) ++ .{ // int $64 (or nops)
+        0xb8, 0x63, 0x00, 0x00, 0x00, // movl  $99, %eax          no such call
+        0xcd, 0x40, // int   $64
+        0xc7, 0x44, 0x24, 0x04, 0x00, 0x00, 0x00, 0x00, // movl  $0, 4(%esp)        exits(nil)
+        0xb8, 0x08, 0x00, 0x00, 0x00, // movl  $8, %eax           EXITS
+        0xcd, 0x40, // int   $64
+        0xeb, 0xfe, // jmp   .
+        // handler (0x31):
+        0x8b, 0x54, 0x24, 0x08, // movl  8(%esp), %edx       msg
+        0x83, 0xec, 0x20, // subl  $0x20, %esp
+        0xc7, 0x44, 0x24, 0x04, 0x01, 0x00, 0x00, 0x00, // movl  $1, 4(%esp)        fd 1
+        0x89, 0x54, 0x24, 0x08, // movl  %edx, 8(%esp)      buf = msg
+        0xc7, 0x44, 0x24, 0x0c, 0x11, 0x00, 0x00, 0x00, // movl  $17, 12(%esp)      len
+        0xc7, 0x44, 0x24, 0x10, 0xff, 0xff, 0xff, 0xff, // movl  $-1, 16(%esp)      offset (low)
+        0xc7, 0x44, 0x24, 0x14, 0xff, 0xff, 0xff, 0xff, // movl  $-1, 20(%esp)      offset (high)
+        0xb8, 0x33, 0x00, 0x00, 0x00, // movl  $51, %eax          PWRITE
+        0xcd, 0x40, // int   $64
+        0xc7, 0x44, 0x24, 0x04, 0x00, 0x00, 0x00, 0x00, // movl  $0, 4(%esp)        NCONT
+        0xb8, 0x1d, 0x00, 0x00, 0x00, // movl  $29, %eax          NOTED
+        0xcd, 0x40, // int   $64
+        0xeb, 0xfe, // jmp   .
+    };
+}
+
+test "a note handler catches a note and noted(NCONT) resumes 386 [9]" {
+    const img = try image(std.testing.allocator, .i386, &noteProgramI386(true));
+    defer std.testing.allocator.free(img);
+    try expectNotes(.i386, img, "exited ", "sys: bad sys call");
+}
+
+test "an unhandled note kills the process with the note and pc 386 [9]" {
+    const img = try image(std.testing.allocator, .i386, &noteProgramI386(false));
+    defer std.testing.allocator.free(img);
+    try expectNotes(.i386, img, "killed sys: bad sys call pc=0x", "");
 }
 
 test "noted outside a handler fails, and a fault's note reaches the handler arm64" {
@@ -815,8 +901,9 @@ test "pooled vCPUs carry FP state, the thread pointer and fork across processes 
 }
 
 test "pooled vCPUs carry FP state and fork across processes amd64" {
-    // As the arm64 test, with xmm8 and MXCSR (FS base isn't used by 9front
-    // binaries, and Unicorn's user mode can't write it without a GDT).
+    // As the arm64 test, with xmm8, MXCSR, the x87 control word and ST0
+    // (FS base isn't used by 9front binaries, and Unicorn's user mode
+    // can't write it without a GDT).
     const code = [_]u8{
         0x49, 0x89, 0xc4, // movq  %rax, %r12          Tos
         0x48, 0x83, 0xec, 0x20, // subq  $0x20, %rsp
@@ -832,6 +919,10 @@ test "pooled vCPUs carry FP state and fork across processes amd64" {
         0x66, 0x4c, 0x0f, 0x6e, 0xc3, // movq  %rbx, %xmm8
         0xc7, 0x44, 0x24, 0x10, 0x80, 0x7f, 0x00, 0x00, // movl $0x7f80, 16(%rsp)
         0x0f, 0xae, 0x54, 0x24, 0x10, // ldmxcsr 16(%rsp)          round down
+        0x48, 0x89, 0x5c, 0x24, 0x18, // movq  %rbx, 24(%rsp)
+        0xdf, 0x6c, 0x24, 0x18, // fildq 24(%rsp)           ST0 = pid+100
+        0x66, 0xc7, 0x44, 0x24, 0x18, 0x7f, 0x0f, // movw  $0x0f7f, 24(%rsp)
+        0xd9, 0x6c, 0x24, 0x18, // fldcw 24(%rsp)           truncate, extended
         0x49, 0xc7, 0xc6, 0xd0, 0x07, 0x00, 0x00, // movq  $2000, %r14
         // loop:
         0x48, 0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, // movq $0, 8(%rsp)
@@ -841,9 +932,15 @@ test "pooled vCPUs carry FP state and fork across processes amd64" {
         0x75, 0xeb, // jne   loop
         0x66, 0x4c, 0x0f, 0x7e, 0xc1, // movq  %xmm8, %rcx
         0x48, 0x39, 0xd9, // cmpq  %rbx, %rcx
-        0x75, 0x1a, // jne   bad
+        0x75, 0x32, // jne   bad
         0x0f, 0xae, 0x5c, 0x24, 0x10, // stmxcsr 16(%rsp)
         0x81, 0x7c, 0x24, 0x10, 0x80, 0x7f, 0x00, 0x00, // cmpl $0x7f80, 16(%rsp)
+        0x75, 0x23, // jne   bad
+        0xd9, 0x7c, 0x24, 0x18, // fnstcw 24(%rsp)
+        0x66, 0x81, 0x7c, 0x24, 0x18, 0x7f, 0x0f, // cmpw  $0x0f7f, 24(%rsp)
+        0x75, 0x16, // jne   bad
+        0xdf, 0x7c, 0x24, 0x18, // fistpq 24(%rsp)
+        0x48, 0x39, 0x5c, 0x24, 0x18, // cmpq  %rbx, 24(%rsp)
         0x75, 0x0b, // jne   bad
         0x48, 0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, // movq $0, 8(%rsp)  exits(nil)
         0xeb, 0x05, // jmp   exit
@@ -855,6 +952,59 @@ test "pooled vCPUs carry FP state and fork across processes amd64" {
         0x0f, 0x05, // syscall
     };
     try expectPooled(.amd64, &code);
+}
+
+test "pooled vCPUs carry FP state and fork across processes 386 [9]" {
+    // As the amd64 test, with xmm3, MXCSR, the x87 control word and ST0.
+    // The Tos comes in AX, and its pid is at 48 with 4-byte pointers.
+    const code = [_]u8{
+        0x89, 0xc7, // movl  %eax, %edi          Tos
+        0x83, 0xec, 0x20, // subl  $0x20, %esp
+        0xbe, 0x04, 0x00, 0x00, 0x00, // movl  $4, %esi
+        // fork:
+        0xc7, 0x44, 0x24, 0x04, 0x14, 0x00, 0x00, 0x00, // movl  $0x14, 4(%esp)     RFPROC|RFFDG
+        0xb8, 0x13, 0x00, 0x00, 0x00, // movl  $19, %eax          RFORK
+        0xcd, 0x40, // int   $64
+        0x4e, // decl  %esi
+        0x75, 0xee, // jne   fork
+        0x8b, 0x5f, 0x30, // movl  48(%edi), %ebx      Tos.pid
+        0x83, 0xc3, 0x64, // addl  $100, %ebx
+        0x89, 0x5c, 0x24, 0x10, // movl  %ebx, 16(%esp)
+        0xdb, 0x44, 0x24, 0x10, // fildl 16(%esp)           ST0 = pid+100
+        0x66, 0x0f, 0x6e, 0xdb, // movd  %ebx, %xmm3
+        0xc7, 0x44, 0x24, 0x10, 0x80, 0x7f, 0x00, 0x00, // movl  $0x7f80, 16(%esp)
+        0x0f, 0xae, 0x54, 0x24, 0x10, // ldmxcsr 16(%esp)          round down
+        0x66, 0xc7, 0x44, 0x24, 0x10, 0x7f, 0x0f, // movw  $0x0f7f, 16(%esp)
+        0xd9, 0x6c, 0x24, 0x10, // fldcw 16(%esp)           truncate, extended
+        0xbd, 0xd0, 0x07, 0x00, 0x00, // movl  $2000, %ebp
+        // loop:
+        0xc7, 0x44, 0x24, 0x04, 0x00, 0x00, 0x00, 0x00, // movl  $0, 4(%esp)
+        0xb8, 0x11, 0x00, 0x00, 0x00, // movl  $17, %eax          SLEEP(0)
+        0xcd, 0x40, // int   $64
+        0x4d, // decl  %ebp
+        0x75, 0xee, // jne   loop
+        0x66, 0x0f, 0x7e, 0xd9, // movd  %xmm3, %ecx
+        0x39, 0xd9, // cmpl  %ebx, %ecx
+        0x75, 0x30, // jne   bad
+        0x0f, 0xae, 0x5c, 0x24, 0x10, // stmxcsr 16(%esp)
+        0x81, 0x7c, 0x24, 0x10, 0x80, 0x7f, 0x00, 0x00, // cmpl  $0x7f80, 16(%esp)
+        0x75, 0x21, // jne   bad
+        0xd9, 0x7c, 0x24, 0x10, // fnstcw 16(%esp)
+        0x66, 0x81, 0x7c, 0x24, 0x10, 0x7f, 0x0f, // cmpw  $0x0f7f, 16(%esp)
+        0x75, 0x14, // jne   bad
+        0xdb, 0x5c, 0x24, 0x10, // fistpl 16(%esp)
+        0x39, 0x5c, 0x24, 0x10, // cmpl  %ebx, 16(%esp)
+        0x75, 0x0a, // jne   bad
+        0xc7, 0x44, 0x24, 0x04, 0x00, 0x00, 0x00, 0x00, // movl  $0, 4(%esp)        exits(nil)
+        0xeb, 0x04, // jmp   exit
+        // bad:
+        0x31, 0xc0, // xorl  %eax, %eax
+        0x8b, 0x00, // movl  (%eax), %eax       a fault kills it
+        // exit:
+        0xb8, 0x08, 0x00, 0x00, 0x00, // movl  $8, %eax           EXITS
+        0xcd, 0x40, // int   $64
+    };
+    try expectPooled(.i386, &code);
 }
 
 /// Runs `code` with the pool forced on (no owned vCPUs) and off, on every

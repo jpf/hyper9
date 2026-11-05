@@ -144,12 +144,20 @@ fn ok(v: anytype) Outcome {
     return .{ .ret = @bitCast(@as(i64, @intCast(v))) };
 }
 
+/// A call's arguments on the user stack, in slots of the architecture's
+/// word: 8 bytes on arm64 and amd64, where every argument takes one slot;
+/// 4 on 386, in 8c's layout, where a vlong takes two (`vlongSlots`).
 const Args = struct {
     as: vmm.AddressSpace,
     base: u64,
+    word: u64 = 8,
 
     fn u(a: Args, i: u64) gm.Error!u64 {
-        return gm.readU64(a.as, a.base + 8 * i);
+        return gm.readWord(a.as, a.base + a.word * i, a.word);
+    }
+    /// The slots a vlong argument takes, for the index of the next one.
+    fn vlongSlots(a: Args) u64 {
+        return 8 / a.word;
     }
     fn int(a: Args, i: u64) gm.Error!i32 {
         return @bitCast(@as(u32, @truncate(try a.u(i))));
@@ -158,7 +166,7 @@ const Args = struct {
         return @truncate(try a.u(i));
     }
     fn vlong(a: Args, i: u64) gm.Error!i64 {
-        return @bitCast(try a.u(i));
+        return @bitCast(try gm.readU64(a.as, a.base + a.word * i));
     }
 };
 
@@ -166,7 +174,7 @@ pub fn dispatch(p: *Process, u: *const vmm.Ureg) Outcome {
     // Arguments, and buffers on the stack the guest hasn't touched yet,
     // may lie below the stack's mapped part; 9front would fault them in.
     _ = p.segs.growStack(u.syscallArgs());
-    const a: Args = .{ .as = p.as, .base = u.syscallArgs() };
+    const a: Args = .{ .as = p.as, .base = u.syscallArgs(), .word = u.wordSize() };
     p.targs_len = 0;
     const nr: Nr = @enumFromInt(u.syscallNumber());
     const out = serve(p, nr, a) catch |e| switch (e) {
@@ -208,7 +216,7 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
             p.note("0x{x}", .{try a.uint(0)});
             return .{ .rfork = try a.uint(0) };
         },
-        .exec => return execArgs(p, try a.u(0), try a.u(1)),
+        .exec => return execArgs(p, try a.u(0), try a.u(1), a.word),
         .await => {
             // await(char *s, int n): the message, truncated and NUL-terminated
             // as snprint leaves it.
@@ -289,7 +297,7 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
             // seek(vlong *ret, int fd, vlong off, int whence)
             const retp = try a.u(0);
             const fd = fdArg(try a.int(1)) orelse return badFd();
-            const r = kern.seek(fd, try a.vlong(2), try a.int(3)) catch return fail;
+            const r = kern.seek(fd, try a.vlong(2), try a.int(2 + a.vlongSlots())) catch return fail;
             var b: [8]u8 = undefined;
             std.mem.writeInt(i64, &b, r, .little);
             try gm.write(p.as, retp, &b);
@@ -449,7 +457,7 @@ fn semWord(p: *Process, addr: u64) gm.Error!?*i32 {
 }
 
 /// Copies exec's file name and argv out of guest memory.
-fn execArgs(p: *Process, file: u64, argp: u64) (gm.Error || std.mem.Allocator.Error)!Outcome {
+fn execArgs(p: *Process, file: u64, argp: u64, word: u64) (gm.Error || std.mem.Allocator.Error)!Outcome {
     const path = try gm.stringAlloc(p.as, file, p.gpa, 1024);
     errdefer p.gpa.free(path);
     p.note("\"{s}\"", .{path});
@@ -460,7 +468,7 @@ fn execArgs(p: *Process, file: u64, argp: u64) (gm.Error || std.mem.Allocator.Er
     }
     var total: usize = 0;
     while (true) {
-        const ptr = try gm.readU64(p.as, argp + 8 * argv.items.len);
+        const ptr = try gm.readWord(p.as, argp + word * argv.items.len, word);
         if (ptr == 0) break;
         const s = try gm.stringAlloc(p.as, ptr, p.gpa, max_exec_args - total);
         total += s.len + 1;
@@ -577,4 +585,22 @@ fn brk(p: *Process, addr: u64) gm.Error!Outcome {
 fn segFail(e: segment.SegError) Outcome {
     kern.setErrstr(segment.errorString(e));
     return fail;
+}
+
+test "386 arguments: 4-byte slots, and a vlong takes two" {
+    // seek(vlong *ret, int fd, vlong off, int whence) as 8c lays it out.
+    var stack: [24]u8 = undefined;
+    for ([_]u32{ 0x1000, 3, 0x89abcdef, 0x01234567, 2 }, 0..) |v, i| std.mem.writeInt(u32, stack[i * 4 ..][0..4], v, .little);
+    const Ctx = struct {
+        fn t(b: *[24]u8, va: u64, len: u64) ?[]u8 {
+            if (va < 0x100 or va - 0x100 + len > b.len) return null;
+            return b[va - 0x100 ..][0..len];
+        }
+    };
+    const as: vmm.AddressSpace = .initFake(&stack, Ctx.t);
+    const a: Args = .{ .as = as, .base = 0x100, .word = 4 };
+    try std.testing.expectEqual(@as(u64, 0x1000), try a.u(0));
+    try std.testing.expectEqual(@as(i32, 3), try a.int(1));
+    try std.testing.expectEqual(@as(i64, 0x0123456789abcdef), try a.vlong(2));
+    try std.testing.expectEqual(@as(i32, 2), try a.int(2 + a.vlongSlots()));
 }

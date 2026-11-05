@@ -126,13 +126,15 @@ const Probe = union(enum) {
 
 /// Creates a machine on backend `k` and runs the hello fixture on it.
 fn probe(gpa: std.mem.Allocator, io: std.Io, k: vmm.BackendKind, arch: vmm.Arch, memory: ?u64) Probe {
-    var hdr: [h9.aout.header_size]u8 = undefined;
+    var buf: [h9.aout.header_size]u8 = undefined;
+    const hdr = buf[0..arch.headerSize()];
     const text: []const u8 = switch (arch) {
         .arm64 => &hello.arm64_text,
         .amd64 => &hello.amd64_text,
+        .i386 => &hello.i386_text,
     };
-    h9.aout.writeTextHeader(&hdr, arch, text.len);
-    const img = std.mem.concat(gpa, u8, &.{ &hdr, text }) catch |e| return .{ .err = e };
+    h9.aout.writeTextHeader(hdr, arch, text.len);
+    const img = std.mem.concat(gpa, u8, &.{ hdr, text }) catch |e| return .{ .err = e };
     defer gpa.free(img);
 
     var out: std.Io.Writer.Allocating = .init(gpa);
@@ -152,12 +154,14 @@ fn probe(gpa: std.mem.Allocator, io: std.Io, k: vmm.BackendKind, arch: vmm.Arch,
     if (st != .exited or st.exited.len != 0) return .{ .wrong = "the test program didn't exit cleanly" };
     if (!std.mem.eql(u8, out.written(), hello.msg)) return .{ .wrong = "the test program's output was wrong" };
     const kind = m.backend.kind();
-    return .{ .ok = .{
-        .kind = kind,
-        // The emulator has no vCPU limit.
-        .max_vcpus = if (kind == .hvf) m.backend.maxVcpus() catch null else null,
-        .us = us,
-    } };
+    return .{
+        .ok = .{
+            .kind = kind,
+            // The emulator has no vCPU limit.
+            .max_vcpus = if (kind == .hvf) m.backend.maxVcpus() catch null else null,
+            .us = us,
+        },
+    };
 }
 
 /// Runs `/bin/echo ok` from the root tree on the backend `o.backend` picks.

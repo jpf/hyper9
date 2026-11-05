@@ -469,7 +469,7 @@ pub const Machine = struct {
         sys: syscall.Process = undefined,
         /// Registers to start from.
         ureg: vmm.Ureg = undefined,
-        extra: vmm.Extra = .{},
+        extra: vmm.Extra = .{ .arm64 = .{} },
         /// The Tos address, for the pid at fork.
         tos: u64 = 0,
         /// The a.out, for symbolizing faults with dump_on_fault.
@@ -794,15 +794,18 @@ pub const Machine = struct {
         _ = p.segs.growStack(f.sp);
         if (!p.segs.writable(f.sp, end -% f.sp)) return p.keepNote(&msg);
         const as = p.as.?;
-        var words: [3]u64 = .{ 0, f.nureg, f.msg };
-        var prev: u64 = p.noteureg;
+        const w = u.wordSize();
+        var words: [3 * 8]u8 = undefined;
+        putWords(&words, w, &.{ 0, f.nureg, f.msg });
+        var prev: [8]u8 = undefined;
+        putWords(&prev, w, &.{p.noteureg});
         const zmsg = std.mem.sliceTo(&msg, 0);
         @memset(msg[zmsg.len..], 0);
         gm.write(as, f.nureg, u.bytes()) catch return p.keepNote(&msg);
         gm.write(as, f.msg, &msg) catch return p.keepNote(&msg);
         // The word under the Ureg is the previous saved Ureg.
-        gm.write(as, f.nureg - 8, std.mem.asBytes(&prev)) catch return p.keepNote(&msg);
-        gm.write(as, f.sp, std.mem.sliceAsBytes(&words)) catch return p.keepNote(&msg);
+        gm.write(as, f.nureg - w, prev[0..w]) catch return p.keepNote(&msg);
+        gm.write(as, f.sp, words[0 .. 3 * w]) catch return p.keepNote(&msg);
         var x: vmm.Extra = undefined;
         try vcpu.getExtra(&x);
         p.note_extra = x;
@@ -836,23 +839,24 @@ pub const Machine = struct {
         }
         const as = p.as.?;
         const nureg = p.noteureg;
-        var saved: [@sizeOf(vmm.arm64.Ureg) + @sizeOf(vmm.amd64.Ureg)]u8 = undefined;
-        var prev: u64 = 0;
+        var saved: [@sizeOf(vmm.Ureg)]u8 = undefined;
+        const w = u.wordSize();
         const n = u.size();
-        if (nureg < 8 or nureg % 8 != 0) return suicide;
-        gm.read(as, nureg - 8, std.mem.asBytes(&prev)) catch return suicide;
+        if (nureg < w or nureg % w != 0) return suicide;
+        const prev = gm.readWord(as, nureg - w, w) catch return suicide;
         gm.read(as, nureg, saved[0..n]) catch return suicide;
         var r = u.restored(saved[0..n]);
         switch (how) {
             .cont, .rstr => {
                 p.noteureg = prev;
-                if (!r.aligned() or as.translate(r.pc(), 1) == null or as.translate(r.stackPointer(), 8) == null) return suicide;
+                if (!r.aligned() or as.translate(r.pc(), 1) == null or as.translate(r.stackPointer(), w) == null) return suicide;
             },
             .save => {
-                const sp = nureg - 4 * 8 - kern.ERRMAX;
-                var words: [2]u64 = .{ 0, nureg };
-                if (as.translate(r.pc(), 1) == null or sp % 8 != 0 or !p.segs.writable(sp, 4 * 8)) return suicide;
-                gm.write(as, sp, std.mem.sliceAsBytes(&words)) catch return suicide;
+                const sp = nureg - 4 * w - kern.ERRMAX;
+                var words: [2 * 8]u8 = undefined;
+                putWords(&words, w, &.{ 0, nureg });
+                if (as.translate(r.pc(), 1) == null or sp % w != 0 or !p.segs.writable(sp, 4 * w)) return suicide;
+                gm.write(as, sp, words[0 .. 2 * w]) catch return suicide;
                 r.setNoteSave(sp, nureg);
             },
             // kern.noted kills for every other argument.
@@ -865,6 +869,13 @@ pub const Machine = struct {
         // later exit (9front would take it at the next clock tick).
         p.note_flag.store(true, .release);
         return null;
+    }
+
+    /// Little-endian words of `w` bytes (4 or 8) from `vals` into `out`.
+    fn putWords(out: []u8, w: u64, vals: []const u64) void {
+        for (vals, 0..) |v, i| {
+            if (w == 4) std.mem.writeInt(u32, out[i * 4 ..][0..4], @truncate(v), .little) else std.mem.writeInt(u64, out[i * 8 ..][0..8], v, .little);
+        }
     }
 
     /// 9front's exit status for a broken noted.
@@ -892,7 +903,7 @@ pub const Machine = struct {
             j.dropProc(c);
             return failWith("virtual memory allocation failed");
         };
-        loader.setTosPid(cas, p.tos, c.pid);
+        loader.setTosPid(cas, m.arch, p.tos, c.pid);
         c.tos = p.tos;
         c.ureg = u.*;
         c.ureg.setReturn(0);
@@ -1133,8 +1144,8 @@ pub const Machine = struct {
         const defaults = [_]EnvVar{
             .{ .name = "user", .value = user },
             .{ .name = "home", .value = std.fmt.bufPrint(&home_buf, "/usr/{s}", .{user}) catch "/" },
-            .{ .name = "cputype", .value = @tagName(m.arch) },
-            .{ .name = "objtype", .value = @tagName(m.arch) },
+            .{ .name = "cputype", .value = m.arch.name() },
+            .{ .name = "objtype", .value = m.arch.name() },
             .{ .name = "sysname", .value = "h9" },
             .{ .name = "service", .value = "terminal" },
         };
@@ -1234,6 +1245,12 @@ fn dumpFaultTo(w: *std.Io.Writer, u: *const vmm.Ureg, f: vmm.Fault, bytes: []con
                 try w.writeAll(if (i % 4 == 3) "\n" else "  ");
             }
             try w.writeAll("\n");
+        },
+        .i386 => |r| {
+            inline for (.{ "ax", "bx", "cx", "dx", "si", "di", "bp", "sp", "pc", "flags", "trap", "ecode" }, 0..) |name, i| {
+                try w.print("{s}\t0x{x:0>8}", .{ name, @field(r, name) });
+                try w.writeAll(if (i % 4 == 3) "\n" else "  ");
+            }
         },
     }
 }

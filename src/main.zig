@@ -65,7 +65,9 @@ pub fn main(init: std.process.Init) !u8 {
     const prog_arg = if (cfg.rc != null) "/bin/rc" else argv[0];
 
     // A host program is read here; a guest one is resolved in the machine.
-    var arch: ?h9.vmm.Arch = null;
+    // --arch picks the architecture; without it, a host program's header
+    // does, and a guest one runs the host's.
+    var arch: ?h9.vmm.Arch = cfg.arch;
     const prog: h9.Program = switch (cli.programKind(prog_arg)) {
         .host => blk: {
             const bytes = std.Io.Dir.cwd().readFileAlloc(io, prog_arg, arena, .limited(1 << 30)) catch |err| {
@@ -76,7 +78,7 @@ pub fn main(init: std.process.Init) !u8 {
                 std.debug.print("h9: {s}: not a 9front executable: {t}\n", .{ prog_arg, err });
                 return exit_not_executable;
             };
-            arch = hdr.arch;
+            if (arch == null) arch = hdr.arch;
             break :blk .{ .bytes = bytes };
         },
         .guest => .{ .guest = prog_arg },
@@ -182,7 +184,7 @@ pub fn main(init: std.process.Init) !u8 {
     };
     var machine = h9.Machine.init(init.gpa, io, opts) catch |err| {
         const a: h9.vmm.Arch = arch orelse h9.vmm.host_arch orelse .arm64;
-        std.debug.print("h9: cannot create {t} machine for {t}: {s}\n", .{ cfg.backend, a, tools.explain(cfg.backend, err) });
+        std.debug.print("h9: cannot create {t} machine for {s}: {s}\n", .{ cfg.backend, a.name(), tools.explain(cfg.backend, err) });
         return exit_failed;
     };
     defer machine.deinit();

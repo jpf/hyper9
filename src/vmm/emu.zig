@@ -1,8 +1,9 @@
 //! Emulator backend (Unicorn). Built with -Demu=unicorn. See DESIGN.md,
 //! "Emulator backend (emu)".
 //!
-//! User mode only: each vCPU is a Unicorn engine running at EL0 (arm64) or
-//! in flat 64-bit mode (amd64), with no MMU and no guest kernel. Hooks turn
+//! User mode only: each vCPU is a Unicorn engine running at EL0 (arm64), in
+//! flat 64-bit mode (amd64) or in flat 32-bit protected mode (386), with no
+//! MMU and no guest kernel. Hooks turn
 //! syscall instructions, invalid memory accesses and CPU exceptions into
 //! vmm exits, doing the shim's job. Address-space pages are host memory
 //! mapped straight into the engine with uc_mem_map_ptr, so the host and the
@@ -12,6 +13,7 @@ const std = @import("std");
 const vmm = @import("../vmm.zig");
 const arm64 = @import("../arch/arm64.zig");
 const amd64 = @import("../arch/amd64.zig");
+const ia32 = @import("../arch/i386.zig");
 const uc = @import("unicorn");
 
 /// Unicorn's runtime version, e.g. "2.1".
@@ -26,6 +28,9 @@ fn open(arch: vmm.Arch) vmm.Error!*uc.uc_engine {
     const a: uc.uc_arch, const mode: uc.uc_mode = switch (arch) {
         .arm64 => .{ uc.UC_ARCH_ARM64, uc.UC_MODE_ARM },
         .amd64 => .{ uc.UC_ARCH_X86, uc.UC_MODE_64 },
+        // Unicorn's 32-bit mode starts in protected mode with every segment
+        // based at 0, which is the flat model 9front's GDT gives user code.
+        .i386 => .{ uc.UC_ARCH_X86, uc.UC_MODE_32 },
     };
     var engine: ?*uc.uc_engine = null;
     if (uc.uc_open(a, mode, &engine) != uc.UC_ERR_OK) return error.HypervisorFailed;
@@ -139,8 +144,7 @@ pub const Backend = struct {
         const s = try b.gpa.create(State);
         errdefer b.gpa.destroy(s);
         s.* = .{ .backend = b, .arch = b.arch, .engine = try open(b.arch), .ureg = switch (b.arch) {
-            .arm64 => .{ .arm64 = .{} },
-            .amd64 => .{ .amd64 = .{} },
+            inline else => |a| @unionInit(vmm.Ureg, @tagName(a), .{}),
         } };
         errdefer _ = uc.uc_close(s.engine);
         try s.addHooks();
@@ -230,6 +234,8 @@ const State = struct {
     fn onIntr(_: ?*uc.uc_engine, intno: u32, data: ?*anyopaque) callconv(.c) void {
         const s: *State = @ptrCast(@alignCast(data));
         if (s.arch == .arm64 and intno == arm64_excp_swi) return s.halt(.syscall);
+        // INT $64; Unicorn has already moved EIP past it.
+        if (s.arch == .i386 and intno == ia32.vector_syscall) return s.halt(.syscall);
         s.halt(.{ .exception = intno });
     }
 
@@ -280,6 +286,14 @@ const State = struct {
                 vals[amd64_fields.len] = u.flags | amd64_flags_res1;
                 try writeBatch(s.engine, &amd64_regs, &vals);
             },
+            // The selectors stay in the Ureg as initExec and notify set
+            // them; the engine's flat segments never change.
+            .i386 => |*u| {
+                var vals: [i386_regs.len]u32 = undefined;
+                inline for (i386_fields, 0..) |f, i| vals[i] = @field(u, f);
+                vals[i386_fields.len] = u.flags | @as(u32, @truncate(amd64_flags_res1));
+                try writeBatch32(s.engine, &i386_regs, &vals);
+            },
         }
     }
 
@@ -298,6 +312,12 @@ const State = struct {
                 try readBatch(s.engine, &amd64_regs, &vals);
                 inline for (amd64_fields, 0..) |f, i| @field(u, f) = vals[i];
                 u.flags = vals[amd64_fields.len];
+            },
+            .i386 => |*u| {
+                var vals: [i386_regs.len]u32 = undefined;
+                try readBatch32(s.engine, &i386_regs, &vals);
+                inline for (i386_fields, 0..) |f, i| @field(u, f) = vals[i];
+                u.flags = vals[i386_fields.len];
             },
         }
     }
@@ -344,6 +364,7 @@ const State = struct {
         switch (s.ureg) {
             .arm64 => |*u| u.type = @as(u64, arm64.EC_SVC64) << 26,
             .amd64 => |*u| u.type = amd64_vector_syscall,
+            .i386 => |*u| u.trap = ia32.vector_syscall,
         }
     }
 
@@ -352,6 +373,7 @@ const State = struct {
         switch (s.ureg) {
             .arm64 => |*u| u.type = n,
             .amd64 => |*u| u.type = n,
+            .i386 => |*u| u.trap = n,
         }
         return .{ .fault = .{ .addr = pc, .access = .exec, .syndrome = n } };
     }
@@ -429,8 +451,16 @@ const amd64_regs = [_]c_int{
     uc.UC_X86_REG_RSP, uc.UC_X86_REG_EFLAGS,
 };
 
+const i386_fields = [_][]const u8{ "ax", "bx", "cx", "dx", "si", "di", "bp", "pc", "sp" };
+const i386_regs = [_]c_int{
+    uc.UC_X86_REG_EAX, uc.UC_X86_REG_EBX,    uc.UC_X86_REG_ECX, uc.UC_X86_REG_EDX,
+    uc.UC_X86_REG_ESI, uc.UC_X86_REG_EDI,    uc.UC_X86_REG_EBP, uc.UC_X86_REG_EIP,
+    uc.UC_X86_REG_ESP, uc.UC_X86_REG_EFLAGS,
+};
+
 comptime {
     std.debug.assert(amd64_regs.len == amd64_fields.len + 1);
+    std.debug.assert(i386_regs.len == i386_fields.len + 1);
 }
 
 fn writeBatch(e: *uc.uc_engine, comptime regs: []const c_int, vals: []u64) vmm.Error!void {
@@ -439,10 +469,76 @@ fn writeBatch(e: *uc.uc_engine, comptime regs: []const c_int, vals: []u64) vmm.E
     try check(uc.uc_reg_write_batch(e, regs.ptr, @ptrCast(&ptrs), regs.len));
 }
 
+// 32-bit registers in 32-bit mode: Unicorn reads and writes 4 bytes.
+fn writeBatch32(e: *uc.uc_engine, comptime regs: []const c_int, vals: []u32) vmm.Error!void {
+    var ptrs: [regs.len]?*anyopaque = undefined;
+    for (&ptrs, vals) |*p, *v| p.* = v;
+    try check(uc.uc_reg_write_batch(e, regs.ptr, @ptrCast(&ptrs), regs.len));
+}
+
+fn readBatch32(e: *uc.uc_engine, comptime regs: []const c_int, vals: []u32) vmm.Error!void {
+    var ptrs: [regs.len]?*anyopaque = undefined;
+    for (&ptrs, vals) |*p, *v| p.* = v;
+    try check(uc.uc_reg_read_batch(e, regs.ptr, @ptrCast(&ptrs), regs.len));
+}
+
 fn readBatch(e: *uc.uc_engine, comptime regs: []const c_int, vals: []u64) vmm.Error!void {
     var ptrs: [regs.len]?*anyopaque = undefined;
     for (&ptrs, vals) |*p, *v| p.* = v;
     try check(uc.uc_reg_read_batch(e, regs.ptr, @ptrCast(&ptrs), regs.len));
+}
+
+/// XMM registers there are in `arch`'s mode: XMM8-XMM15 exist only in
+/// 64-bit mode.
+fn xmmCount(arch: vmm.Arch) usize {
+    return if (arch == .amd64) 16 else 8;
+}
+
+/// Assembles the FXSAVE image from Unicorn's registers, which has no
+/// single one for it: the x87 control, status and tag words, the last
+/// opcode and instruction and data pointers, the stack registers in ST
+/// order, MXCSR and the XMM registers. The pointers are kept as Unicorn
+/// has them, as offsets without selectors.
+fn getFxsave(e: *uc.uc_engine, comptime arch: vmm.Arch, fx: *vmm.Fxsave) vmm.Error!void {
+    fx.* = .{};
+    try check(uc.uc_reg_read(e, uc.UC_X86_REG_FPCW, &fx.fcw));
+    try check(uc.uc_reg_read(e, uc.UC_X86_REG_FPSW, &fx.fsw));
+    // The full tag word has two bits per physical register, 3 meaning
+    // empty; FXSAVE keeps one, set for a register that isn't.
+    var tag: u16 = 0;
+    try check(uc.uc_reg_read(e, uc.UC_X86_REG_FPTAG, &tag));
+    for (0..8) |i| {
+        if ((tag >> @intCast(2 * i)) & 3 != 3) fx.ftw |= @as(u8, 1) << @intCast(i);
+    }
+    try check(uc.uc_reg_read(e, uc.UC_X86_REG_FOP, &fx.fop));
+    try check(uc.uc_reg_read(e, uc.UC_X86_REG_FIP, &fx.fip));
+    try check(uc.uc_reg_read(e, uc.UC_X86_REG_FDP, &fx.fdp));
+    // ST0-ST7 are relative to TOP, as FXSAVE stores them.
+    for (&fx.st, 0..) |*st, i| try check(uc.uc_reg_read(e, uc.UC_X86_REG_ST0 + @as(c_int, @intCast(i)), st[0..10]));
+    try check(uc.uc_reg_read(e, uc.UC_X86_REG_MXCSR, &fx.mxcsr));
+    fx.mxcsr_mask = 0xffff;
+    for (fx.xmm[0..xmmCount(arch)], 0..) |*q, i| try check(uc.uc_reg_read(e, uc.UC_X86_REG_XMM0 + @as(c_int, @intCast(i)), q));
+}
+
+/// Loads an FXSAVE image into Unicorn's registers; see getFxsave.
+fn setFxsave(e: *uc.uc_engine, comptime arch: vmm.Arch, fx: *const vmm.Fxsave) vmm.Error!void {
+    try check(uc.uc_reg_write(e, uc.UC_X86_REG_FPCW, &fx.fcw));
+    // The status word carries TOP, which places ST0-ST7: set it first.
+    try check(uc.uc_reg_write(e, uc.UC_X86_REG_FPSW, &fx.fsw));
+    for (&fx.st, 0..) |*st, i| try check(uc.uc_reg_write(e, uc.UC_X86_REG_ST0 + @as(c_int, @intCast(i)), st[0..10]));
+    // Unicorn only keeps whether each register is empty.
+    var tag: u16 = 0;
+    for (0..8) |i| {
+        if (fx.ftw & (@as(u8, 1) << @intCast(i)) == 0) tag |= @as(u16, 3) << @intCast(2 * i);
+    }
+    try check(uc.uc_reg_write(e, uc.UC_X86_REG_FPTAG, &tag));
+    try check(uc.uc_reg_write(e, uc.UC_X86_REG_FOP, &fx.fop));
+    try check(uc.uc_reg_write(e, uc.UC_X86_REG_FIP, &fx.fip));
+    try check(uc.uc_reg_write(e, uc.UC_X86_REG_FDP, &fx.fdp));
+    // MXCSR's reserved bits would make FXRSTOR fault; keep them clear.
+    const mxcsr: u32 = fx.mxcsr & 0xffff;
+    try check(uc.uc_reg_write(e, uc.UC_X86_REG_MXCSR, &mxcsr));
+    for (fx.xmm[0..xmmCount(arch)], 0..) |*q, i| try check(uc.uc_reg_write(e, uc.UC_X86_REG_XMM0 + @as(c_int, @intCast(i)), q));
 }
 
 pub const Vcpu = struct {
@@ -474,35 +570,35 @@ pub const Vcpu = struct {
         const e = v.s.engine;
         switch (v.s.arch) {
             .arm64 => {
-                for (&x.v, 0..) |*q, i| try check(uc.uc_reg_read(e, uc.UC_ARM64_REG_Q0 + @as(c_int, @intCast(i)), q));
-                try check(uc.uc_reg_read(e, uc.UC_ARM64_REG_FPCR, &x.fpcr));
-                try check(uc.uc_reg_read(e, uc.UC_ARM64_REG_FPSR, &x.fpsr));
-                try check(uc.uc_reg_read(e, uc.UC_ARM64_REG_TPIDR_EL0, &x.tls));
+                x.* = .{ .arm64 = .{} };
+                const a = &x.arm64;
+                for (&a.v, 0..) |*q, i| try check(uc.uc_reg_read(e, uc.UC_ARM64_REG_Q0 + @as(c_int, @intCast(i)), q));
+                try check(uc.uc_reg_read(e, uc.UC_ARM64_REG_FPCR, &a.fpcr));
+                try check(uc.uc_reg_read(e, uc.UC_ARM64_REG_FPSR, &a.fpsr));
+                try check(uc.uc_reg_read(e, uc.UC_ARM64_REG_TPIDR_EL0, &a.tls));
             },
-            .amd64 => {
-                for (x.v[0..16], 0..) |*q, i| try check(uc.uc_reg_read(e, uc.UC_X86_REG_XMM0 + @as(c_int, @intCast(i)), q));
-                var mxcsr: u32 = 0;
-                try check(uc.uc_reg_read(e, uc.UC_X86_REG_MXCSR, &mxcsr));
-                x.fpcr = mxcsr;
-                try check(uc.uc_reg_read(e, uc.UC_X86_REG_FS_BASE, &x.tls));
+            inline .amd64, .i386 => |a| {
+                x.* = @unionInit(vmm.Extra, @tagName(a), .{});
+                const t = &@field(x, @tagName(a));
+                try getFxsave(e, a, &t.fx);
+                if (a == .amd64) try check(uc.uc_reg_read(e, uc.UC_X86_REG_FS_BASE, &t.tls));
             },
         }
     }
 
     pub fn setExtra(v: *Vcpu, x: *const vmm.Extra) vmm.Error!void {
         const e = v.s.engine;
-        switch (v.s.arch) {
-            .arm64 => {
-                for (&x.v, 0..) |*q, i| try check(uc.uc_reg_write(e, uc.UC_ARM64_REG_Q0 + @as(c_int, @intCast(i)), q));
-                try check(uc.uc_reg_write(e, uc.UC_ARM64_REG_FPCR, &x.fpcr));
-                try check(uc.uc_reg_write(e, uc.UC_ARM64_REG_FPSR, &x.fpsr));
-                try check(uc.uc_reg_write(e, uc.UC_ARM64_REG_TPIDR_EL0, &x.tls));
+        std.debug.assert(x.arch() == v.s.arch);
+        switch (x.*) {
+            .arm64 => |*a| {
+                for (&a.v, 0..) |*q, i| try check(uc.uc_reg_write(e, uc.UC_ARM64_REG_Q0 + @as(c_int, @intCast(i)), q));
+                try check(uc.uc_reg_write(e, uc.UC_ARM64_REG_FPCR, &a.fpcr));
+                try check(uc.uc_reg_write(e, uc.UC_ARM64_REG_FPSR, &a.fpsr));
+                try check(uc.uc_reg_write(e, uc.UC_ARM64_REG_TPIDR_EL0, &a.tls));
             },
-            .amd64 => {
-                for (x.v[0..16], 0..) |*q, i| try check(uc.uc_reg_write(e, uc.UC_X86_REG_XMM0 + @as(c_int, @intCast(i)), q));
-                const mxcsr: u32 = @truncate(x.fpcr);
-                try check(uc.uc_reg_write(e, uc.UC_X86_REG_MXCSR, &mxcsr));
-                try check(uc.uc_reg_write(e, uc.UC_X86_REG_FS_BASE, &x.tls));
+            inline .amd64, .i386 => |*t, a| {
+                try setFxsave(e, a, &t.fx);
+                if (a == .amd64) try check(uc.uc_reg_write(e, uc.UC_X86_REG_FS_BASE, &t.tls));
             },
         }
     }
