@@ -1168,6 +1168,34 @@ h9_kern_rfork(int flag)
 }
 
 /*
+ * Lets go of the calling process's fds, namespace and current directory
+ * before it ends, so that what they hold (an overlay's pages, say) is
+ * freed while the machine that owns it is still there: the process's
+ * thread can outlive the machine's wait for it. dot and slash become #/,
+ * since pexit closes them.
+ */
+void
+h9_kern_release(void)
+{
+	Chan *c;
+
+	if(up->fgrp != nil){
+		fgrpclose(up->fgrp);
+		up->fgrp = nil;
+	}
+	if(up->pgrp != nil){
+		closepgrp(up->pgrp);
+		up->pgrp = nil;
+	}
+	c = up->dot;
+	up->dot = cclone(bootproc->slash);
+	cclose(c);
+	c = up->slash;
+	up->slash = cclone(bootproc->slash);
+	cclose(c);
+}
+
+/*
  * Ends the calling kernel process; it doesn't return. The parent, if any,
  * gets a wait record built from the exit string set with h9_kern_setexits,
  * as 9front's pexit builds it.
