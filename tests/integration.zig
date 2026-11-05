@@ -811,12 +811,15 @@ test "filling an overlay fails with file system full and the machine carries on 
 
 test "creating empty files until memory runs out fails with file system full [6]" {
     const e = try env(@src());
-    // rc makes the files itself, without forking, and exits when one
-    // fails: no memory is left for another process.
-    const r = try run(e, &.{ "--memory", "32m", "--rc", "for(i in `{seq 150000}) if(! >/tmp/e$i) exit stopped; exit never" });
+    // rc makes the files itself, without forking: no memory is left for
+    // another process. A redirection with no command doesn't set $status
+    // when it works, so there's nothing to test in the loop; when one
+    // fails, rc prints the error and leaves the script.
+    const r = try run(e, &.{ "--memory", "32m", "--rc", "for(i in `{seq 150000}) >/tmp/e$i; exit never" });
     defer r.deinit();
+    try std.testing.expectEqual(1, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "file system full") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.err, "stopped") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "never") == null);
 }
 
 test "renaming a directory marker is refused [6]" {
