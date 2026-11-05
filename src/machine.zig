@@ -594,6 +594,9 @@ pub const Machine = struct {
             const j = p.job;
             const gpa = j.m.gpa;
             const io = j.m.io;
+            // The namespace and fds can hold overlays, whose pages are the
+            // machine's: they go now, not after the machine stops waiting.
+            kern.release();
             // No kick hook may run on the Proc once it's freed.
             kern.setAux(null);
             if (p.lease) |l| {

@@ -190,6 +190,7 @@ const c_stub = struct {
         return -1;
     }
     fn h9_overlay_drop(_: c_int) void {}
+    fn h9_kern_release() void {}
 };
 
 const c_real = struct {
@@ -259,6 +260,7 @@ const c_real = struct {
     extern fn sysfwstat(fd: c_int, buf: [*]u8, n: c_int) c_int;
     extern fn h9_overlay_newpath(path: ?[*:0]const u8) c_int;
     extern fn h9_overlay_drop(id: c_int) void;
+    extern fn h9_kern_release() void;
 };
 
 const BootState = enum(u8) { idle, booting, up, failed };
@@ -668,6 +670,14 @@ pub fn overlayNew(lower: ?[*:0]const u8) Error!u32 {
 /// Frees an overlay made by `overlayNew` that was never attached.
 pub fn overlayDrop(id: u32) void {
     c.h9_overlay_drop(@intCast(id));
+}
+
+/// Closes the calling process's fds and namespace and moves its current
+/// directory to #/, ahead of its exit. The kernel's exit runs after the
+/// process's function returns, which may be after its machine is gone; what
+/// the namespace holds, an overlay's pages for one, must go first.
+pub fn release() void {
+    c.h9_kern_release();
 }
 
 /// The calling Proc's error string after a failed call.
