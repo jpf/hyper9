@@ -124,9 +124,11 @@ const sema_fixtures = [_][]const u8{
 
 /// Runs tests/integration.zig against the h9 binary. `filters` selects
 /// cases by name; with `pending`, cases tagged with a proposal that isn't
-/// implemented run instead of skipping.
-fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, h9_bin: []const u8, root: []const u8, backends: []const u8, pending: bool) *std.Build.Step.Run {
+/// implemented run instead of skipping. `arch`, if given, is passed to h9
+/// as --arch (from -Darch).
+fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, h9_bin: []const u8, root: []const u8, backends: []const u8, pending: bool, arch: ?[]const u8) *std.Build.Step.Run {
     const run = b.addRunArtifact(integrationTests(b, b.graph.host, optimize, filters));
+    if (arch) |a| run.setEnvironmentVariable("H9_TEST_ARCH", a);
     run.setEnvironmentVariable("H9_TEST_BIN", h9_bin);
     run.setEnvironmentVariable("H9_TEST_ROOT", root);
     run.setEnvironmentVariable("H9_TEST_BACKENDS", backends);
@@ -507,8 +509,8 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    var hellos: [2]std.Build.LazyPath = undefined;
-    for (&hellos, [_][]const u8{ "arm64", "amd64" }, [_][]const u8{ "hello", "hello-amd64" }) |*out, arch, name| {
+    var hellos: [3]std.Build.LazyPath = undefined;
+    for (&hellos, [_][]const u8{ "arm64", "amd64", "386" }, [_][]const u8{ "hello", "hello-amd64", "hello-386" }) |*out, arch, name| {
         const gen = b.addRunArtifact(mkhello);
         gen.addArg(arch);
         out.* = gen.addOutputFileArg(name);
@@ -533,6 +535,12 @@ pub fn build(b: *std.Build) void {
         emu_demo.expectStdOutEqual("hello\n");
         emu_demo.step.dependOn(signed_step);
         addDemo(b, &demos, "baseline", &emu_demo.step);
+        // 386 runs on the emulator on every host.
+        const i386_demo = b.addSystemCommand(&.{ b.getInstallPath(.bin, exe.out_filename), "--backend", "emu" });
+        i386_demo.addFileArg(hellos[2]);
+        i386_demo.expectStdOutEqual("hello\n");
+        i386_demo.step.dependOn(signed_step);
+        addDemo(b, &demos, "i386", &i386_demo.step);
     }
 
     // The rest run real 9front binaries from a host root tree, so they're
@@ -572,13 +580,19 @@ pub fn build(b: *std.Build) void {
     var backends: std.ArrayList(u8) = .empty;
     if (os == .macos and target.result.cpu.arch == .aarch64) backends.appendSlice(b.allocator, "hvf,") catch @panic("OOM");
     if (emu == .unicorn) backends.appendSlice(b.allocator, "emu,") catch @panic("OOM");
-    const backend_list = if (backends.items.len > 0) backends.items else "auto";
+    // -Darch runs the cases with another architecture's binaries from the
+    // root (/386/bin, /amd64/bin). HVF runs arm64 only, so it's left out
+    // for the others.
+    const test_arch = b.option([]const u8, "arch", "Architecture of the root's binaries for the integration cases: arm64, amd64 or 386 (default the host's)");
+    const backend_list = if (test_arch != null and !std.mem.eql(u8, test_arch.?, "arm64"))
+        (if (emu == .unicorn) "emu" else "auto")
+    else if (backends.items.len > 0) backends.items else "auto";
 
     // Runs real binaries through the h9 CLI; skipped without a root tree.
     // Cases tagged with a proposal that isn't implemented skip unless
     // -Dpending is given.
     const run_pending = b.option(bool, "pending", "Also run integration cases of proposals that aren't implemented yet") orelse false;
-    const run_integration = addIntegration(b, optimize, &.{}, h9_bin, root, backend_list, run_pending);
+    const run_integration = addIntegration(b, optimize, &.{}, h9_bin, root, backend_list, run_pending, test_arch);
     run_integration.step.dependOn(signed_step);
     b.step("integration", "Run real 9front binaries from the root tree through h9").dependOn(&run_integration.step);
 
@@ -592,7 +606,7 @@ pub fn build(b: *std.Build) void {
     if (b.option([]const u8, "p", "With zig build proposal: the proposal, by id or slug")) |ref| {
         const ps = proposals(b);
         if (frontmatter.resolve(ps, ref)) |i| {
-            const run_cases = addIntegration(b, optimize, tagFilters(b, ps[i]), h9_bin, root, backend_list, true);
+            const run_cases = addIntegration(b, optimize, tagFilters(b, ps[i]), h9_bin, root, backend_list, true, test_arch);
             run_cases.step.dependOn(signed_step);
             proposal_step.dependOn(&run_cases.step);
             if (demos.get(ps[i].slug)) |steps| for (steps.items) |s| proposal_step.dependOn(s);

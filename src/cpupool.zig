@@ -179,7 +179,7 @@ pub const Lease = struct {
     as: ?vmm.AddressSpace = null,
     /// Registers to run from, and after a run, as it left them.
     ureg: vmm.Ureg = undefined,
-    extra: vmm.Extra = .{},
+    extra: vmm.Extra = .{ .arm64 = .{} },
     extra_dirty: bool = true,
     /// A pooled run's result, handed back by the pool thread.
     result: vmm.Error!vmm.Exit = .interrupted,

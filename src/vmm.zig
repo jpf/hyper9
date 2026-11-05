@@ -10,6 +10,7 @@ const build_options = @import("build_options");
 const aout = @import("aout.zig");
 pub const arm64 = @import("arch/arm64.zig");
 pub const amd64 = @import("arch/amd64.zig");
+pub const ia32 = @import("arch/i386.zig"); // `i386` is a primitive type name
 
 const hvf = if (have_hvf) @import("vmm/hvf.zig") else @import("vmm/none.zig");
 const emu = if (have_emu) @import("vmm/emu.zig") else @import("vmm/none.zig");
@@ -91,12 +92,28 @@ pub const Exit = union(enum) {
 pub const Ureg = union(Arch) {
     arm64: arm64.Ureg,
     amd64: amd64.Ureg,
+    i386: ia32.Ureg,
 
-    pub fn initExec(arch: Arch, entry: u64, sp: u64, tos: u64) Ureg {
-        return switch (arch) {
-            .arm64 => .{ .arm64 = .initExec(entry, sp, tos) },
-            .amd64 => .{ .amd64 = .initExec(entry, sp, tos) },
+    /// The ABI module for each architecture.
+    fn abi(comptime a: Arch) type {
+        return switch (a) {
+            .arm64 => arm64,
+            .amd64 => amd64,
+            .i386 => ia32,
         };
+    }
+
+    pub fn initExec(which: Arch, entry: u64, sp: u64, tos: u64) Ureg {
+        return switch (which) {
+            inline else => |a| @unionInit(Ureg, @tagName(a), .initExec(entry, sp, tos)),
+        };
+    }
+    pub fn arch(u: *const Ureg) Arch {
+        return std.meta.activeTag(u.*);
+    }
+    /// Bytes in a user pointer and a stack word.
+    pub fn wordSize(u: *const Ureg) u64 {
+        return u.arch().wordSize();
     }
     pub fn pc(u: *const Ureg) u64 {
         return switch (u.*) {
@@ -142,7 +159,7 @@ pub const Ureg = union(Arch) {
     pub fn notifyFrame(u: *const Ureg, handler: u64, errmax: u64) ?NotifyFrame {
         return switch (u.*) {
             inline else => |*r, a| blk: {
-                const f = (if (a == .arm64) arm64 else amd64).notifyFrame(r, handler, errmax) orelse break :blk null;
+                const f = abi(a).notifyFrame(r, handler, errmax) orelse break :blk null;
                 break :blk .{ .nureg = f.nureg, .msg = f.msg, .sp = f.sp, .regs = @unionInit(Ureg, @tagName(a), f.regs) };
             },
         };
@@ -156,15 +173,17 @@ pub const Ureg = union(Arch) {
                 const T = @TypeOf(r.*);
                 var g: T = undefined;
                 @memcpy(std.mem.asBytes(&g), saved[0..@sizeOf(T)]);
-                break :blk @unionInit(Ureg, @tagName(a), (if (a == .arm64) arm64 else amd64).sanitize(g, r));
+                break :blk @unionInit(Ureg, @tagName(a), abi(a).sanitize(g, r));
             },
         };
     }
 
     /// noted(NSAVE): the handler resumes with its Ureg argument again, in
-    /// R0 on arm64 and BP on amd64, and the stack at `new_sp`.
+    /// R0 on arm64 and BP on amd64 (on 386 only on the stack), and the
+    /// stack at `new_sp`.
     pub fn setNoteSave(u: *Ureg, new_sp: u64, nureg: u64) void {
         switch (u.*) {
+            .i386 => |*r| r.sp = @intCast(new_sp),
             .arm64 => |*r| {
                 r.sp = new_sp;
                 r.r[0] = nureg;
@@ -181,7 +200,7 @@ pub const Ureg = union(Arch) {
     pub fn aligned(u: *const Ureg) bool {
         return switch (u.*) {
             .arm64 => |r| r.pc & 3 == 0 and r.sp & 7 == 0,
-            .amd64 => true,
+            .amd64, .i386 => true,
         };
     }
 };
@@ -189,18 +208,71 @@ pub const Ureg = union(Arch) {
 /// User state beyond the Ureg that a process keeps across vCPUs: the
 /// FP/SIMD registers and the thread pointer. A process that moves between
 /// pooled vCPUs, or forks, carries it with it.
-pub const Extra = struct {
-    /// Q0-Q31 on arm64, XMM0-XMM15 on amd64 (the rest unused).
+pub const Extra = union(Arch) {
+    arm64: Arm64Extra,
+    amd64: X86Extra,
+    i386: X86Extra,
+
+    /// The state at exec: zero, with the x87 control word and MXCSR at
+    /// their reset values on x86 (FNINIT's 0x037F, all SSE exceptions
+    /// masked).
+    pub fn initExec(a: Arch) Extra {
+        return switch (a) {
+            .arm64 => .{ .arm64 = .{} },
+            .amd64 => .{ .amd64 = .init },
+            .i386 => .{ .i386 = .init },
+        };
+    }
+
+    pub fn arch(x: *const Extra) Arch {
+        return std.meta.activeTag(x.*);
+    }
+};
+
+pub const Arm64Extra = struct {
+    /// Q0-Q31.
     v: [32]u128 = @splat(0),
-    /// FPCR and FPSR on arm64; MXCSR in `fpcr` on amd64.
     fpcr: u64 = 0,
     fpsr: u64 = 0,
-    /// TPIDR_EL0 on arm64; FS base on amd64.
+    /// TPIDR_EL0.
+    tls: u64 = 0,
+};
+
+/// The x87, MMX and SSE state as FXSAVE stores it, and the thread pointer.
+pub const X86Extra = struct {
+    fx: Fxsave = .{},
+    /// FS base on amd64; unused on 386.
     tls: u64 = 0,
 
-    /// The state at exec, with the MXCSR default on amd64.
-    pub fn initExec(arch: Arch) Extra {
-        return .{ .fpcr = if (arch == .amd64) 0x1f80 else 0 };
+    pub const init: X86Extra = .{ .fx = .{ .fcw = 0x037f, .mxcsr = 0x1f80 } };
+};
+
+/// The 512-byte FXSAVE area (Intel SDM vol. 1, 10.5.1), 16-byte aligned,
+/// in the 64-bit layout: on 386, FXSAVE's FPU IP and DP fields are 32-bit
+/// offsets with selectors, which `fip` and `fdp` hold as they come, and
+/// XMM8-XMM15 are unused.
+pub const Fxsave = extern struct {
+    fcw: u16 = 0,
+    fsw: u16 = 0,
+    /// Abridged tag word: bit i set when physical register i isn't empty.
+    ftw: u8 = 0,
+    _r1: u8 = 0,
+    fop: u16 = 0,
+    fip: u64 = 0,
+    fdp: u64 = 0,
+    mxcsr: u32 = 0,
+    mxcsr_mask: u32 = 0,
+    /// ST0-ST7 (stack order, from TOP), 80 bits each in 16-byte slots.
+    st: [8][16]u8 = @splat(@splat(0)),
+    xmm: [16]u128 = @splat(0),
+    _r2: [96]u8 = @splat(0),
+
+    comptime {
+        std.debug.assert(@sizeOf(Fxsave) == 512);
+        std.debug.assert(@alignOf(Fxsave) == 16);
+        std.debug.assert(@offsetOf(Fxsave, "mxcsr") == 24);
+        std.debug.assert(@offsetOf(Fxsave, "st") == 32);
+        std.debug.assert(@offsetOf(Fxsave, "xmm") == 160);
     }
 };
 
@@ -334,6 +406,10 @@ pub const AddressSpace = union(enum) {
         };
     }
 };
+
+test {
+    _ = ia32;
+}
 
 pub const Vcpu = union(Kind) {
     hvf: hvf.Vcpu,

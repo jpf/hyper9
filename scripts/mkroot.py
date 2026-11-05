@@ -10,7 +10,15 @@ The tree leaves out what running programs doesn't need: boot kernels,
 design/0010-self-host.md).
 That's about 250 MB instead of 420 MB.
 
-Usage: scripts/mkroot.py [--force] [--src]
+--arch 386,amd64 also fills /386 or /amd64 with binaries and libraries, by
+cross-compiling the tree's own /sys/src inside h9 (design/0009-i386.md):
+`cd /sys/src && objtype=386 mk install`, with the root writable. Without
+--src, /sys/src is copied in from the fetched checkout for the build and
+removed after. It needs a built h9 (zig-out/bin/h9, or $H9), with the
+emulator on hosts without an arm64 hypervisor. On an existing tree, --arch
+adds the architectures without extracting it again.
+
+Usage: scripts/mkroot.py [--force] [--src] [--arch 386,amd64]
 Needs qemu-system-aarch64, qemu-img and bsdtar (or a tar that reads ustar).
 """
 
@@ -152,11 +160,85 @@ class Console:
         return out.replace(b"\r", b"").split(b"\n", 1)[-1].decode("latin1")
 
 
+# Architectures --arch can add, as 9front names them.
+ARCHES = ("386", "amd64")
+
+
+def parse_args(argv):
+    usage = "usage: scripts/mkroot.py [--force] [--src] [--arch 386,amd64]"
+    flags, arches = set(), []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--force", "--src"):
+            flags.add(a)
+        elif a == "--arch" or a.startswith("--arch="):
+            if a == "--arch":
+                i += 1
+                if i == len(argv):
+                    die(usage)
+                v = argv[i]
+            else:
+                v = a[len("--arch="):]
+            for x in v.split(","):
+                if x not in ARCHES:
+                    die("--arch: %r isn't one of %s" % (x, ", ".join(ARCHES)))
+                if x not in arches:
+                    arches.append(x)
+        else:
+            die(usage)
+        i += 1
+    return flags, arches
+
+
+def h9_binary():
+    h9 = os.environ.get("H9") or os.path.join(REPO, "zig-out", "bin", "h9")
+    if not os.access(h9, os.X_OK):
+        die("no h9 at %s (zig build, or set $H9)" % h9)
+    return h9
+
+
+def add_arch(dest, arch, keep_src):
+    """Cross-compiles /sys/src for `arch` inside h9 and installs it into
+    dest/<arch>/bin and dest/<arch>/lib."""
+    if not os.path.isfile(os.path.join(dest, arch, "mkfile")):
+        die("tree has no /%s/mkfile to build with" % arch)
+    src = os.path.join(dest, "sys", "src")
+    copied = False
+    if not os.path.isdir(src):
+        checkout = os.path.join(LOCAL, "src", "9front", "sys", "src")
+        if not os.path.isdir(checkout):
+            die("no /sys/src in the tree and no %s (run scripts/fetch.sh, or mkroot.py --src)"
+                % os.path.relpath(checkout, REPO))
+        log("copying /sys/src from the fetched checkout")
+        shutil.copytree(checkout, src, symlinks=True)
+        copied = True
+    # mk install copies into /$objtype/bin's subdirectories, which must exist.
+    arm = os.path.join(dest, "arm64", "bin")
+    for d, _, _ in os.walk(arm):
+        os.makedirs(os.path.join(dest, arch, "bin", os.path.relpath(d, arm)), exist_ok=True)
+    os.makedirs(os.path.join(dest, arch, "lib"), exist_ok=True)
+    log("building /%s with h9 (a few minutes)" % arch)
+    # The compilers and mk are the tree's arm64 binaries, so the machine is
+    # arm64 whatever the host; mk clean leaves /sys/src as it was.
+    cmd = "cd /sys/src && objtype=%s mk install && objtype=%s mk clean" % (arch, arch)
+    try:
+        r = subprocess.run([h9_binary(), "--arch", "arm64", "--root", dest, "--writable", dest,
+                            "--rc", cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    finally:
+        if copied and not keep_src:
+            shutil.rmtree(src, ignore_errors=True)
+    if r.returncode != 0:
+        sys.stderr.write(r.stdout[-4000:].decode("latin1"))
+        die("building /%s failed (h9 exited %d)" % (arch, r.returncode))
+    for f in ("bin/cat", "bin/rc", "bin/ls", "lib/libc.a"):
+        if not os.path.isfile(os.path.join(dest, arch, f)):
+            die("tree is missing /%s/%s after the build" % (arch, f))
+
+
 def main():
-    args = sys.argv[1:]
-    for a in args:
-        if a not in ("--force", "--src"):
-            die("usage: scripts/mkroot.py [--force] [--src]")
+    flags, arches = parse_args(sys.argv[1:])
+    args = list(flags)
     force = "--force" in args
     skip = SKIP + ([] if "--src" in args else SKIP_SRC)
     release = pin("NINEFRONT_RELEASE")
@@ -169,7 +251,13 @@ def main():
         if not shutil.which(tool):
             die("%s not found" % tool)
     if os.path.exists(dest) and not force:
-        log("%s exists (--force to rebuild)" % os.path.relpath(dest, REPO))
+        if not arches:
+            log("%s exists (--force to rebuild)" % os.path.relpath(dest, REPO))
+            return
+        log("%s exists; adding %s" % (os.path.relpath(dest, REPO), ",".join(arches)))
+        for a in arches:
+            add_arch(dest, a, "--src" in args)
+        log("done: /%s/bin in %s" % (",/".join(arches), os.path.basename(dest)))
         return
 
     os.makedirs(os.path.join(LOCAL, "cache"), exist_ok=True)
@@ -246,6 +334,8 @@ def main():
     for f in ("lib/namespace", "arm64/bin/cat", "arm64/bin/rc"):
         if not os.path.isfile(os.path.join(dest, f)):
             die("tree is missing %s" % f)
+    for a in arches:
+        add_arch(dest, a, "--src" in args)
     log("done: .local/9front/root -> %s" % os.path.basename(dest))
 
 

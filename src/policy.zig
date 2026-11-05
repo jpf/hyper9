@@ -278,7 +278,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     try binds.append(arena, .{ .from = "#p", .to = "/proc", .optional = true });
     if (net != .disable) try binds.append(arena, .{ .from = "#I", .to = "/net", .optional = true });
     if (in.root != null) {
-        try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "/{t}/bin", .{in.arch}), .to = "/bin", .optional = true });
+        try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "/{s}/bin", .{in.arch.name()}), .to = "/bin", .optional = true });
         try binds.append(arena, .{ .from = "/rc/bin", .to = "/bin", .flag = .after, .optional = true });
     }
 

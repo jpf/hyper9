@@ -470,21 +470,24 @@ pub const Vcpu = struct {
     }
 
     pub fn getExtra(v: *Vcpu, x: *vmm.Extra) vmm.Error!void {
-        for (&x.v, 0..) |*q, i| {
+        x.* = .{ .arm64 = .{} };
+        const a = &x.arm64;
+        for (&a.v, 0..) |*q, i| {
             var b: @Vector(16, u8) = undefined;
             try check(hv_vcpu_get_simd_fp_reg(v.id, @intCast(i), &b));
             q.* = @bitCast(b);
         }
-        try check(hv_vcpu_get_reg(v.id, REG_FPCR, &x.fpcr));
-        try check(hv_vcpu_get_reg(v.id, REG_FPSR, &x.fpsr));
-        try check(hv_vcpu_get_sys_reg(v.id, SYS_TPIDR_EL0, &x.tls));
+        try check(hv_vcpu_get_reg(v.id, REG_FPCR, &a.fpcr));
+        try check(hv_vcpu_get_reg(v.id, REG_FPSR, &a.fpsr));
+        try check(hv_vcpu_get_sys_reg(v.id, SYS_TPIDR_EL0, &a.tls));
     }
 
     pub fn setExtra(v: *Vcpu, x: *const vmm.Extra) vmm.Error!void {
-        for (x.v, 0..) |q, i| try check(hv_vcpu_set_simd_fp_reg(v.id, @intCast(i), @bitCast(q)));
-        try check(hv_vcpu_set_reg(v.id, REG_FPCR, x.fpcr));
-        try check(hv_vcpu_set_reg(v.id, REG_FPSR, x.fpsr));
-        try check(hv_vcpu_set_sys_reg(v.id, SYS_TPIDR_EL0, x.tls));
+        const a = &x.arm64;
+        for (a.v, 0..) |q, i| try check(hv_vcpu_set_simd_fp_reg(v.id, @intCast(i), @bitCast(q)));
+        try check(hv_vcpu_set_reg(v.id, REG_FPCR, a.fpcr));
+        try check(hv_vcpu_set_reg(v.id, REG_FPSR, a.fpsr));
+        try check(hv_vcpu_set_sys_reg(v.id, SYS_TPIDR_EL0, a.tls));
     }
 
     /// Safe to call from any thread.

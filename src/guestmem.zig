@@ -134,6 +134,17 @@ pub fn write(as: vmm.AddressSpace, va: u64, data: []const u8) Error!void {
     }.f) catch return error.BadAddress;
 }
 
+/// Reads a little-endian word of `size` bytes (4 or 8) from guest memory,
+/// zero-extended: a pointer or a syscall argument slot.
+pub fn readWord(as: vmm.AddressSpace, va: u64, size: u64) Error!u64 {
+    if (size == 4) {
+        var b: [4]u8 = undefined;
+        try read(as, va, &b);
+        return std.mem.readInt(u32, &b, .little);
+    }
+    return readU64(as, va);
+}
+
 /// Reads a little-endian u64 from guest memory.
 pub fn readU64(as: vmm.AddressSpace, va: u64) Error!u64 {
     var b: [8]u8 = undefined;

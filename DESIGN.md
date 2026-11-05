@@ -12,7 +12,7 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 
 - Start and run a 9front binary as fast as a native process: no VM image, no boot, no guest kernel.
 - One invocation can hold a whole process tree (rc pipelines, servers posting to /srv, rio and its clients).
-- Run native code only: arm64 9front binaries on arm64 hosts, amd64 binaries on x86\_64 hosts.
+- Run native code only: arm64 9front binaries on arm64 hosts, amd64 binaries on x86\_64 hosts. 386 binaries run on the emulator, for the browser host ([i386](design/0009-i386.md)).
 - One host backend each for Hypervisor.framework (macOS), KVM (Linux) and Windows Hypervisor Platform (Windows).
 - Self-hosting: the 9front compilers and mk run inside and can rebuild the 9front userland.
 
@@ -70,13 +70,18 @@ const Vcpu = union(Kind) {
     pub fn run(self: *Vcpu) !Exit;             // blocks until the next exit
     pub fn getUreg(self: *Vcpu, u: *Ureg) void;        // Plan 9 Ureg layout
     pub fn setUreg(self: *Vcpu, u: *const Ureg) void;
+    pub fn getExtra(self: *Vcpu, x: *Extra) !void;     // FP/SIMD state and thread pointer
+    pub fn setExtra(self: *Vcpu, x: *const Extra) !void;
     pub fn kick(self: *Vcpu) void;             // safe from any thread
 };
-const Ureg = union(Arch) { arm64: arm64.Ureg, amd64: amd64.Ureg };
+const Ureg = union(Arch) { arm64: arm64.Ureg, amd64: amd64.Ureg, i386: ia32.Ureg };
+// arm64: Q0-Q31, FPCR, FPSR, TPIDR_EL0. x86: the 512-byte FXSAVE image
+// (x87, MXCSR, XMM) plus the FS base on amd64.
+const Extra = union(Arch) { arm64: Arm64Extra, amd64: X86Extra, i386: X86Extra };
 const Exit = union(enum) { syscall, fault: Fault, interrupted, halted, other: u64 };
 ```
 
-Each backend is a file under `src/vmm/` with the same method set; the unions dispatch to it. Backends not built into a given h9 are replaced by a stub whose `create` fails with `BackendNotBuilt`, so every host builds the same code. A backend that can't run the binary's architecture fails with `WrongArch`; HVF runs arm64 only.
+Each backend is a file under `src/vmm/` with the same method set; the unions dispatch to it. Backends not built into a given h9 are replaced by a stub whose `create` fails with `BackendNotBuilt`, so every host builds the same code. A backend that can't run the binary's architecture fails with `WrongArch`; HVF runs arm64 only, and only the emulator runs 386. `src/arch/i386.zig` holds the 386 Ureg, notify frame and `noted` sanitizing without backend details, so a hardware backend could add 386 later with a compatibility-mode code segment and an `INT $64` gate in its shim.
 
 The contract is in Plan 9 terms (address spaces, Ureg, syscall exits) rather than hardware terms such as guest-physical memory and page tables. That keeps page-table building inside the hypervisor backends, and lets the emulator implement the contract without emulating kernel mode or an MMU.
 
@@ -102,9 +107,9 @@ The interface was shaped around all three hypervisors, so the table and rules be
 
 The emulator lets the system run anywhere, including VMs without nested virtualization, at reduced speed. It implements the same Backend, AddressSpace, Vcpu and Exit contract, so everything above the vmm layer runs unchanged.
 
-**Scope:** user-mode arm64 and amd64 code only. On an `SVC` or `SYSCALL`, or on a fault, the emulator fills the Ureg and returns the exit itself, doing the shim's job. There's no guest kernel mode, no system registers and no MMU. The shim is tested only on real hypervisors.
+**Scope:** user-mode arm64, amd64 and 386 code only. On an `SVC`, `SYSCALL` or `INT $64`, or on a fault, the emulator fills the Ureg and returns the exit itself, doing the shim's job. There's no guest kernel mode, no system registers and no MMU. The shim is tested only on real hypervisors.
 
-**How the Unicorn backend works.** Each vCPU is one Unicorn engine, running arm64 at EL0 or amd64 in flat 64-bit mode. An address space is a list of regions of host memory; when a vCPU runs, any regions it hasn't seen yet are mapped into its engine with `uc_mem_map_ptr`, so the host and the guest share the pages and syscall arguments are read in place. Hooks stop the engine: `UC_HOOK_INTR` for `SVC` (and other exceptions), `UC_HOOK_INSN` for amd64 `SYSCALL`, and `UC_HOOK_MEM_INVALID` for faults. After a syscall stop the PC is already past the instruction, as with a hypervisor; after a fault it's at the faulting instruction. `Ureg.type` holds what the real kernel puts there for a syscall (the ESR on arm64, vector 64 on amd64). `kick` sets a flag and calls `uc_emu_stop`, which Unicorn allows from another thread.
+**How the Unicorn backend works.** Each vCPU is one Unicorn engine, running arm64 at EL0, amd64 in flat 64-bit mode, or 386 in `UC_MODE_32`, whose segments are all based at 0 as 9front's are for user code; the 386 Ureg's selectors are the values 9front gives user mode, kept in the Ureg rather than the engine. An address space is a list of regions of host memory; when a vCPU runs, any regions it hasn't seen yet are mapped into its engine with `uc_mem_map_ptr`, so the host and the guest share the pages and syscall arguments are read in place. Hooks stop the engine: `UC_HOOK_INTR` for `SVC` and 386 `INT $64` (and other exceptions), `UC_HOOK_INSN` for amd64 `SYSCALL`, and `UC_HOOK_MEM_INVALID` for faults. After a syscall stop the PC is already past the instruction, as with a hypervisor; after a fault it's at the faulting instruction. `Ureg.type` (`trap` on 386) holds what the real kernel puts there for a syscall (the ESR on arm64, vector 64 on x86). Unicorn has no FXSAVE register, so `getExtra` and `setExtra` assemble the image on both x86 architectures from the x87 control, status, tag and opcode registers, `ST0`–`ST7` (in stack order, as FXSAVE has them, with the status word and its TOP written first), MXCSR and the XMM registers; XMM8–15 stay zero on 386. `kick` sets a flag and calls `uc_emu_stop`, which Unicorn allows from another thread.
 
 **Implementation.** The backend uses Unicorn Engine. It's a C library built on QEMU's CPU core, covers arm64 and x86\_64, and has hooks for syscall instructions and invalid memory accesses. It's GPLv2, so it sits behind a build flag (`-Demu=unicorn`) and never goes into the MIT `h9` release build. Releases ship it separately as `h9-emu`, a GPLv2 binary built from source (`-Dunicorn=source`) with its complete corresponding source attached to the same release (`scripts/release.sh`); the two are separate programs side by side, so `h9` stays MIT. We link the prebuilt static `libunicorn.a` from Unicorn's PyPI wheels (pinned in `scripts/pins.sh`, fetched by `scripts/fetch.sh`) rather than building its CMake tree: macOS arm64, and Linux arm64 and x86\_64 with musl, which is Zig's default Linux target. There's no Windows arm64 wheel, so emu on Windows is built from source with our own `build.zig` (`-Dunicorn=source`, `build/unicorn.zig`). amd64 binaries are tested on Linux x86\_64 only; there's no amd64 on Darwin.
 
@@ -131,22 +136,24 @@ Each guest architecture gets a few hundred lines of assembly that run in guest k
 
 **Binary ABI (checked against 9front source).** The values below come from `sys/src/9/{arm64,pc64}/mem.h` and `trap.c`, plus `sysexec` in `port/sysproc.c`.
 
-| Item | arm64 (`R_MAGIC`) | amd64 (`S_MAGIC`) |
-| --- | --- | --- |
-| UTZERO (text start) | 0x10000 | 0x200000 |
-| USTKTOP (stack top) | 0x7FFFF0000 (36-bit user addresses) | 0x7FFFFFFFF000 |
-| Stack size | 16 MiB | 16 MiB |
-| Page size | 4 KiB | 4 KiB |
-| Data segment alignment | 64 KiB | 2 MiB |
-| Syscall number | R0 | BP (RARG) |
-| Syscall arguments | user stack, from SP+8 | user stack, from SP+8 |
-| Syscall result | R0 | AX |
-| Registers at entry | R0 = Tos pointer; SP points at argc, argv follows | AX = Tos pointer; SP points at argc; R14 and R15 zeroed |
-| Note handler entry | R0 = Ureg pointer; SP+8 = Ureg, SP+16 = message | BP = Ureg pointer; same stack layout |
+| Item | arm64 (`R_MAGIC`) | amd64 (`S_MAGIC`) | 386 (`I_MAGIC`) |
+| --- | --- | --- | --- |
+| UTZERO (text start) | 0x10000 | 0x200000 | 0x1000 |
+| USTKTOP (stack top) | 0x7FFFF0000 (36-bit user addresses) | 0x7FFFFFFFF000 | 0xDFFFF000 |
+| Stack size | 16 MiB | 16 MiB | 16 MiB |
+| Page size | 4 KiB | 4 KiB | 4 KiB |
+| Data segment alignment | 64 KiB | 2 MiB | 4 KiB |
+| Syscall number | R0 | BP (RARG) | AX, with `INT $64` |
+| Syscall arguments | user stack, from SP+8 | user stack, from SP+8 | user stack, from SP+4, in 4-byte words; a `vlong` takes two |
+| Syscall result | R0 | AX | AX |
+| Registers at entry | R0 = Tos pointer; SP points at argc, argv follows | AX = Tos pointer; SP points at argc; R14 and R15 zeroed | AX = Tos pointer; SP points at argc |
+| Note handler entry | R0 = Ureg pointer; SP+8 = Ureg, SP+16 = message | BP = Ureg pointer; same stack layout | no register; SP+4 = Ureg, SP+8 = message, in 4-byte words |
+
+Pointers, argv, the words of the note frame and the Tos's pointers follow the architecture's word size, so 386's Tos is 56 bytes with `pid` at 48. `noted` on 386 keeps the segment selectors and the flags outside 0xCD5 (IF, IOPL, TF) from the kernel's copy, as 9front's `setregisters` does.
 
 **a.out loading (host side)**
 
-1. Read the Exec header: eight big-endian 32-bit words. Both 64-bit magics set HDR\_MAGIC, so a big-endian 64-bit entry address follows, making the header 40 bytes.
+1. Read the Exec header: eight big-endian 32-bit words. Both 64-bit magics set HDR\_MAGIC, so a big-endian 64-bit entry address follows, making the header 40 bytes; 386's has none, so its entry is the header's 32-bit `entry` word and the header is 32 bytes.
 2. Map file bytes \[0, header + text) read-only at UTZERO. The header is part of the text segment, and the entry point must fall inside it.
 3. Map the next `data` bytes of the file at the end of text, rounded up to the data alignment. bss starts at the end of data rounded up to 4 KiB, and is zero-filled.
 4. The stack may span \[USTKTOP − 16 MiB, USTKTOP), but as in 9front only its top pages are mapped at first; it grows down on faults below it, and at each syscall to cover the arguments. A zeroed Tos sits at the very top. Below it go the argument strings, then the argv array, then argc at SP.
@@ -364,6 +371,7 @@ h9 --version | --check | --help      # tool functions; -h alone is --help
 | Flag | Meaning |
 | --- | --- |
 | `--backend auto\|hvf\|kvm\|whp\|emu` | `auto` (the default) uses the host hypervisor, and otherwise falls back to the emulator with a warning |
+| `--arch arm64\|amd64\|386` | The architecture of the binaries to run, which also picks `/$cputype/bin`. Without it a host program runs as its header says, and a guest one as the host's architecture |
 | `--root DIR` | The root tree. If omitted, use `$H9ROOT`, then the default install location (`.local/9front/root` in development builds until there's an installer) |
 | `--env name=value` (repeatable) | Sets a guest environment variable. The host environment isn't imported. |
 | `--cwd PATH` | The guest cwd. Defaults to `/mnt/term/cwd`, the host cwd bound into the guest |
@@ -389,7 +397,7 @@ h9 --version | --check | --help      # tool functions; -h alone is --help
 | `--version` | Prints the h9 version (`git describe`, or `-Dversion` in releases), the pinned 9front release and drawterm revision, and the backends built in |
 | `--help`, `-h` | Prints the usage to stdout and exits 0 (`-h` only as the only argument) |
 
-**Default guest environment:** `user` is the host user name, `home=/usr/$user`, `path=(. /bin)`, `cputype` and `objtype` come from the backend's architecture, `sysname=h9` and `service=terminal`. Everything else has to be passed with `--env`, which keeps host secrets out of the guest by default.
+**Default guest environment:** `user` is the host user name, `home=/usr/$user`, `path=(. /bin)`, `cputype` and `objtype` come from the machine's architecture (`386` for 386), `sysname=h9` and `service=terminal`. Everything else has to be passed with `--env`, which keeps host secrets out of the guest by default.
 
 **Exit codes**
 
