@@ -28,9 +28,9 @@ authors: [progrium]
 depends: [baseline]
 areas: [kern]
 ---
--- design/9p-roots.md --
+-- design/roots-9p.md --
 ---
-slug: 9p-roots
+slug: roots-9p
 title: 9P roots
 status: draft
 created: 2026-11-03
@@ -43,7 +43,7 @@ test "echo [baseline]" {
 }
 test "ramfs posts to /srv [12]" {
 }
-test "mount a 9P root [9p-roots, 12]" {
+test "mount a 9P root [roots-9p, 12]" {
 }
 test "untagged" {
 }

@@ -122,6 +122,7 @@ fn check(r: Repo, diags: *Diags) !void {
         if (fm.validSlug(p.slug)) {
             const want = p.expectedFile(&buf);
             if (!std.mem.eql(u8, want, p.file)) diags.err("design/{s}: should be named design/{s}", .{ p.file, want });
+            if (p.id == null and std.ascii.isDigit(p.slug[0])) diags.warn("design/{s}: slug `{s}` starts with a digit, so the draft sorts among the filed proposals; start it with a letter", .{ p.file, p.slug });
         }
         for (ps[0..i]) |q| {
             if (p.slug.len > 0 and std.mem.eql(u8, p.slug, q.slug)) diags.err("design/{s}: slug `{s}` is also used by design/{s}", .{ p.file, p.slug, q.file });
@@ -520,6 +521,7 @@ fn newCmd(r: Repo, gpa: std.mem.Allocator, args: []const []const u8) !void {
     }
     const s = slug orelse fail("new: which slug?\n{s}", .{usage});
     if (!fm.validSlug(s)) fail("new: bad slug `{s}`: lowercase words of letters and digits joined by dashes, not all digits", .{s});
+    if (std.ascii.isDigit(s[0])) fail("new: bad slug `{s}`: start it with a letter, so the draft's file sorts after the filed ones", .{s});
     if (r.resolve(s) != null) fail("new: `{s}` is already a proposal", .{s});
     const t = title orelse try titleFromSlug(r.arena, s);
     if (fm.plainScalarProblem(t)) |why| fail("new: the title can't be used as is: {s}, which YAML would read differently", .{why});

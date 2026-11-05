@@ -17,7 +17,7 @@ It isn't needed for bug fixes, workarounds, performance work that doesn't change
 
 ## Writing one
 
-`zig build design -- new <slug>` copies [TEMPLATE.md](TEMPLATE.md) to `design/<slug>.md` with the frontmatter filled in. A slug is lowercase words of letters and digits joined by dashes (`linux-personality`, `9p-roots`), unique, and never changed. Write a line per paragraph.
+`zig build design -- new <slug>` copies [TEMPLATE.md](TEMPLATE.md) to `design/<slug>.md` with the frontmatter filled in. A slug is lowercase words of letters and digits joined by dashes (`linux-personality`, `host-sandbox`), unique, and never changed. Start it with a letter: a draft's file is named by its slug alone, so one starting with a digit sorts among the filed `NNNN-` files instead of after them (`websocket-9p`, not `9p-websocket`). `new` refuses such a slug and `check` warns on an unfiled one; filed proposals that already have one, like `9p-roots`, keep it. Write a line per paragraph.
 
 The sections are Abstract, Background, Proposal, Rationale, Compatibility, Security, Done when, Implementation and Open issues, and, after acceptance, Updates. Rationale should cover the alternatives that were rejected, so the question isn't asked again. Done when names the demo commands and the integration cases that prove the proposal, the way the old milestone demos did.
 
