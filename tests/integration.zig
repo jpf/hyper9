@@ -636,7 +636,7 @@ fn hostFile(s: *Scratch, name: []const u8, buf: []u8) ?[]u8 {
     return s.tmp.dir.readFile(std.testing.io, name, buf) catch null;
 }
 
-test "a new file in an ephemeral cwd is readable and absent on the host afterwards [ephemeral-writes]" {
+test "a new file in an ephemeral cwd is readable and absent on the host afterwards [6]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -648,7 +648,7 @@ test "a new file in an ephemeral cwd is readable and absent on the host afterwar
     try std.testing.expect(!s.exists("f"));
 }
 
-test "writing an existing host file changes it in the guest only [ephemeral-writes]" {
+test "writing an existing host file changes it in the guest only [6]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -661,7 +661,7 @@ test "writing an existing host file changes it in the guest only [ephemeral-writ
     try std.testing.expectEqualStrings("host\n", hostFile(&s, "f", &b).?);
 }
 
-test "removing a host file hides it in the guest only [ephemeral-writes]" {
+test "removing a host file hides it in the guest only [6]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -673,7 +673,7 @@ test "removing a host file hides it in the guest only [ephemeral-writes]" {
     try std.testing.expect(s.exists("f"));
 }
 
-test "rm then recreate, as mk clean && mk does, works [ephemeral-writes]" {
+test "rm then recreate, as mk clean && mk does, works [6]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -687,7 +687,7 @@ test "rm then recreate, as mk clean && mk does, works [ephemeral-writes]" {
     try std.testing.expectEqualStrings("old\n", hostFile(&s, "x.o", &b).?);
 }
 
-test "a file rename moves it in the guest only [ephemeral-writes]" {
+test "a file rename moves it in the guest only [6]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -700,7 +700,7 @@ test "a file rename moves it in the guest only [ephemeral-writes]" {
     try std.testing.expect(!s.exists("b"));
 }
 
-test "renaming a host directory is refused [ephemeral-writes]" {
+test "renaming a host directory is refused [6]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -714,7 +714,7 @@ test "renaming a host directory is refused [ephemeral-writes]" {
     try std.testing.expect(!s.exists("e"));
 }
 
-test "ls of an overlaid directory lists each name once [ephemeral-writes]" {
+test "ls of an overlaid directory lists each name once [6]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -726,7 +726,7 @@ test "ls of an overlaid directory lists each name once [ephemeral-writes]" {
     try std.testing.expectEqualStrings("a\nb\nc\n", r.out);
 }
 
-test "a --writable path inside a read-only cwd is ephemeral [ephemeral-writes]" {
+test "a --writable path inside a read-only cwd is ephemeral [6]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -743,7 +743,7 @@ test "a --writable path inside a read-only cwd is ephemeral [ephemeral-writes]" 
     try std.testing.expect(!s.exists("out/f"));
 }
 
-test "--read-deny still hides a path inside an ephemeral tree [ephemeral-writes]" {
+test "--read-deny still hides a path inside an ephemeral tree [6]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -758,7 +758,7 @@ test "--read-deny still hides a path inside an ephemeral tree [ephemeral-writes]
     try std.testing.expectEqual(1, r.code);
 }
 
-test "the tight profile's cwd is ephemeral under --write=ephemeral [ephemeral-writes]" {
+test "the tight profile's cwd is ephemeral under --write=ephemeral [6]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -770,7 +770,7 @@ test "the tight profile's cwd is ephemeral under --write=ephemeral [ephemeral-wr
     try std.testing.expect(!s.exists("f"));
 }
 
-test "/tmp is private and writable in both profiles [ephemeral-writes]" {
+test "/tmp is private and writable in both profiles [6]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -792,14 +792,14 @@ test "/tmp is private and writable in both profiles [ephemeral-writes]" {
     }
 }
 
-test "/tmp is read-only under --write=none [ephemeral-writes]" {
+test "/tmp is read-only under --write=none [6]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--write=none", "--rc", "echo x > /tmp/f" });
     defer r.deinit();
     try std.testing.expectEqual(1, r.code);
 }
 
-test "filling an overlay fails with file system full and the machine carries on [ephemeral-writes]" {
+test "filling an overlay fails with file system full and the machine carries on [6]" {
     const e = try env(@src());
     // A failed write keeps nothing, so up to one 4 MiB block is free again
     // for rm to run.
@@ -809,7 +809,7 @@ test "filling an overlay fails with file system full and the machine carries on 
     try std.testing.expectEqualStrings("small\n", r.out);
 }
 
-test "creating empty files until memory runs out fails with file system full [ephemeral-writes]" {
+test "creating empty files until memory runs out fails with file system full [6]" {
     const e = try env(@src());
     // rc makes the files itself, without forking, and exits when one
     // fails: no memory is left for another process.
@@ -819,7 +819,7 @@ test "creating empty files until memory runs out fails with file system full [ep
     try std.testing.expect(std.mem.indexOf(u8, r.err, "stopped") != null);
 }
 
-test "renaming a directory marker is refused [ephemeral-writes]" {
+test "renaming a directory marker is refused [6]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -833,7 +833,7 @@ test "renaming a directory marker is refused [ephemeral-writes]" {
     try std.testing.expect(!s.exists("e"));
 }
 
-test "--strict accepts --write=ephemeral, and --print shows the overlays [ephemeral-writes]" {
+test "--strict accepts --write=ephemeral, and --print shows the overlays [6]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -851,7 +851,7 @@ test "--strict accepts --write=ephemeral, and --print shows the overlays [epheme
     try std.testing.expectEqual(0, ok.code);
 }
 
-test "--print output with overlays replays with --ns [ephemeral-writes]" {
+test "--print output with overlays replays with --ns [6]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -870,7 +870,7 @@ test "--print output with overlays replays with --ns [ephemeral-writes]" {
     try std.testing.expect(!s.exists("f"));
 }
 
-test "removing every .c file in a source tree leaves the host unchanged (demo) [ephemeral-writes]" {
+test "removing every .c file in a source tree leaves the host unchanged (demo) [6]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();

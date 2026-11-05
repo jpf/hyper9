@@ -1489,7 +1489,7 @@ fn runOverlay(kind: vmm.BackendKind, r: *OverlayRoot, text: []const u8, pol: h9.
     };
 }
 
-test "two machines in one host process each get their own /tmp [ephemeral-writes]" {
+test "two machines in one host process each get their own /tmp [6]" {
     var ran: usize = 0;
     for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
         var r: OverlayRoot = .{ .tmp = undefined };
@@ -1523,7 +1523,7 @@ test "two machines in one host process each get their own /tmp [ephemeral-writes
     if (ran == 0) return error.SkipZigTest;
 }
 
-test "a copy-up while another process has the lower file open leaves that reader on the old contents [ephemeral-writes]" {
+test "a copy-up while another process has the lower file open leaves that reader on the old contents [6]" {
     var ran: usize = 0;
     for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
         var r: OverlayRoot = .{ .tmp = undefined };
