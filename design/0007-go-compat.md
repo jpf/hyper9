@@ -2,7 +2,7 @@
 id: 7
 slug: go-compat
 title: Go compatibility
-status: draft
+status: accepted
 created: 2026-11-03
 authors: [progrium]
 depends: [3]
@@ -10,6 +10,8 @@ areas: [kern, tests]
 ---
 
 # Proposal: Go compatibility
+
+Nov 5, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
 
 ## Abstract
 
