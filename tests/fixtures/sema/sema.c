@@ -256,7 +256,7 @@ badaddr(void)
 {
 	notify(catch);
 	print("odd %d '%r'\n", semacquire((long*)((uchar*)&sem + 2), 0));
-	print("text %d '%r'\n", semacquire((long*)main, 0));
+	print("text %d '%r'\n", semacquire((long*)msec, 0));
 	sem = -1;
 	print("negative %d '%r'\n", semacquire(&sem, 0));
 	print("negative %d '%r'\n", tsemacquire(&sem, 0));
