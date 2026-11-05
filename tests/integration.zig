@@ -18,7 +18,8 @@
 //! proposal's cases, and `zig build design -- check` checks the tags.
 //!
 //! Interactive cases run h9 on a terminal from tests/term.zig. Their
-//! timeouts are multiplied by H9_TEST_SLOW (default 1), for emulated VMs.
+//! timeouts, and the --timeout of cases that depend on how fast the guest
+//! runs, are multiplied by H9_TEST_SLOW (default 1), for emulated VMs.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -80,6 +81,11 @@ fn skipPending(name: []const u8) !void {
 fn slow(ms: u32) u32 {
     const f = std.fmt.parseInt(u32, getenv(3, "H9_TEST_SLOW") orelse "1", 10) catch 1;
     return ms *| @max(f, 1);
+}
+
+/// A --timeout value of `ms` scaled by H9_TEST_SLOW, formatted into `buf`.
+fn slowTimeout(buf: []u8, ms: u32) []const u8 {
+    return std.fmt.bufPrint(buf, "{d}ms", .{slow(ms)}) catch unreachable;
 }
 
 var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -565,8 +571,9 @@ test "concurrent processes contending for one environment don't hang" {
         \\wait
         \\echo done
     ;
+    var tb: [16]u8 = undefined;
     for (0..3) |_| {
-        const r = try run(e, &.{ "--timeout", "15s", "--rc", script });
+        const r = try run(e, &.{ "--timeout", slowTimeout(&tb, 15_000), "--rc", script });
         defer r.deinit();
         try std.testing.expectEqualStrings("done\n", r.out);
         try std.testing.expectEqual(0, r.code);
@@ -803,7 +810,19 @@ test "a note handler catches a note and the process continues [baseline]" {
 
 test "an unhandled note kills the process with the note as its status [baseline]" {
     const e = try env(@src());
-    const r = try run(e, &.{ "--timeout", "20s", "--rc", "sleep 1000 & echo die >/proc/$apid/note; wait $apid; echo $status" });
+    // An inner rc waits for sleep and nothing else: rc drops the wait record
+    // of a background child that exits while it waits for a foreground one
+    // (echo, here). The note goes out once sleep has exec'd, as before that
+    // the child is still rc, which would catch it.
+    const script =
+        \\rc -c 'sleep 1000 & wait $apid; echo $status' &
+        \\w=$apid
+        \\p=()
+        \\while(~ $#p 0) p=`{awk 'FNR==1 && $1=="sleep" {split(FILENAME, a, "/"); print a[3]}' /proc/*/status >[2]/dev/null}
+        \\echo die >/proc/$p/note
+        \\wait $w
+    ;
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", script });
     defer r.deinit();
     try std.testing.expect(std.mem.indexOf(u8, r.out, "die") != null);
     try std.testing.expectEqual(0, r.code);
@@ -811,7 +830,10 @@ test "an unhandled note kills the process with the note as its status [baseline]
 
 test "--timeout posts hangup before tearing down [baseline]" {
     const e = try env(@src());
-    const r = try run(e, &.{ "--timeout", "300ms", "--rc", "fn sighup { echo got hangup }; sleep 10; echo after" });
+    // rc must define sighup before the timeout, which takes a few guest
+    // process starts on a slow host.
+    var tb: [16]u8 = undefined;
+    const r = try run(e, &.{ "--timeout", slowTimeout(&tb, 300), "--rc", "fn sighup { echo got hangup }; sleep 10; echo after" });
     defer r.deinit();
     // rc execs a last simple command in place, dropping its handler, so
     // sleep isn't last here.
