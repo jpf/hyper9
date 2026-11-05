@@ -620,6 +620,268 @@ test "--ns replays a namespace file [baseline]" {
     try std.testing.expectEqual(0, r.code);
 }
 
+// Ephemeral writes and a private /tmp (design/0006-ephemeral-writes.md).
+
+/// `h9 --cwd <s> --write=ephemeral args...`.
+fn runEph(e: Env, s: *Scratch, args: []const []const u8) !Result {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ "--cwd", s.path, "--write=ephemeral" });
+    try argv.appendSlice(gpa, args);
+    return run(e, argv.items);
+}
+
+/// The contents of `name` in the scratch dir, or null if it's not there.
+fn hostFile(s: *Scratch, name: []const u8, buf: []u8) ?[]u8 {
+    return s.tmp.dir.readFile(std.testing.io, name, buf) catch null;
+}
+
+test "a new file in an ephemeral cwd is readable and absent on the host afterwards [ephemeral-writes]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const r = try runEph(e, &s, &.{ "--rc", "echo hi > f && cat f" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("hi\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(!s.exists("f"));
+}
+
+test "writing an existing host file changes it in the guest only [ephemeral-writes]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f", .data = "host\n" });
+    const r = try runEph(e, &s, &.{ "--rc", "echo guest > f && echo more >> f && cat f" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("guest\nmore\n", r.out);
+    var b: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("host\n", hostFile(&s, "f", &b).?);
+}
+
+test "removing a host file hides it in the guest only [ephemeral-writes]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f", .data = "host\n" });
+    const r = try runEph(e, &s, &.{ "--rc", "rm f; if(test -e f) echo there; if not echo gone; ls" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("gone\n", r.out);
+    try std.testing.expect(s.exists("f"));
+}
+
+test "rm then recreate, as mk clean && mk does, works [ephemeral-writes]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.o", .data = "old\n" });
+    const r = try runEph(e, &s, &.{ "--rc", "rm -f *.o && echo new > x.o && cat x.o" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("new\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+    var b: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("old\n", hostFile(&s, "x.o", &b).?);
+}
+
+test "a file rename moves it in the guest only [ephemeral-writes]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = "a\n" });
+    const r = try runEph(e, &s, &.{ "--rc", "mv a b && cat b && ls" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("a\nb\n", r.out);
+    try std.testing.expect(s.exists("a"));
+    try std.testing.expect(!s.exists("b"));
+}
+
+test "renaming a host directory is refused [ephemeral-writes]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.createDirPath(std.testing.io, "d");
+    const r = try runEph(e, &s, &.{ "--rc", "mv d e" });
+    defer r.deinit();
+    try std.testing.expectEqual(1, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "permission denied") != null);
+    try std.testing.expect(s.exists("d"));
+    try std.testing.expect(!s.exists("e"));
+}
+
+test "ls of an overlaid directory lists each name once [ephemeral-writes]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = "a\n" });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b", .data = "b\n" });
+    const r = try runEph(e, &s, &.{ "--rc", "echo x > a; echo y > c; rm b; echo z > b; ls" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("a\nb\nc\n", r.out);
+}
+
+test "a --writable path inside a read-only cwd is ephemeral [ephemeral-writes]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.createDirPath(std.testing.io, "out");
+    var p: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const out = try std.fmt.bufPrint(&p, "{s}/out", .{s.path});
+    const plan = try run(e, &.{ "--cwd", s.path, "--profile=tight", "--write=ephemeral", "--writable", out, "--print", "echo" });
+    defer plan.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, plan.out, "bind -c '#O' /mnt/term/cwd/out") != null);
+    const r = try run(e, &.{ "--cwd", s.path, "--profile=tight", "--write=ephemeral", "--writable", out, "--rc", "touch out/f && ls out" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("out/f\n", r.out);
+    try std.testing.expect(!s.exists("out/f"));
+}
+
+test "--read-deny still hides a path inside an ephemeral tree [ephemeral-writes]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".env", .data = "secret\n" });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ok", .data = "ok\n" });
+    var p: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const deny = try std.fmt.bufPrint(&p, "{s}/.env", .{s.path});
+    const r = try runEph(e, &s, &.{ "--read-deny", deny, "--rc", "echo new > n; ls; cat .env" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("n\nok\n", r.out);
+    try std.testing.expectEqual(1, r.code);
+}
+
+test "the tight profile's cwd is ephemeral under --write=ephemeral [ephemeral-writes]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const r = try runEph(e, &s, &.{ "--profile=tight", "--rc", "echo x > f && cat f" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("x\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(!s.exists("f"));
+}
+
+test "/tmp is private and writable in both profiles [ephemeral-writes]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    for ([_][]const u8{ "--profile=default", "--profile=tight" }) |prof| {
+        const r = try run(e, &.{ "--cwd", s.path, prof, "--rc", "echo hi > /tmp/h9-ephemeral-test && cat /tmp/h9-ephemeral-test" });
+        defer r.deinit();
+        try std.testing.expectEqualStrings("hi\n", r.out);
+        try std.testing.expectEqual(0, r.code);
+    }
+    // Not in the host's temp dir.
+    for ([_][]const u8{ "/tmp/h9-ephemeral-test", "/private/tmp/h9-ephemeral-test" }) |h| {
+        if (std.Io.Dir.cwd().access(std.testing.io, h, .{})) |_| return error.HostTmpWritten else |_| {}
+    }
+    if (getenv(3, "TMPDIR")) |td| {
+        var p: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const h = try std.fmt.bufPrint(&p, "{s}/h9-ephemeral-test", .{std.mem.trimEnd(u8, td, "/")});
+        if (std.Io.Dir.cwd().access(std.testing.io, h, .{})) |_| return error.HostTmpWritten else |_| {}
+    }
+}
+
+test "/tmp is read-only under --write=none [ephemeral-writes]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--write=none", "--rc", "echo x > /tmp/f" });
+    defer r.deinit();
+    try std.testing.expectEqual(1, r.code);
+}
+
+test "filling an overlay fails with file system full and the machine carries on [ephemeral-writes]" {
+    const e = try env(@src());
+    // A failed write keeps nothing, so up to one 4 MiB block is free again
+    // for rm to run.
+    const r = try run(e, &.{ "--memory", "32m", "--rc", "dd -if /dev/zero -of /tmp/big -bs 4194304 -count 16; rm /tmp/big; echo small > /tmp/s && cat /tmp/s" });
+    defer r.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "file system full") != null);
+    try std.testing.expectEqualStrings("small\n", r.out);
+}
+
+test "creating empty files until memory runs out fails with file system full [ephemeral-writes]" {
+    const e = try env(@src());
+    // rc makes the files itself, without forking, and exits when one
+    // fails: no memory is left for another process.
+    const r = try run(e, &.{ "--memory", "32m", "--rc", "for(i in `{seq 150000}) if(! >/tmp/e$i) exit stopped; exit never" });
+    defer r.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "file system full") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "stopped") != null);
+}
+
+test "renaming a directory marker is refused [ephemeral-writes]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.createDirPath(std.testing.io, "d");
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "d/x", .data = "x\n" });
+    const r = try runEph(e, &s, &.{ "--rc", "echo y > d/x && mv d e" });
+    defer r.deinit();
+    try std.testing.expectEqual(1, r.code);
+    try std.testing.expect(s.exists("d/x"));
+    try std.testing.expect(!s.exists("e"));
+}
+
+test "--strict accepts --write=ephemeral, and --print shows the overlays [ephemeral-writes]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const r = try runEph(e, &s, &.{ "--strict", "--print", "echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "fs.write.ephemeral") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "unenforced") == null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "  bind -c '#O' /mnt/term/cwd ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "  bind -c '#O' /tmp ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "  eph  ") != null);
+    const ok = try runEph(e, &s, &.{ "--strict", "echo", "ok" });
+    defer ok.deinit();
+    try std.testing.expectEqual(0, ok.code);
+}
+
+test "--print output with overlays replays with --ns [ephemeral-writes]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const p = try runEph(e, &s, &.{ "--print", "echo" });
+    defer p.deinit();
+    // The namespace section, as a file the guest reads from its cwd.
+    const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
+    const end = std.mem.indexOfPos(u8, p.out, start, "access:\n") orelse p.out.len;
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start..end] });
+    // Under --write=none the replay's overlays make the cwd and /tmp writable.
+    const r = try run(e, &.{ "--cwd", s.path, "--write=none", "--ns", "ns", "--rc", "echo x > f && echo y > /tmp/g && cat f /tmp/g" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("x\ny\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(!s.exists("f"));
+}
+
+test "removing every .c file in a source tree leaves the host unchanged (demo) [ephemeral-writes]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    for ([_][]const u8{ "cat.c", "ls.c", "mkfile" }) |name| try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = name });
+    const r = try runEph(e, &s, &.{ "--rc", "rm -f *.c && echo gone > x && ls" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("mkfile\nx\n", r.out);
+    try std.testing.expect(s.exists("cat.c") and s.exists("ls.c") and !s.exists("x"));
+}
+
 // The terminal. These run h9 on a pty or pseudoconsole from tests/term.zig.
 
 /// Enter, as a terminal sends it: cooked mode turns it into a newline on

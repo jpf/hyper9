@@ -17,7 +17,8 @@ pub const WriteMode = enum {
     none,
     /// Persist writes to the writable paths only.
     scope,
-    /// Discard all writes on exit (design/0006-ephemeral-writes.md; not enforced yet).
+    /// Writable paths are copy-on-write overlays in memory, discarded at
+    /// exit (design/0006-ephemeral-writes.md).
     ephemeral,
     /// Copy-on-write over the root (design/0011-overlay.md; not enforced yet).
     overlay,
@@ -64,17 +65,18 @@ pub const Policy = struct {
     host_fs: bool = false,
     /// Leave devcmd (`#C`) unmasked.
     host_cmd: bool = false,
-    /// The host temp dir, bound at /tmp (a private ramfs is proposed in
-    /// design/0006-ephemeral-writes.md).
-    tmp: ?[]const u8 = null,
 };
 
-pub const Access = enum { ro, rw };
+/// How a bound host tree can be changed: not at all, on the host, or in
+/// an overlay in memory (`eph`), which never writes the host.
+pub const Access = enum { ro, rw, eph };
 
 /// An allow or deny rule on a host path and everything beneath it.
+/// `allow_eph` is a tree under an overlay: read-only to devfs, since the
+/// overlay never writes its lower tree.
 pub const Rule = struct {
     path: []const u8,
-    kind: enum { allow_ro, allow_rw, deny },
+    kind: enum { allow_ro, allow_rw, allow_eph, deny },
 };
 
 /// One bind in the namespace, in the order the builder runs them.
@@ -91,6 +93,11 @@ pub const Bind = struct {
     optional: bool = false,
     /// Tried in turn if `to` fails (older root trees).
     fallback: ?[]const u8 = null,
+    /// A fresh `#O` overlay instance over `lower` (a host path, through
+    /// `#U`), bound over `to`; `from` is `#O`. Printed as `bind -c '#O'`
+    /// with the host path in a comment; in a namespace file a bare `#O`
+    /// overlays whatever `to` is at that point (src/newns.zig).
+    lower: ?[]const u8 = null,
 
     pub const Flag = enum { repl, before, after };
 };
@@ -116,7 +123,7 @@ pub const Capability = enum {
     /// Whether this build can enforce it.
     pub fn enforceable(c: Capability) bool {
         return switch (c) {
-            .@"fs.write.ephemeral", .@"fs.write.overlay" => false,
+            .@"fs.write.overlay" => false,
             else => true,
         };
     }
@@ -228,6 +235,7 @@ pub const Plan = struct {
                 try w.splatByteAll(' ', pad + 1);
                 try w.print("{t}", .{a});
             }
+            if (b.lower) |l| try w.print("  # {s}", .{l});
             try w.writeAll("\n");
         }
         if (p.rules.len > 0) {
@@ -235,6 +243,7 @@ pub const Plan = struct {
             for (p.rules) |r| try w.print("  {s} {s}\n", .{ switch (r.kind) {
                 .allow_ro => "ro  ",
                 .allow_rw => "rw  ",
+                .allow_eph => "eph ",
                 .deny => "deny",
             }, r.path });
         }
@@ -264,10 +273,6 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     // Unenforceable modes fall back to the safer choice: writes are denied
     // rather than persisted.
     const write: WriteMode = switch (write_req) {
-        .ephemeral => blk: {
-            unenforced.insert(.@"fs.write.ephemeral");
-            break :blk .none;
-        },
         .overlay => blk: {
             unenforced.insert(.@"fs.write.overlay");
             break :blk .none;
@@ -299,22 +304,32 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         break :blk nt;
     } else null;
 
-    const can_write = write == .scope;
-    const cwd_rw = can_write and (pol.cwd_writable orelse !tight);
-    const tmp_rw = can_write and !tight;
+    // Under ephemeral, every path scope would make writable is an overlay
+    // instead. The tight profile's cwd is too: it's read-only under scope
+    // to keep the host's files safe, and an overlay never writes them.
+    const eph = write == .ephemeral;
+    const can_write = write == .scope or eph;
+    const cwd_rw = can_write and (pol.cwd_writable orelse (!tight or eph));
 
     var rules: std.ArrayList(Rule) = .empty;
     var binds: std.ArrayList(Bind) = .empty;
     var caveats: std.ArrayList([]const u8) = .empty;
 
     const acc = struct {
-        fn of(rw: bool) Access {
-            return if (rw) .rw else .ro;
+        eph: bool,
+        fn of(a: @This(), rw: bool) Access {
+            return if (!rw) .ro else if (a.eph) .eph else .rw;
         }
-        fn rule(rw: bool) @TypeOf(@as(Rule, undefined).kind) {
-            return if (rw) .allow_rw else .allow_ro;
+        fn rule(a: @This(), rw: bool) @TypeOf(@as(Rule, undefined).kind) {
+            return if (!rw) .allow_ro else if (a.eph) .allow_eph else .allow_rw;
         }
-    };
+        /// The bind of host path `p` at `to`: from `#U`, or an overlay over
+        /// it when writable under ephemeral.
+        fn bind(a: @This(), arena_: std.mem.Allocator, p: []const u8, to: []const u8, rw: bool) std.mem.Allocator.Error!Bind {
+            if (rw and a.eph) return .{ .from = "#O", .to = to, .create = true, .access = .eph, .lower = p };
+            return .{ .from = try std.fmt.allocPrint(arena_, "#U{s}", .{p}), .to = to, .create = rw, .access = a.of(rw) };
+        }
+    }{ .eph = eph };
 
     // Writable paths inside the root make the root's top a creatable mount.
     var root_rw = false;
@@ -323,12 +338,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             root_rw = can_write;
         };
         try rules.append(arena, .{ .path = root, .kind = acc.rule(root_rw) });
-        try binds.append(arena, .{
-            .from = try std.fmt.allocPrint(arena, "#U{s}", .{root}),
-            .to = "/",
-            .create = root_rw,
-            .access = acc.of(root_rw),
-        });
+        try binds.append(arena, try acc.bind(arena, root, "/", root_rw));
     }
 
     try binds.append(arena, .{ .from = "#c", .to = "/dev", .optional = true });
@@ -342,15 +352,15 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         try binds.append(arena, .{ .from = "/rc/bin", .to = "/bin", .flag = .after, .optional = true });
     }
 
-    // The host temp dir (design/0006-ephemeral-writes.md proposes a ramfs); the tight profile leaves the
-    // root's read-only /tmp instead.
-    if (in.root != null and tmp_rw) if (pol.tmp) |tmp| {
-        try rules.append(arena, .{ .path = tmp, .kind = .allow_rw });
+    // A private /tmp in memory, over the root tree's own empty /tmp, in
+    // both profiles. --write=none leaves the root's read-only /tmp.
+    if (in.root) |root| if (write != .none) {
         try binds.append(arena, .{
-            .from = try std.fmt.allocPrint(arena, "#U{s}", .{tmp}),
+            .from = "#O",
             .to = "/tmp",
             .create = true,
-            .access = .rw,
+            .access = .eph,
+            .lower = try std.fmt.allocPrint(arena, "{s}{s}tmp", .{ root, if (std.mem.endsWith(u8, root, "/")) "" else "/" }),
             .optional = true,
         });
     };
@@ -373,13 +383,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     if (in.cwd) |cwd| {
         try rules.append(arena, .{ .path = cwd, .kind = acc.rule(cwd_rw) });
         if (in.root != null) {
-            try binds.append(arena, .{
-                .from = try std.fmt.allocPrint(arena, "#U{s}", .{cwd}),
-                .to = "/mnt/term/cwd",
-                .fallback = "/mnt/term",
-                .create = cwd_rw,
-                .access = acc.of(cwd_rw),
-            });
+            var b = try acc.bind(arena, cwd, "/mnt/term/cwd", cwd_rw);
+            b.fallback = "/mnt/term";
+            try binds.append(arena, b);
             guest_cwd = "/mnt/term/cwd";
         }
     }
@@ -394,12 +400,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             .cwd => |rel| try std.fmt.allocPrint(arena, "/mnt/term/cwd/{s}", .{rel}),
             .mnt_term => try std.fmt.allocPrint(arena, "/mnt/term{s}", .{p}),
         };
-        try binds.append(arena, .{
-            .from = try std.fmt.allocPrint(arena, "#U{s}", .{p}),
-            .to = to,
-            .create = rw,
-            .access = acc.of(rw),
-        });
+        try binds.append(arena, try acc.bind(arena, p, to, rw));
     };
 
     for (pol.read_deny) |p| try rules.append(arena, .{ .path = p, .kind = .deny });
@@ -412,6 +413,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     var enforces: CapSet = .initMany(&.{ .@"env.scrub", .@"ipc.restrict", .@"kernel.isolation", .@"fs.write.scope" });
     if (!pol.host_fs) enforces.insert(.@"fs.read.scope");
     if (pol.read_deny.len > 0) enforces.insert(.@"fs.read.deny");
+    if (eph) enforces.insert(.@"fs.write.ephemeral");
     if (net == .disable) enforces.insert(.@"net.disable");
     if (net == .outbound) enforces.insert(.@"net.outbound");
     if (net_allow.len > 0) enforces.insert(.@"net.allow");
@@ -421,10 +423,19 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     const timeout = pol.timeout_ns orelse (if (tight) tight_timeout_ns else null);
     if (timeout != null) enforces.insert(.@"proc.timeout");
 
+    // Overlaid paths never reach the host, so the hardlink and res.disk
+    // caveats are only for paths writable on the host.
     var any_rw = false;
-    for (rules.items) |r| if (r.kind == .allow_rw) {
-        any_rw = true;
+    var any_eph = false;
+    for (rules.items) |r| switch (r.kind) {
+        .allow_rw => any_rw = true,
+        .allow_eph => any_eph = true,
+        else => {},
     };
+    if (any_eph) {
+        try caveats.append(arena, "ephemeral files count against --memory and are lost when the machine ends");
+        try caveats.append(arena, "a file opened for writing is copied into memory whole the first time");
+    }
     if (any_rw) {
         try caveats.append(arena, "hardlinks under writable paths can modify host files outside them");
         try caveats.append(arena, "writes to writable paths are not capped (no res.disk)");
@@ -517,7 +528,7 @@ pub fn checkRules(rules: []const Rule, path: []const u8, op: Op) Verdict {
     }
     const mutates = op == .write or op == .create or op == .remove or op == .rename;
     if (op == .rename and beneath) return if (best == null and !ancestor) .hidden else .read_only;
-    if (best) |r| return if (mutates and r.kind == .allow_ro) .read_only else .allow;
+    if (best) |r| return if (mutates and r.kind != .allow_rw) .read_only else .allow;
     if (ancestor) return if (mutates) .read_only else .allow;
     return .hidden;
 }
@@ -1143,4 +1154,69 @@ test "net: --print shows patterns and caveats" {
     try t.expect(std.mem.indexOf(u8, s, "net-allow:\n  tcp!*.example.com!443\n  udp!10.0.0.53!53\nnamespace:") != null);
     try t.expect(std.mem.indexOf(u8, s, "name patterns trust the host's resolver") != null);
     try t.expect(std.mem.indexOf(u8, s, "not restricted beyond") == null);
+}
+
+test "compile: a private /tmp, and --write=ephemeral overlays the writable paths" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var msg: []const u8 = "";
+    const in: Inputs = .{ .root = "/r", .cwd = "/w", .arch = .arm64 };
+
+    const Find = struct {
+        fn bind(p: Plan, to: []const u8) ?Bind {
+            for (p.binds) |b| if (std.mem.eql(u8, b.to, to)) return b;
+            return null;
+        }
+    };
+
+    // /tmp is an overlay over the root's /tmp in both profiles, and the
+    // host temp dir isn't bound.
+    for ([_]Profile{ .default, .tight }) |prof| {
+        const p = try compile(arena.allocator(), in, .{ .profile = prof }, &msg);
+        const tmp = Find.bind(p, "/tmp").?;
+        try t.expectEqualStrings("#O", tmp.from);
+        try t.expectEqualStrings("/r/tmp", tmp.lower.?);
+        try t.expect(tmp.create);
+        try t.expectEqual(Access.eph, tmp.access.?);
+        try t.expect(!p.enforces.contains(.@"fs.write.ephemeral"));
+    }
+    const none = try compile(arena.allocator(), in, .{ .write = .none }, &msg);
+    try t.expectEqual(@as(?Bind, null), Find.bind(none, "/tmp"));
+
+    // Ephemeral: the cwd and writable paths are overlays, read-only to devfs.
+    const e = try compile(arena.allocator(), in, .{ .write = .ephemeral, .writable = &.{"/w/out"} }, &msg);
+    try t.expect(e.enforces.contains(.@"fs.write.ephemeral"));
+    try t.expect(e.unenforced.count() == 0);
+    try t.expectEqual(WriteMode.ephemeral, e.write);
+    const cwd = Find.bind(e, "/mnt/term/cwd").?;
+    try t.expectEqualStrings("#O", cwd.from);
+    try t.expectEqualStrings("/w", cwd.lower.?);
+    try t.expectEqualStrings("/mnt/term", cwd.fallback.?);
+    try t.expectEqualStrings("/w/out", Find.bind(e, "/mnt/term/cwd/out").?.lower.?);
+    try t.expectEqual(Verdict.read_only, e.check("/w/f", .create));
+    try t.expectEqual(Verdict.read_only, e.check("/w/out/f", .write));
+    try t.expectEqual(Verdict.allow, e.check("/w/out/f", .read));
+    // The root stays read-only and isn't an overlay.
+    try t.expectEqualStrings("#U/r", Find.bind(e, "/").?.from);
+    for (e.caveats) |c| try t.expect(std.mem.indexOf(u8, c, "hardlinks") == null);
+
+    // The tight profile's cwd is an overlay too.
+    const te = try compile(arena.allocator(), in, .{ .profile = .tight, .write = .ephemeral }, &msg);
+    try t.expectEqualStrings("#O", Find.bind(te, "/mnt/term/cwd").?.from);
+
+    // A writable root is an overlay.
+    const re = try compile(arena.allocator(), in, .{ .write = .ephemeral, .writable = &.{"/r"} }, &msg);
+    try t.expectEqualStrings("#O", Find.bind(re, "/").?.from);
+
+    var out: std.Io.Writer.Allocating = .init(t.allocator);
+    defer out.deinit();
+    try e.print(&out.writer);
+    const text = out.written();
+    try t.expect(std.mem.indexOf(u8, text, "enforces: env.scrub fs.read.scope fs.write.ephemeral fs.write.scope") != null);
+    try t.expect(std.mem.indexOf(u8, text, "limits:   write=ephemeral") != null);
+    try t.expect(std.mem.indexOf(u8, text, "  bind -c '#O' /mnt/term/cwd") != null);
+    try t.expect(std.mem.indexOf(u8, text, " eph  # /w\n") != null);
+    try t.expect(std.mem.indexOf(u8, text, " eph  # /r/tmp\n") != null);
+    try t.expect(std.mem.indexOf(u8, text, "  eph  /w\n") != null);
+    try t.expect(std.mem.indexOf(u8, text, "ephemeral files count against --memory") != null);
 }

@@ -211,6 +211,7 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 | `tsleep` (`src/kern/tsleep.c`) | drawterm's `sleep` has no timeout. `tsleep` has 9front's contract and uses only drawterm's public `sleep` and `wakeup`: it puts a timer on its own stack into a list sorted by host monotonic time, and the timer kproc wakes it at the deadline. The list is guarded by a host lock (`glue.c`, `glue-win32.c`) that the kproc holds while it calls `wakeup`, and `tsleep` always takes its timer out under that lock before returning, so no Proc fields are needed and `kern/dat.h` stays unmodified. |
 | Semaphores and `rendezvous` (`src/kern/sema.c`) | drawterm has no semaphores. 9front's code is ported closely, with the wait lists in 64 hashed buckets keyed by the host address of the semaphore word rather than in the segment, since h9's segments are Zig objects; the word is changed with host atomics. `src/syscall.zig` checks the address first (aligned, mapped, in a writable segment), and the pages it names never move while it's shared. `rendezvous` is 9front's on drawterm's Rgrp, so `procinterrupt` still pulls a process out of it, but it also checks for a note that arrived before the process was on the list. |
 | Sandbox hooks (`src/kern/fscheck.c`, `src/kern/netcheck.c`) | The C side of the policy checks devfs and devip call; see Sandbox policy, "Vendor hooks" |
+| Overlay device `#O` (`src/kern/devoverlay.c`) | Copy-on-write trees in memory over a lower directory, for `--write=ephemeral` and the private `/tmp` (see Sandbox policy). A union `bind -c` of a ramfs can't keep writes off the host, since a union sends every operation on an existing name to the member that has it. |
 
 **Zig/C seam rules**
 
@@ -229,7 +230,7 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 **Boot sequence**
 
 1. The kernel boots once per host process, on its own thread (see Process model).
-2. For each machine, the namespace builder gives the first Proc a fresh Pgrp. It binds the root at `/`, the cwd and other allowed host paths from `#U`, and `#c`, `#p`, `#d`, `#e` and (unless the network is off) `#I` to their usual places. It binds the machine's console over `/dev/cons` and opens fds 0–2 on it. Then it sets the device mask: `#U` and `#C` always (unless `--host-fs` or `--host-cmd`), and `#I` when the network is off. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
+2. For each machine, the namespace builder gives the first Proc a fresh Pgrp. It binds the root at `/`, the cwd and other allowed host paths from `#U` (or `#O` overlays over them under `--write=ephemeral`), a `#O` overlay over the root tree's `/tmp`, and `#c`, `#p`, `#d`, `#e` and (unless the network is off) `#I` to their usual places. It binds the machine's console over `/dev/cons` and opens fds 0–2 on it. Then it sets the device mask: `#U` and `#C` always (unless `--host-fs` or `--host-cmd`), and `#I` when the network is off. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
 3. If the binary is given as a host path, it's loaded straight from the host. Otherwise it's looked up through the kernel along `$path`, so lookup works the same over 9P roots.
 4. The CLI runs the binary directly with the given argv. `--rc` runs `/bin/rc -c` on the argument instead, and `--ns file` runs `newns` with that file first.
 
@@ -251,6 +252,7 @@ Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths
 | `kernel.isolation` | Guest syscalls are served by drawterm's kernel |
 | `ipc.restrict` | Host sockets are reachable only through `#U`, `#I` or `#C`, which the policy controls |
 | `fs.read.scope`, `fs.write.scope` | The namespace is an allowlist: only listed host paths are bound from `#U`, each read-only or read-write |
+| `fs.write.ephemeral` | Each path `scope` would make writable is a copy-on-write `#O` overlay over its `#U` tree instead; changes live in memory and vanish at exit |
 | `fs.read.deny` | Unbound paths don't exist; denied paths inside a bound tree are filtered in devfs |
 | `net.disable` | `#I` is masked in the init Pgrp (drawterm's `devmasked`), so the guest can't re-attach it |
 | `net.outbound` | devip refuses `announce`, TCP and UDP, so the guest can dial out but not serve |
@@ -263,7 +265,7 @@ Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths
 
 **Network rules.** Under `--net=outbound` (the default profile's setting) `announce` is refused; `--net=enable` allows it. Without `--net-allow`, a `connect` to link-local addresses (169.254.0.0/16, fe80::/10) is refused in both modes, which keeps the common cloud metadata endpoint out of reach, and everything else is allowed. With patterns, the patterns are the whole policy: a `connect` must match one, by protocol (`tcp`, `udp`, or `net`/`*`), address (an address, a CIDR range or `*`) and port (a number, a range or `*`). IPv4 is matched as IPv4, however devip spelled it. A name pattern (`api.example.com`, or `*.example.com` for one or more labels) can't be checked at `connect`, whose message is numeric, so `cs` resolves only names a pattern covers and records what each returned in the machine's resolved-name table (the 1024 most recent entries). A later `connect` to a recorded address is allowed if its name matches a name pattern with that protocol and port. `--net-allow` with `--net=disable`, or a bad pattern, is exit 2.
 
-**Access rules.** The plan's rules are the root, the cwd, `/tmp`, each `--readable` and `--writable` path and each `--read-deny` path, all as resolved host paths. A deny rule covering a path wins. Otherwise the longest allow rule covering the path decides between read-only and read-write. Ancestors of allowed paths can be walked and listed but not changed, so `/mnt/term/<path>` works when the host's `/` is unioned after the tree's `/mnt/term`. Anything else is hidden. Bind-level read-only (no `MCREATE`) is a second, coarser check.
+**Access rules.** The plan's rules are the root, the cwd, each `--readable` and `--writable` path and each `--read-deny` path, all as resolved host paths. Overlaid paths (`eph`) are read-only rules, since the overlay never writes its lower tree. A deny rule covering a path wins. Otherwise the longest allow rule covering the path decides between read-only and read-write. Ancestors of allowed paths can be walked and listed but not changed, so `/mnt/term/<path>` works when the host's `/` is unioned after the tree's `/mnt/term`. Anything else is hidden. Bind-level read-only (no `MCREATE`) is a second, coarser check.
 
 **Path resolution.** devfs-posix follows symlinks with `stat`, so a symlink inside a bound tree can point anywhere on the host. Every devfs path is resolved (`realpath`; on Windows the final path of an opened handle, which follows symlinks and junctions and refuses UNC and device paths) and the resolved path is checked against the access rules, on every host. Create, remove and rename act on the name rather than a link's target, so an existing entry is checked by its own canonical name without following it. On macOS that's `F_GETPATH` on an `O_SYMLINK` open, and on Windows the final path of a reparse-point open, so another case, an 8.3 short name or a trailing dot can't dodge a rule on a case-insensitive file system. A new name is appended to its resolved parent. A create over an existing symlink also checks the link's target for writing. Renaming a directory that has any rule strictly beneath it is refused ("permission denied"), because it would move those paths out from under their rules. The check and the host call aren't atomic, so a host process renaming paths at the same time can race it; the plan reports that, and hardlinks under writable paths, as caveats.
 
@@ -274,7 +276,7 @@ Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths
 | Root tree (`/`) | Read-only. Installing into the root needs `--writable "$H9ROOT"`. |
 | Host cwd (`/mnt/term/cwd`) | Read-write |
 | Rest of the host filesystem | Not visible |
-| `/tmp` | The host temp dir |
+| `/tmp` | Private and writable, in memory (an overlay over the root tree's empty `/tmp`); read-only under `--write=none` |
 | Network | Outbound: clients can connect anywhere except link-local, servers can't announce |
 | Host commands (`#C`) | Masked |
 | Environment | Only the default guest variables plus `--env` |
@@ -282,7 +284,7 @@ Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths
 | Processes, CPU, timeout | Unlimited, so interactive sessions and long builds aren't cut off |
 | Terminal | `cons` and `consctl` only; no host ioctls such as `TIOCSTI` |
 
-`--profile=tight` differs in four ways: the cwd is read-only, `#I` is masked, `/tmp` isn't writable, and a default timeout of 10 minutes applies. `--sandbox DIR` is the tight profile with only DIR bound, read-write, as the cwd; the host cwd isn't bound.
+`--profile=tight` differs in three ways: the cwd is read-only (an overlay under `--write=ephemeral`), `#I` is masked, and a default timeout of 10 minutes applies. Its `/tmp` is private and writable, as in the default profile. `--sandbox DIR` is the tight profile with only DIR bound, read-write, as the cwd; the host cwd isn't bound.
 
 **Plan output.** `--print` compiles the policy and exits without running. The namespace is printed in `newns` format, so it can be saved and replayed with `--ns`:
 
@@ -301,6 +303,7 @@ namespace:
   bind '#p' /proc
   bind '/arm64/bin' /bin
   bind -a '/rc/bin' /bin
+  bind -c '#O' /tmp                                       eph  # /Users/me/h9root/tmp
   bind '#U/Users/me/src/proj' /mnt/term/cwd                ro
   bind -c '#U/Users/me/src/proj/out' /mnt/term/cwd/out     rw
 access:
@@ -315,7 +318,9 @@ caveats:
   - the h9 process itself is not host-sandboxed
 ```
 
-`--net-allow` patterns are printed in a `net-allow:` section after `devmask:`. Requested capabilities the build can't enforce yet are listed on an `unenforced:` line, and the setting falls back to the safer choice: `--write=ephemeral` and `--write=overlay` deny writes. `--strict` refuses them with exit 2 instead.
+`--net-allow` patterns are printed in a `net-allow:` section after `devmask:`. Requested capabilities the build can't enforce yet are listed on an `unenforced:` line, and the setting falls back to the safer choice: `--write=overlay` denies writes. `--strict` refuses them with exit 2 instead.
+
+**Ephemeral writes.** `--write=ephemeral` binds each path `scope` would make writable (the cwd, in the tight profile too, and each `--writable` path) as a `#O` overlay over its `#U` tree, printed as `bind -c '#O' <target>` with `eph` and the host path in a comment. Reads come from the host tree; creates, writes, removes and renames land in memory. The root stays read-only unless it's a `--writable` path. The overlay device (`src/kern/devoverlay.c`) keeps a tree in memory over a lower chan: a walk looks in memory first and falls through to the lower device, so devfs's checks (`--read-deny`, hidden paths, symlink resolution) apply to every lower lookup. A memory node is a copy (a file or directory with its own data), a whiteout (a removed lower name) or a directory marker (a lower directory with changed children). A lower file is copied up whole the first time it's opened for writing, or not read at all with `OTRUNC`; a process that already has the lower file open keeps reading it. Renaming a lower directory, or a marker, is refused ("permission denied"). Copies' data is page-sized blocks and the nodes, names and `Dir` strings come from a small allocator on the same pages, all from the machine's guest-physical page allocator through Zig leaves (`h9_overlay_alloc` in `src/kern.zig`), so ephemeral files count against `--memory` and running out fails the operation with "file system full", changing nothing. Instances are made by the namespace builder (`h9_overlay_newpath`) and attached as `#O<n>`; attaching checks the instance belongs to the caller's machine, and the last close of its last chan frees it. In a namespace file, a bind from a bare `#O` makes a fresh instance over what its target is at that point in the replay. Ephemeral changes can't be exported yet.
 
 **Examples**
 
@@ -383,12 +388,12 @@ h9 --version | --check | --help      # tool functions; -h alone is --help
 | `--env name=value` (repeatable) | Sets a guest environment variable. The host environment isn't imported. |
 | `--cwd PATH` | The guest cwd. Defaults to `/mnt/term/cwd`, the host cwd bound into the guest |
 | `--rc 'cmd'` | See program resolution |
-| `--ns file` | Replays a namespace file (newns syntax: `bind`, `mount`, `unmount`, `cd`, `clear`, with `-a -b -c -C`) after the policy's namespace and before the program is looked up. It's a guest path, read as newns reads it, and `--print`'s namespace output replays as is. Failed operations are skipped, as in newns; a syntax error is exit 125. |
+| `--ns file` | Replays a namespace file (newns syntax: `bind`, `mount`, `unmount`, `cd`, `clear`, with `-a -b -c -C`) after the policy's namespace and before the program is looked up. It's a guest path, read as newns reads it, and `--print`'s namespace output replays as is, its `ro`/`rw`/`eph` column included; a bind from a bare `#O` makes a fresh overlay over its target. Failed operations are skipped, as in newns; a syntax error is exit 125. |
 | `--profile default\|tight` | Sets the sandbox defaults (see Sandbox policy). Explicit flags override it. |
 | `--readable PATH` (repeatable) | Binds a host path read-only at `/mnt/term/PATH` |
 | `--writable PATH` (repeatable) | Binds a host path read-write; under the cwd it overrides a read-only cwd |
 | `--read-deny PATH` (repeatable) | Hides a host path inside a bound tree |
-| `--write none\|scope\|ephemeral\|overlay` | Deny writes, or persist only writable paths. `ephemeral` and `overlay` are accepted but not enforced yet, and deny writes ([ephemeral-writes](design/0006-ephemeral-writes.md), [overlay](design/0011-overlay.md)) |
+| `--write none\|scope\|ephemeral\|overlay` | Deny writes, persist only writable paths, or make writable paths copy-on-write overlays in memory, discarded at exit (`ephemeral`). `overlay` is accepted but not enforced yet, and denies writes ([overlay](design/0011-overlay.md)) |
 | `--net disable\|outbound\|enable` | Network policy: mask `#I`, refuse `announce` (the default profile's default), or allow it |
 | `--net-allow PATTERN` (repeatable) | Allows `connect` only to matching addresses, and `cs` lookups only of matching names (`proto!host!port`) |
 | `--memory SIZE` | Caps guest memory (`512m`, `2g`) |

@@ -26,6 +26,7 @@ extern Dev envdevtab;
 extern Dev hconsdevtab;
 extern Dev dupdevtab;
 extern Dev procdevtab;
+extern Dev overlaydevtab;
 
 Dev *devtab[] = {
 	&rootdevtab,
@@ -46,6 +47,7 @@ Dev *devtab[] = {
 	&hconsdevtab,
 	&dupdevtab,
 	&procdevtab,
+	&overlaydevtab,
 	0
 };
 

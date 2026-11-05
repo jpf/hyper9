@@ -233,6 +233,7 @@ pub const Machine = struct {
         kern.setProcStatus(Proc.status);
         kern.setProcSegment(Proc.segments);
         job.m = &job.mc;
+        job.pages = .{ .ctx = job, .alloc = Job.allocPages, .free = Job.freePages };
         job.mc.err_msg = "";
         job.con_id = kern.addConsole(&job.con) catch |e| {
             m.gpa.destroy(job);
@@ -310,6 +311,9 @@ pub const Machine = struct {
         /// Points at `mc`.
         m: *Machine,
         mc: Machine,
+        /// The machine's pages for `#O` overlays: ephemeral files count
+        /// against `--memory` (design/0006-ephemeral-writes.md).
+        pages: kern.Pages = undefined,
         prog: Program,
         argv: []const []const u8,
         con: kern.Console,
@@ -339,6 +343,18 @@ pub const Machine = struct {
         trace_lock: std.atomic.Mutex = .unlocked,
         /// vCPUs for the processes.
         pool: cpupool.Pool,
+
+        fn allocPages(ctx: *anyopaque, n: usize) ?[*]u8 {
+            const j: *Job = @ptrCast(@alignCast(ctx));
+            const mem = j.m.backend.allocPages(n / vmm.page_size) catch return null;
+            return mem.ptr;
+        }
+
+        fn freePages(ctx: *anyopaque, p: [*]u8, n: usize) void {
+            const j: *Job = @ptrCast(@alignCast(ctx));
+            const a: [*]align(vmm.page_size) u8 = @alignCast(p);
+            j.m.backend.freePages(a[0..n]);
+        }
 
         fn lockSpin(j: *Job) void {
             while (!j.lock.tryLock()) std.atomic.spinLoopHint();
@@ -608,6 +624,7 @@ pub const Machine = struct {
         const m = j.m;
         // devfs checks this thread's accesses against the plan.
         kern.setPlan(&m.plan);
+        kern.setPages(&j.pages);
         kern.setGuestPid(p.pid);
         p.setKproc();
         j.mach.store(kern.mach(), .release);
@@ -678,6 +695,7 @@ pub const Machine = struct {
     fn childMain(p: *Proc) void {
         const m = p.job.m;
         kern.setPlan(&m.plan);
+        kern.setPages(&p.job.pages);
         p.setKproc();
         const st = m.loop(p) catch |e| Status{ .killed = std.fmt.bufPrint(&p.msg_buf, "h9: {t}", .{e}) catch "h9: error" };
         setExits(switch (st) {
@@ -1067,12 +1085,12 @@ pub const Machine = struct {
             };
             if (b.create) flag |= kern.MCREATE;
             const to = try std.fmt.bufPrintZ(&buf2, "{s}", .{b.to});
-            if (kern.bind(from, to, flag)) |_| {
+            if (bindOrOverlay(from, b.lower, to, flag, &buf)) |_| {
                 if (std.mem.eql(u8, b.to, "/mnt/term/cwd")) cwd_at = "/mnt/term/cwd";
                 continue;
             } else |_| {}
             if (b.fallback) |fb| {
-                if (kern.bind(from, try std.fmt.bufPrintZ(&buf2, "{s}", .{fb}), flag)) |_| {
+                if (bindOrOverlay(from, b.lower, try std.fmt.bufPrintZ(&buf2, "{s}", .{fb}), flag, &buf)) |_| {
                     if (std.mem.eql(u8, b.to, "/mnt/term/cwd")) cwd_at = "/mnt/term";
                     continue;
                 } else |_| {}
@@ -1094,6 +1112,23 @@ pub const Machine = struct {
         if (m.plan.devmask.len > 0) kern.devmask(try std.fmt.bufPrintZ(&buf, "{s}", .{m.plan.devmask}));
     }
 
+    /// Binds `from` over `to`, or with `lower` (a host path), a fresh `#O`
+    /// overlay over `#U<lower>`. `buf` is scratch, and may hold `from`.
+    fn bindOrOverlay(from: [:0]const u8, lower: ?[]const u8, to: [:0]const u8, flag: c_int, buf: []u8) kern.Error!void {
+        const l = lower orelse return kern.bind(from, to, flag);
+        return overlay(std.fmt.bufPrintZ(buf, "#U{s}", .{l}) catch return error.Kern, to, flag);
+    }
+
+    /// Binds a fresh `#O` overlay over the directory `lower` at `to`.
+    fn overlay(lower: [:0]const u8, to: [:0]const u8, flag: c_int) kern.Error!void {
+        const id = try kern.overlayNew(lower);
+        var spec: [16]u8 = undefined;
+        kern.bind(std.fmt.bufPrintZ(&spec, "#O{d}", .{id}) catch unreachable, to, flag) catch |e| {
+            kern.overlayDrop(id);
+            return e;
+        };
+    }
+
     /// Runs a namespace file's operations, as newns does: a failed bind or
     /// mount is skipped, and only a syntax error fails the run. The device
     /// mask is already set, so it can't reach masked devices.
@@ -1107,7 +1142,11 @@ pub const Machine = struct {
             error.Syntax => return m.fail("--ns: line {d}: syntax error", .{line}),
         };
         for (ops) |op| switch (op) {
-            .bind => |b| kern.bind(try m.nsPath(arena, b.from, con_id), try m.nsPath(arena, b.to, con_id), mountFlag(b.flag)) catch {},
+            // A bare #O is a fresh overlay over what the target is now.
+            .bind => |b| if (std.mem.eql(u8, b.from, "#O")) {
+                const to = try m.nsPath(arena, b.to, con_id);
+                overlay(to, to, mountFlag(b.flag)) catch {};
+            } else kern.bind(try m.nsPath(arena, b.from, con_id), try m.nsPath(arena, b.to, con_id), mountFlag(b.flag)) catch {},
             .mount => |mt| {
                 const fd = kern.open(try m.nsPath(arena, mt.file, con_id), kern.ORDWR) catch continue;
                 defer kern.close(fd) catch {};
