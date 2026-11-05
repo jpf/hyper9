@@ -1431,3 +1431,112 @@ test "a name pattern allows a connect through cs, and only through cs [5]" {
     try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "connect 127.0.0.1!1" }, pol, denied);
     try expectNet(net_cs, &.{ "t", "tcp!localhost!2" }, pol, "exited no translation for host found");
 }
+
+// Overlays (design/0006-ephemeral-writes.md).
+
+/// A host root tree with the mount points the namespace builder needs.
+const OverlayRoot = struct {
+    tmp: std.testing.TmpDir,
+    buf: [std.fs.max_path_bytes]u8 = undefined,
+    path: []const u8 = "",
+    cwd_buf: [std.fs.max_path_bytes]u8 = undefined,
+    cwd: []const u8 = "",
+
+    fn init(r: *OverlayRoot) !void {
+        const io = std.testing.io;
+        r.tmp = std.testing.tmpDir(.{});
+        for ([_][]const u8{ "dev", "tmp", "mnt/term/cwd", "cwd" }) |d| try r.tmp.dir.createDirPath(io, d);
+        r.path = r.buf[0..try r.tmp.dir.realPath(io, &r.buf)];
+        r.cwd = try std.fmt.bufPrint(&r.cwd_buf, "{s}/cwd", .{r.path});
+    }
+    fn deinit(r: *OverlayRoot) void {
+        r.tmp.cleanup();
+    }
+    fn exists(r: *OverlayRoot, name: []const u8) bool {
+        r.tmp.dir.access(std.testing.io, name, .{}) catch return false;
+        return true;
+    }
+};
+
+/// Runs fixture `text` on backend `kind` with the root and cwd of `r`;
+/// null if the backend can't run here. The status goes in `sb`.
+fn runOverlay(kind: vmm.BackendKind, r: *OverlayRoot, text: []const u8, pol: h9.Policy, sb: []u8) !?[]const u8 {
+    const gpa = std.testing.allocator;
+    const bytes = try image(gpa, .arm64, text);
+    defer gpa.free(bytes);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var err: std.Io.Writer.Allocating = .init(gpa);
+    defer err.deinit();
+    var p = pol;
+    p.timeout_ns = 20 * std.time.ns_per_s;
+    var m = h9.Machine.init(gpa, std.testing.io, .{
+        .backend = kind,
+        .arch = .arm64,
+        .root = r.path,
+        .cwd = r.cwd,
+        .policy = p,
+        .stdio = .{ .out = &out.writer, .err = &err.writer },
+    }) catch |e| switch (e) {
+        error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => return null,
+        else => return e,
+    };
+    defer m.deinit();
+    const status = try m.run(.{ .bytes = bytes }, &.{"t"});
+    return switch (status) {
+        .exited => |t| try std.fmt.bufPrint(sb, "exited {s}", .{t}),
+        .killed => |t| try std.fmt.bufPrint(sb, "killed {s}", .{t}),
+    };
+}
+
+test "two machines in one host process each get their own /tmp [ephemeral-writes]" {
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        var r: OverlayRoot = .{ .tmp = undefined };
+        try r.init();
+        defer r.deinit();
+        // A writes /tmp/f and holds it for 3 s; B looks for it meanwhile.
+        const A = struct {
+            r: *OverlayRoot,
+            kind: vmm.BackendKind,
+            sb: [300]u8 = undefined,
+            got: anyerror!?[]const u8 = null,
+            fn run(a: *@This()) void {
+                a.got = runOverlay(a.kind, a.r, @embedFile("ov_tmp_own"), .{}, &a.sb);
+            }
+        };
+        var a: A = .{ .r = &r, .kind = kind };
+        const th = try std.Thread.spawn(.{}, A.run, .{&a});
+        std.Io.sleep(std.testing.io, .fromMilliseconds(1000), .awake) catch {};
+        var sb: [300]u8 = undefined;
+        const b = runOverlay(kind, &r, @embedFile("ov_tmp_absent"), .{}, &sb);
+        th.join();
+        errdefer std.debug.print("backend {t}\n", .{kind});
+        const got_a = try a.got orelse continue;
+        const got_b = (try b).?;
+        try std.testing.expectEqualStrings("exited ", got_a);
+        try std.testing.expect(std.mem.startsWith(u8, got_b, "exited "));
+        try std.testing.expect(std.mem.indexOf(u8, got_b, "does not exist") != null);
+        try std.testing.expect(!r.exists("tmp/f"));
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+test "a copy-up while another process has the lower file open leaves that reader on the old contents [ephemeral-writes]" {
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        var r: OverlayRoot = .{ .tmp = undefined };
+        try r.init();
+        defer r.deinit();
+        try r.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cwd/f", .data = "old" });
+        var sb: [300]u8 = undefined;
+        const got = try runOverlay(kind, &r, @embedFile("ov_copyup_reader"), .{ .write = .ephemeral }, &sb) orelse continue;
+        errdefer std.debug.print("backend {t}\n", .{kind});
+        try std.testing.expectEqualStrings("exited ", got);
+        var hb: [8]u8 = undefined;
+        try std.testing.expectEqualStrings("old", try r.tmp.dir.readFile(std.testing.io, "cwd/f", &hb));
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}

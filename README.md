@@ -18,12 +18,12 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [semaphores](design/0003-semaphores.md) | implemented |  | rendezvous and semaphores |
 | [segattach](design/0004-segattach.md) | implemented |  | segattach and shared segments |
 | [net-policy](design/0005-net-policy.md) | implemented |  | Outbound-only network by default, and --net-allow |
-| [ephemeral-writes](design/0006-ephemeral-writes.md) | accepted | ready | Ephemeral writes and a private /tmp |
+| [ephemeral-writes](design/0006-ephemeral-writes.md) | implemented |  | Ephemeral writes and a private /tmp |
 | [go-compat](design/0007-go-compat.md) | accepted | ready | Go compatibility |
 | [devsrv](design/0008-devsrv.md) | accepted | ready | devsrv, /srv and mount |
 | [i386](design/0009-i386.md) | implemented |  | 386 binaries |
 | [self-host](design/0010-self-host.md) | draft |  | Self-hosting |
-| [overlay](design/0011-overlay.md) | accepted | needs ephemeral-writes | Copy-on-write overlay as the root's default |
+| [overlay](design/0011-overlay.md) | accepted | ready | Copy-on-write overlay as the root's default |
 | [browser-host](design/0012-browser-host.md) | draft |  | A browser host on wasm, with v86 |
 | [9p-roots](design/0013-9p-roots.md) | draft |  | 9P roots |
 | [image-roots](design/0014-image-roots.md) | draft | needs devsrv, 9p-roots | Disk-image roots |
@@ -54,7 +54,7 @@ flowchart LR
   p_semaphores["#35;3 semaphores<br/>implemented"]:::implemented
   p_segattach["#35;4 segattach<br/>implemented"]:::implemented
   p_net_policy["#35;5 net-policy<br/>implemented"]:::implemented
-  p_ephemeral_writes["#35;6 ephemeral-writes<br/>accepted"]:::accepted
+  p_ephemeral_writes["#35;6 ephemeral-writes<br/>implemented"]:::implemented
   p_go_compat["#35;7 go-compat<br/>accepted"]:::accepted
   p_devsrv["#35;8 devsrv<br/>accepted"]:::accepted
   p_i386["#35;9 i386<br/>implemented"]:::implemented
@@ -230,7 +230,8 @@ name=value` (repeatable), `--rc 'cmd'`, `--ns FILE`, `--trace[=FILE]`,
 `--ns FILE` replays a namespace file in newns syntax (`bind`, `mount`,
 `unmount`, `cd`, `clear`) before the program runs; it's a guest path, so a
 relative one is in the guest's cwd, and `--print`'s namespace section can be
-saved and replayed as is.
+saved and replayed as is. A `bind -c '#O' PATH` line in it puts a fresh
+copy-on-write overlay over whatever PATH is at that point in the replay.
 
 `--backend auto` (the default) uses the host hypervisor and otherwise falls
 back to the emulator with a warning. The emulator also runs amd64 binaries on
@@ -279,8 +280,11 @@ registers and the symbolized PC when the guest faults.
 > **Warning!** This is a ~~stable~~ in-development research prototype, but it has not been through any formal security audits or any other verification. Such a review would be essential before trusting h9 to handle malicious code in the wild. USE AT YOUR OWN RISK!
 
 By default the guest sees the root tree read-only, the host cwd read-write
-at `/mnt/term/cwd`, the host temp dir at `/tmp`, and nothing else of the
-host. `#U` and `#C` are masked, so the guest can't attach more of the host,
+at `/mnt/term/cwd`, a private `/tmp` in memory, and nothing else of the
+host. `--write=ephemeral` makes every writable path a copy-on-write
+overlay instead: the guest can change, remove and rename files there, the
+changes live in memory (counted against `--memory`) and are gone when the
+machine ends, and the host is never written. `#U` and `#C` are masked, so the guest can't attach more of the host,
 and symlinks are resolved before access is checked, so a link inside a bound
 tree can't reach outside it. See [DESIGN.md](DESIGN.md), "Sandbox policy".
 
@@ -291,6 +295,7 @@ h9 --profile=tight --writable ./out touch out/x
 h9 --readable ~/src --read-deny ~/src/.env ls /mnt/term/$HOME/src
 h9 --memory 256m --timeout 30s ls   # resource caps
 h9 --pids 32 --cpus 2 --rc 'mk'     # at most 32 processes, 2 running at once
+h9 --write=ephemeral --rc 'mk clean && mk'   # build in place; the host cwd is unchanged
 h9 --print --profile=tight mk       # print the compiled plan and exit
 h9 --strict --write=overlay mk      # exit 2: overlay isn't enforced yet
 h9 --net=enable aux/listen1 -t tcp!*!8080 /bin/cat     # servers need --net=enable
@@ -302,7 +307,7 @@ h9 --net-allow 'tcp!*.example.com!443' myclient        # egress only to these na
 | `--profile default\|tight` | Sandbox defaults; explicit flags override them |
 | `--readable PATH`, `--writable PATH` | Bind a host path read-only or read-write; outside the root and cwd it appears at `/mnt/term/PATH` |
 | `--read-deny PATH` | Hide a host path, even inside a bound tree |
-| `--write none\|scope` | Deny all writes, or allow them only in writable paths (`ephemeral` and `overlay` are [proposed](design/README.md) and deny writes for now) |
+| `--write none\|scope\|ephemeral` | Deny all writes, allow them only in writable paths, or make the writable paths overlays in memory that are discarded at exit (`overlay` is [proposed](design/0011-overlay.md) and denies writes for now) |
 | `--net disable\|outbound\|enable` | Mask `#I`; allow clients but refuse `announce` (the default, except under `--profile=tight`, which disables); or allow servers too. Without `--net-allow`, connects to link-local addresses (169.254.0.0/16, fe80::/10) are refused |
 | `--net-allow PATTERN` | Repeatable egress allowlist of dial strings, `proto!host!port`: `tcp!10.0.0.0/8!564`, `udp!10.0.0.53!53`, `tcp!*.example.com!443`. With any pattern, every connect and every `/net/cs` name lookup must match one |
 | `--memory SIZE`, `--timeout DURATION` | Cap guest memory (`512m`); post `hangup` after a deadline (`30s`, `1m`) and stop the machine 2 s later |
@@ -349,7 +354,7 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 | `src/machine.zig` | one machine: builds its namespace, runs a process and serves its syscalls |
 | `src/consin.zig` | a machine run's console input: the reader thread a guest's console read waits on, so notes can interrupt it |
 | `src/policy.zig` | the sandbox policy: profiles, the compiled plan, `--print` and the access rules devfs checks |
-| `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; boot and spawn (`glue.c`), process records and notes (`proc.c`), our device table, the machine console `#y`, devenv and devproc ported from 9front, and the devfs policy hooks (`fscheck.c`) |
+| `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; boot and spawn (`glue.c`), process records and notes (`proc.c`), our device table, the machine console `#y`, devenv and devproc ported from 9front, the copy-on-write overlay device `#O` (`devoverlay.c`), and the devfs policy hooks (`fscheck.c`) |
 | `src/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |
 | `src/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
 | `src/aout.zig` | a.out parser and arch layouts |

@@ -116,7 +116,6 @@ pub fn main(init: std.process.Init) !u8 {
         .cwd_writable = if (cfg.sandbox != null) true else null,
         .host_fs = cfg.host_fs,
         .host_cmd = cfg.host_cmd,
-        .tmp = hostTmp(arena, io, init.environ_map),
     };
     const base: h9.Machine.Options = .{
         .backend = cfg.backend,
@@ -263,12 +262,6 @@ fn resolveAll(arena: std.mem.Allocator, io: std.Io, paths: []const []const u8, m
         o.* = kernPath(arena, resolved);
     }
     return out;
-}
-
-/// The host temp dir, bound at /tmp.
-fn hostTmp(arena: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map) ?[]const u8 {
-    const t = env.get("TMPDIR") orelse env.get("TEMP") orelse "/tmp";
-    return kernPath(arena, std.Io.Dir.cwd().realPathFileAlloc(io, t, arena) catch return null);
 }
 
 /// A resolved host path in the form `#U` takes: unchanged on Unix, and

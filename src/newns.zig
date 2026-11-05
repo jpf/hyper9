@@ -5,8 +5,10 @@
 //! Supported: `bind`, `mount`, `unmount`, `cd` and `clear`, with the flags
 //! `-a`, `-b`, `-c` and `-C`, `#` comments, and `'` quoting (`''` is a
 //! literal quote). As in newns, a failed operation doesn't stop the replay.
-//! `--print`'s trailing ro/rw column and `<id>` console placeholder are
-//! accepted, so its output replays as-is. `.` (include) and `chdev`, and
+//! `--print`'s trailing ro/rw/eph column and `<id>` console placeholder are
+//! accepted, so its output replays as-is. A `bind` from a bare `#O` makes
+//! a fresh copy-on-write overlay over whatever its target is at that point
+//! in the replay (design/0006-ephemeral-writes.md); the machine does that. `.` (include) and `chdev`, and
 //! `$var` expansion, aren't supported.
 
 const std = @import("std");
@@ -59,8 +61,7 @@ fn parseLine(argv: []const []const u8) Error!Op {
     }
     var rest = argv[i..];
     // --print's access column.
-    if (rest.len > 0 and (std.mem.eql(u8, rest[rest.len - 1], "ro") or std.mem.eql(u8, rest[rest.len - 1], "rw")) and
-        (std.mem.eql(u8, cmd, "bind") and rest.len == 3))
+    if (rest.len == 3 and std.mem.eql(u8, cmd, "bind") and isAccess(rest[2]))
     {
         rest = rest[0 .. rest.len - 1];
     }
@@ -72,6 +73,11 @@ fn parseLine(argv: []const []const u8) Error!Op {
     if (std.mem.eql(u8, cmd, "cd") and rest.len == 1) return .{ .cd = rest[0] };
     if (std.mem.eql(u8, cmd, "clear") and rest.len == 0) return .clear;
     return error.Syntax;
+}
+
+fn isAccess(s: []const u8) bool {
+    for ([_][]const u8{ "ro", "rw", "eph" }) |a| if (std.mem.eql(u8, s, a)) return true;
+    return false;
 }
 
 /// Splits a line into arguments on blanks, honouring `'` quoting, and
@@ -118,8 +124,9 @@ test "parse binds, mounts and the rest" {
         \\cd /tmp
         \\clear
         \\bind 'it''s' /x # trailing
+        \\  bind -c '#O' /mnt/term/cwd                eph  # /Users/me/src/proj
     , &line);
-    try t.expectEqual(@as(usize, 10), ops.len);
+    try t.expectEqual(@as(usize, 11), ops.len);
     try t.expectEqualStrings("/sys/lib", ops[0].bind.from);
     try t.expectEqual(.repl, ops[0].bind.flag.order);
     try t.expectEqual(.after, ops[1].bind.flag.order);
@@ -136,6 +143,9 @@ test "parse binds, mounts and the rest" {
     try t.expectEqualStrings("/tmp", ops[7].cd);
     try t.expect(ops[8] == .clear);
     try t.expectEqualStrings("it's", ops[9].bind.from);
+    try t.expectEqualStrings("#O", ops[10].bind.from);
+    try t.expectEqualStrings("/mnt/term/cwd", ops[10].bind.to);
+    try t.expect(ops[10].bind.flag.create);
 }
 
 test "syntax errors name the line" {

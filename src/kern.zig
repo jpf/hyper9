@@ -186,6 +186,10 @@ const c_stub = struct {
     fn sysfwstat(_: c_int, _: [*]u8, _: c_int) c_int {
         return -1;
     }
+    fn h9_overlay_newpath(_: ?[*:0]const u8) c_int {
+        return -1;
+    }
+    fn h9_overlay_drop(_: c_int) void {}
 };
 
 const c_real = struct {
@@ -253,6 +257,8 @@ const c_real = struct {
     extern fn sysremove(name: [*:0]const u8) c_int;
     extern fn syswstat(name: [*:0]const u8, buf: [*]u8, n: c_int) c_int;
     extern fn sysfwstat(fd: c_int, buf: [*]u8, n: c_int) c_int;
+    extern fn h9_overlay_newpath(path: ?[*:0]const u8) c_int;
+    extern fn h9_overlay_drop(id: c_int) void;
 };
 
 const BootState = enum(u8) { idle, booting, up, failed };
@@ -629,6 +635,41 @@ pub fn setPlan(p: ?*const policy.Plan) void {
     fs_plan = p;
 }
 
+/// Where a machine's overlay memory comes from: its guest-physical page
+/// allocator, so ephemeral files count against `--memory`
+/// (design/0006-ephemeral-writes.md). Allocations are whole pages of
+/// `page_size` bytes; `alloc` returns null when the machine's memory is
+/// used up.
+pub const Pages = struct {
+    ctx: *anyopaque,
+    alloc: *const fn (ctx: *anyopaque, n: usize) ?[*]u8,
+    free: *const fn (ctx: *anyopaque, p: [*]u8, n: usize) void,
+
+    pub const page_size = 4096;
+};
+
+/// The calling thread's machine's pages, for overlays it makes (and to
+/// tell machines apart when one attaches `#O<n>`). Kernel threads without
+/// a machine use host pages, uncapped.
+threadlocal var fs_pages: ?*const Pages = null;
+
+pub fn setPages(p: ?*const Pages) void {
+    fs_pages = p;
+}
+
+/// Makes a copy-on-write overlay over the directory `lower` (a path in
+/// the caller's namespace), or a tree in memory only when null, and
+/// returns its instance number for binding `#O<n>`. An instance that's
+/// never attached must be dropped.
+pub fn overlayNew(lower: ?[*:0]const u8) Error!u32 {
+    return try check(c.h9_overlay_newpath(lower));
+}
+
+/// Frees an overlay made by `overlayNew` that was never attached.
+pub fn overlayDrop(id: u32) void {
+    c.h9_overlay_drop(@intCast(id));
+}
+
 /// The calling Proc's error string after a failed call.
 pub fn errstr() []const u8 {
     return std.mem.span(c.h9_kern_errstr());
@@ -808,7 +849,39 @@ comptime {
         @export(&h9_net_check, .{ .name = "h9_net_check" });
         @export(&h9_net_lookup, .{ .name = "h9_net_lookup" });
         @export(&h9_net_resolved, .{ .name = "h9_net_resolved" });
+        @export(&h9_overlay_pool, .{ .name = "h9_overlay_pool" });
+        @export(&h9_overlay_alloc, .{ .name = "h9_overlay_alloc" });
+        @export(&h9_overlay_free, .{ .name = "h9_overlay_free" });
     }
+}
+
+// Leaves called from devoverlay.c. They never raise kernel errors.
+
+fn h9_overlay_pool() callconv(.c) ?*anyopaque {
+    return @ptrCast(@constCast(fs_pages));
+}
+
+const host_page = std.mem.Alignment.fromByteUnits(Pages.page_size);
+
+/// Zeroed pages, or null when the machine's memory is used up.
+fn h9_overlay_alloc(pool: ?*anyopaque, n: c_uint) callconv(.c) ?*anyopaque {
+    if (pool) |p| {
+        const pages: *const Pages = @ptrCast(@alignCast(p));
+        return pages.alloc(pages.ctx, n);
+    }
+    const mem = std.heap.page_allocator.alignedAlloc(u8, host_page, n) catch return null;
+    @memset(mem, 0);
+    return mem.ptr;
+}
+
+fn h9_overlay_free(pool: ?*anyopaque, ptr: ?*anyopaque, n: c_uint) callconv(.c) void {
+    const q: [*]u8 = @ptrCast(ptr orelse return);
+    if (pool) |p| {
+        const pages: *const Pages = @ptrCast(@alignCast(p));
+        return pages.free(pages.ctx, q, n);
+    }
+    const a: [*]align(Pages.page_size) u8 = @alignCast(q);
+    std.heap.page_allocator.free(a[0..n]);
 }
 
 fn h9_policy_active() callconv(.c) c_int {
@@ -1389,4 +1462,198 @@ test "tsleep returns at its deadline, returns early on wakeup, and fails with in
     try std.testing.expect(t.ms[2] < 2500);
     try std.testing.expectEqualStrings("interrupted", t.intr[0..t.intr_len]);
     try std.testing.expectEqual([3]c_int{ 0, 0, 0 }, t.timers);
+}
+
+/// A stat buffer that changes only the name (9P's "don't touch" values
+/// elsewhere), for renames through wstat.
+fn renameStat(buf: []u8, name: []const u8) []u8 {
+    const n = 2 + 2 + 4 + 13 + 4 + 4 + 4 + 8 + (2 + name.len) + 3 * 2;
+    @memset(buf[0..n], 0xff);
+    std.mem.writeInt(u16, buf[0..2], @intCast(n - 2), .little);
+    var o: usize = 2 + 2 + 4 + 13 + 4 + 4 + 4 + 8;
+    std.mem.writeInt(u16, buf[o..][0..2], @intCast(name.len), .little);
+    @memcpy(buf[o + 2 ..][0..name.len], name);
+    o += 2 + name.len;
+    for (0..3) |_| {
+        std.mem.writeInt(u16, buf[o..][0..2], 0, .little);
+        o += 2;
+    }
+    return buf[0..n];
+}
+
+test "#O overlays a host tree in memory and never writes it" {
+    if (!available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try tmp.dir.createDirPath(io, "lower/sub");
+    try tmp.dir.createDirPath(io, "lower/d");
+    try tmp.dir.createDirPath(io, "mnt");
+    try tmp.dir.createDirPath(io, "mem");
+    try tmp.dir.writeFile(io, .{ .sub_path = "lower/a.txt", .data = "host a\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "lower/sub/b.txt", .data = "host b\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "lower/sub/c.txt", .data = "host c\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "lower/d/x", .data = "x\n" });
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &buf);
+    buf[n] = 0;
+
+    const T = struct {
+        root: [:0]u8,
+        err: ?anyerror = null,
+        where: []const u8 = "",
+        done: std.atomic.Value(bool) = .init(false),
+        names: [256]u8 = undefined,
+        names_len: usize = 0,
+
+        fn run(t: *@This()) void {
+            defer t.done.store(true, .release);
+            t.body() catch |e| {
+                t.err = e;
+            };
+        }
+        fn readAll(path: [*:0]const u8, out: []u8) ![]u8 {
+            const fd = try open(path, OREAD);
+            defer close(fd) catch {};
+            return out[0..try pread(fd, out, 0)];
+        }
+        fn writeNew(path: [*:0]const u8, data: []const u8) !void {
+            const fd = try create(path, OWRITE, 0o664);
+            defer close(fd) catch {};
+            _ = try pwrite(fd, data, 0);
+        }
+        fn expectRead(path: [*:0]const u8, want: []const u8) !void {
+            var b: [64]u8 = undefined;
+            try std.testing.expectEqualStrings(want, try readAll(path, &b));
+        }
+        fn missing(path: [*:0]const u8) !void {
+            if (open(path, OREAD)) |fd| {
+                close(fd) catch {};
+                return error.StillThere;
+            } else |_| {}
+        }
+        fn body(t: *@This()) !void {
+            var spec: [std.fs.max_path_bytes + 16]u8 = undefined;
+            try bind(try std.fmt.bufPrintZ(&spec, "#U{s}", .{t.root}), "/", MREPL);
+            const id = try overlayNew("/lower");
+            try bind(try std.fmt.bufPrintZ(&spec, "#O{d}", .{id}), "/mnt", MREPL | MCREATE);
+
+            t.where = "read through";
+            try expectRead("/mnt/a.txt", "host a\n");
+            try expectRead("/mnt/sub/b.txt", "host b\n");
+
+            t.where = "a reader keeps the lower file across a copy-up";
+            const r = try open("/mnt/sub/c.txt", OREAD);
+            defer close(r) catch {};
+            {
+                const w = try open("/mnt/sub/c.txt", ORDWR);
+                defer close(w) catch {};
+                _ = try pwrite(w, "HOST", 0);
+            }
+            var b: [64]u8 = undefined;
+            try std.testing.expectEqualStrings("host c\n", b[0..try pread(r, &b, 0)]);
+            try expectRead("/mnt/sub/c.txt", "HOST c\n");
+
+            t.where = "create";
+            try writeNew("/mnt/new", "new\n");
+            try expectRead("/mnt/new", "new\n");
+
+            t.where = "truncate an existing file";
+            try writeNew("/mnt/a.txt", "changed\n");
+            try expectRead("/mnt/a.txt", "changed\n");
+
+            t.where = "remove";
+            try remove("/mnt/sub/b.txt");
+            try missing("/mnt/sub/b.txt");
+
+            t.where = "rm then recreate";
+            try remove("/mnt/a.txt");
+            try missing("/mnt/a.txt");
+            try writeNew("/mnt/a.txt", "again\n");
+            try expectRead("/mnt/a.txt", "again\n");
+
+            t.where = "rename a file";
+            var st: [128]u8 = undefined;
+            _ = try wstat("/mnt/new", renameStat(&st, "newer"));
+            try missing("/mnt/new");
+            try expectRead("/mnt/newer", "new\n");
+            _ = try wstat("/mnt/sub/c.txt", renameStat(&st, "c2.txt"));
+            try missing("/mnt/sub/c.txt");
+            try expectRead("/mnt/sub/c2.txt", "HOST c\n");
+
+            t.where = "renaming a lower directory or a marker is refused";
+            if (wstat("/mnt/d", renameStat(&st, "e"))) |_| return error.RenamedLowerDir else |_| {}
+            if (wstat("/mnt/sub", renameStat(&st, "sub2"))) |_| return error.RenamedMarker else |_| {}
+
+            t.where = "a directory in memory can be renamed, and removed once empty";
+            _ = try create("/mnt/mdir", OREAD, 0x80000000 | 0o775);
+            try writeNew("/mnt/mdir/f", "f\n");
+            _ = try wstat("/mnt/mdir", renameStat(&st, "mdir2"));
+            try expectRead("/mnt/mdir2/f", "f\n");
+            if (remove("/mnt/mdir2")) |_| return error.RemovedNonEmpty else |_| {}
+            try remove("/mnt/mdir2/f");
+            try remove("/mnt/mdir2");
+            if (remove("/mnt/d")) |_| return error.RemovedNonEmptyLower else |_| {}
+
+            t.where = "list";
+            const d = try open("/mnt", OREAD);
+            defer close(d) catch {};
+            var dbuf: [4096]u8 = undefined;
+            var off: i64 = 0;
+            while (true) {
+                const k = try pread(d, &dbuf, off);
+                if (k == 0) break;
+                off += @intCast(k);
+                var j: usize = 0;
+                while (j + 2 <= k) {
+                    const sz = std.mem.readInt(u16, dbuf[j..][0..2], .little) + 2;
+                    const nl = std.mem.readInt(u16, dbuf[j + 41 ..][0..2], .little);
+                    const name = dbuf[j + 43 ..][0..nl];
+                    @memcpy(t.names[t.names_len..][0..name.len], name);
+                    t.names_len += name.len;
+                    t.names[t.names_len] = ' ';
+                    t.names_len += 1;
+                    j += sz;
+                }
+            }
+
+            t.where = "a tree in memory only";
+            const mid = try overlayNew(null);
+            try bind(try std.fmt.bufPrintZ(&spec, "#O{d}", .{mid}), "/mem", MREPL | MCREATE);
+            try writeNew("/mem/scratch", "scratch\n");
+            try expectRead("/mem/scratch", "scratch\n");
+
+            t.where = "another machine's instance can't be attached";
+            const other: Pages = .{ .ctx = undefined, .alloc = undefined, .free = undefined };
+            setPages(&other);
+            defer setPages(null);
+            if (bind(try std.fmt.bufPrintZ(&spec, "#O{d}", .{id}), "/mem", MREPL)) |_| return error.AttachedOtherMachine else |_| {}
+        }
+    };
+    var t: T = .{ .root = buf[0..n :0] };
+    try spawn("test", T, T.run, &t);
+    while (!t.done.load(.acquire)) std.Thread.yield() catch {};
+    if (t.err) |e| {
+        std.debug.print("failed in {s}\n", .{t.where});
+        return e;
+    }
+    // Each name once, in no particular order.
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(std.testing.allocator);
+    var it = std.mem.tokenizeScalar(u8, t.names[0..t.names_len], ' ');
+    while (it.next()) |name| {
+        if (seen.contains(name)) return error.ListedTwice;
+        try seen.put(std.testing.allocator, name, {});
+    }
+    for ([_][]const u8{ "a.txt", "sub", "d", "newer" }) |want| try std.testing.expect(seen.contains(want));
+    try std.testing.expectEqual(@as(u32, 4), seen.count());
+
+    // The host tree is unchanged.
+    var hb: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("host a\n", try tmp.dir.readFile(io, "lower/a.txt", &hb));
+    try std.testing.expectEqualStrings("host b\n", try tmp.dir.readFile(io, "lower/sub/b.txt", &hb));
+    try std.testing.expectEqualStrings("host c\n", try tmp.dir.readFile(io, "lower/sub/c.txt", &hb));
+    for ([_][]const u8{ "lower/new", "lower/newer", "lower/sub/c2.txt", "lower/mdir", "mnt/new" }) |p| {
+        if (tmp.dir.access(io, p, .{})) |_| return error.HostWritten else |_| {}
+    }
 }

@@ -2,7 +2,7 @@
 id: 6
 slug: ephemeral-writes
 title: Ephemeral writes and a private /tmp
-status: accepted
+status: implemented
 created: 2026-11-03
 authors: [progrium]
 depends: []
@@ -230,3 +230,11 @@ Demo: in a copy of a 9front source directory, `h9 --write=ephemeral --rc 'rm -f 
 3. `--write=ephemeral` in `src/policy.zig`: overlay binds, the `eph` access kind, `enforces:`, caveats, `--print`, and `--strict`.
 4. `--ns`: the `eph` column in `src/newns.zig`, and a bare `#O` source in the replay in `src/machine.zig`. The `ephemeral-writes` cases pass.
 5. README's sandbox table and `--ns` notes, and DESIGN.md: the capability table, the default profile's `/tmp` row and the tight profile's paragraph, `devoverlay.c` in the kernel's "Added by us" table, and the CLI table's `--write` row. Set `status: implemented`.
+
+## Updates
+
+- 2026-11-05: Refinements made while implementing it:
+  - The page leaves take the machine's pool explicitly: `h9_overlay_alloc(void *pool, ulong n)` and `h9_overlay_free(void *pool, void *p, ulong n)`, with `h9_overlay_pool()` giving the calling thread's. An instance records its pool when it's made, because its last chan can be closed on any of the machine's threads. The pool also tells machines apart: attaching `#O<n>` from another machine fails with "file does not exist".
+  - Zig makes instances with `h9_overlay_newpath(path)`, which resolves the lower directory with `namec` and reports errors as the `sys*` wrappers do, and frees one that's never attached with `h9_overlay_drop(n)`. The namespace builder resolves each overlay's lower tree from `#U<host path>`, the path in the plan's comment; a namespace file's bare `#O` overlays its target, as proposed.
+  - Copies, and directories in memory, are checked by their owner permission bits, as devfs presents every host file as the guest's own: a file without write permission can't be opened for writing, and creating, removing or renaming needs write permission on the directory.
+  - A file in memory is limited to about 1 GiB (8 blocks in the node and two levels of index pages), and a name to 1023 bytes.
