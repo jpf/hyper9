@@ -1036,7 +1036,8 @@ fn rcDial(buf: []u8, addr: []const u8, line: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "<>[3] /net/tcp/clone {{ n=`{{read <[0=3]}}; echo 'connect {s}' >[1=3] && echo {s} >/net/tcp/$n/data }}", .{ addr, line });
 }
 
-/// Accepts the next queued connection and reads a line from it.
+/// Accepts the next queued connection and reads from it to EOF, at most
+/// `buf.len` bytes, so the peer must have closed it.
 fn acceptLine(srv: *std.Io.net.Server, buf: []u8) ![]const u8 {
     const io = std.testing.io;
     const s = try srv.accept(io);
@@ -1051,12 +1052,15 @@ fn acceptLine(srv: *std.Io.net.Server, buf: []u8) ![]const u8 {
 /// connection accepted is one the test makes itself.
 fn expectNoConnection(srv: *std.Io.net.Server) !void {
     const io = std.testing.io;
-    const c = try srv.socket.address.connect(io, .{ .mode = .stream });
-    defer c.close(io);
-    var wbuf: [64]u8 = undefined;
-    var w = c.writer(io, &wbuf);
-    try w.interface.writeAll("marker\n");
-    try w.interface.flush();
+    {
+        const c = try srv.socket.address.connect(io, .{ .mode = .stream });
+        // Closed before the accept, which reads to EOF.
+        defer c.close(io);
+        var wbuf: [64]u8 = undefined;
+        var w = c.writer(io, &wbuf);
+        try w.interface.writeAll("marker\n");
+        try w.interface.flush();
+    }
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("marker", try acceptLine(srv, &buf));
 }
