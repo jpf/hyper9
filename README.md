@@ -30,13 +30,18 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [gfx](design/0015-gfx.md) | accepted | needs devsrv | Graphics (--gfx) |
 | [kvm](design/0016-kvm.md) | draft |  | KVM backend |
 | [whp](design/0017-whp.md) | draft | needs kvm | WHP backend |
-| [linux-personality](design/0018-linux-personality.md) | draft |  | Linux personality |
+| [linux-personality](design/0018-linux-personality.md) | draft | needs symlinks-in-root, exit-status | Linux personality |
 | [zig-interpreter](design/0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
 | [websocket-9p](design/0021-websocket-9p.md) | draft | needs net-policy, devsrv, 9p-roots | 9P over WebSocket |
 | [dotl](design/0022-dotl.md) | draft | needs devsrv, 9p-roots | 9P2000.L and ZeroFS |
 | [ci](design/ci.md) | draft |  | Continuous integration |
+| [exit-status](design/exit-status.md) | draft |  | Numeric exit statuses at the host boundary |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
+| [host-binfmt](design/host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
 | [host-sandbox](design/host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
+| [linux-net](design/linux-net.md) | draft | needs linux-personality | Linux readiness and sockets |
+| [linux-threads](design/linux-threads.md) | draft | needs linux-personality | Linux threads |
+| [symlinks-in-root](design/symlinks-in-root.md) | draft |  | Symlinks resolved inside a bound tree |
 
 ```mermaid
 flowchart LR
@@ -66,8 +71,13 @@ flowchart LR
   p_websocket_9p["#35;21 websocket-9p<br/>draft"]:::draft
   p_dotl["#35;22 dotl<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
+  p_exit_status["exit-status<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
+  p_host_binfmt["host-binfmt<br/>draft"]:::draft
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
+  p_linux_net["linux-net<br/>draft"]:::draft
+  p_linux_threads["linux-threads<br/>draft"]:::draft
+  p_symlinks_in_root["symlinks-in-root<br/>draft"]:::draft
   p_semaphores --> p_go_compat
   p_semaphores --> p_devsrv
   p_ephemeral_writes --> p_overlay
@@ -77,6 +87,8 @@ flowchart LR
   p_9p_roots --> p_image_roots
   p_devsrv --> p_gfx
   p_kvm --> p_whp
+  p_symlinks_in_root --> p_linux_personality
+  p_exit_status --> p_linux_personality
   p_net_policy --> p_websocket_9p
   p_devsrv --> p_websocket_9p
   p_9p_roots --> p_websocket_9p
@@ -84,6 +96,8 @@ flowchart LR
   p_9p_roots --> p_dotl
   p_kvm --> p_host_sandbox
   p_whp --> p_host_sandbox
+  p_linux_personality --> p_linux_net
+  p_linux_personality --> p_linux_threads
 ```
 
 <!-- design:end -->
