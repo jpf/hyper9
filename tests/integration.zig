@@ -1069,7 +1069,11 @@ test "the default profile refuses announce [5]" {
     const e = try env(@src());
     const r = try run(e, &.{ "aux/listen1", "-t", "tcp!127.0.0.1!39517", "/bin/cat" });
     defer r.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, r.err, "announce tcp!127.0.0.1!39517: permission denied") != null);
+    // libc's announce adds where the write failed: "announce writing
+    // /net/tcp/clone: permission denied".
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "announce tcp!127.0.0.1!39517: ") != null);
+    try std.testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, r.err, "\n"), "permission denied"));
     try std.testing.expect(r.code != 0);
 }
 
