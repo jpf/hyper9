@@ -209,7 +209,7 @@ def main():
             "-device", "virtio-blk-pci-non-transitional,drive=out",
         ])
         con.until(rb"\n% ", 300)
-        con.send("prompt=('HP'^'9> ' '\t')")
+        con.send("prompt=('H'^'9> ' '\t')")
         con.until(PROMPT, 30)
         cputype = con.cmd("cat /env/cputype").strip("\0 \n")
         if cputype != "arm64":
