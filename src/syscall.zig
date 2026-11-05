@@ -38,6 +38,11 @@ pub const Nr = enum(u64) {
     fstat = 43,
     pread = 50,
     pwrite = 51,
+    segbrk = 12,
+    segattach = 30,
+    segdetach = 31,
+    segfree = 32,
+    segflush = 33,
     _,
 };
 
@@ -77,7 +82,7 @@ pub const Process = struct {
     gpa: std.mem.Allocator,
     backend: vmm.Backend,
     as: vmm.AddressSpace,
-    /// Text, data and stack; brk_ moves the end of data.
+    /// Text, data, stack and segattach's segments; brk_ moves the end of data.
     segs: *segment.Segs,
     /// The note handler from notify, or 0.
     notify: u64 = 0,
@@ -352,6 +357,45 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
             p.note("0x{x}", .{try a.u(0)});
             return brk(p, try a.u(0));
         },
+        .segattach => {
+            // segattach(int attr, char *class, void *va, ulong len)
+            var cls_buf: [32]u8 = undefined;
+            const cls_va = try a.u(1);
+            // A name too long for any class is just an unknown one.
+            const cls: []const u8 = gm.string(p.as, cls_va, &cls_buf) catch |e|
+                if (p.as.translate(cls_va, 1) != null) "" else return e;
+            const va = try a.u(2);
+            const len = try a.uint(3);
+            p.note("0x{x} \"{s}\" 0x{x} {d}", .{ try a.uint(0), cls, va, len });
+            const kind: ?segment.Kind = if (std.mem.eql(u8, cls, "shared"))
+                .shared
+            else if (std.mem.eql(u8, cls, "memory"))
+                .memory
+            else
+                null;
+            const base = p.segs.segattach(p.gpa, p.backend, p.as, kind, try a.uint(0), va, len) catch |e| return segFail(e);
+            return .{ .ret = base };
+        },
+        .segdetach => {
+            p.note("0x{x}", .{try a.u(0)});
+            p.segs.segdetach(p.as, try a.u(0)) catch |e| return segFail(e);
+            return ok(0);
+        },
+        .segbrk => {
+            p.note("0x{x} 0x{x}", .{ try a.u(0), try a.u(1) });
+            const r = p.segs.segbrk(try a.u(0), try a.u(1)) catch |e| return segFail(e);
+            return .{ .ret = r };
+        },
+        .segfree => {
+            p.note("0x{x} {d}", .{ try a.u(0), try a.uint(1) });
+            p.segs.segfree(try a.u(0), try a.uint(1)) catch |e| return segFail(e);
+            return ok(0);
+        },
+        .segflush => {
+            p.note("0x{x} {d}", .{ try a.u(0), try a.uint(1) });
+            p.segs.segflush(try a.u(0), try a.uint(1)) catch |e| return segFail(e);
+            return ok(0);
+        },
         _ => return sysNote(p, "sys: bad sys call"),
     }
 }
@@ -478,12 +522,11 @@ fn ioSplit(p: *Process, fd: u31, buf: u64, len: u32, off: i64, comptime dir: Dir
 
 fn brk(p: *Process, addr: u64) gm.Error!Outcome {
     if (addr == 0) return ok(p.segs.brkTop());
-    p.segs.brk(addr) catch |e| {
-        kern.setErrstr(switch (e) {
-            error.NoVmem => "virtual memory allocation failed",
-            error.InUse => "device or object already in use",
-        });
-        return fail;
-    };
+    p.segs.brk(addr) catch |e| return segFail(e);
     return ok(0);
+}
+
+fn segFail(e: segment.SegError) Outcome {
+    kern.setErrstr(segment.errorString(e));
+    return fail;
 }

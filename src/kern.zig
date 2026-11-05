@@ -210,6 +210,7 @@ const c_real = struct {
     extern fn h9_kern_chdir(name: [*:0]const u8) c_int;
     extern fn h9_kern_setargs(args: [*]const u8, n: c_int) void;
     extern var h9_procstatus: ?*const fn (?*anyopaque, [*]u8, c_int, *c_ulong) callconv(.c) void;
+    extern var h9_procsegment: ?*const fn (?*anyopaque, [*]u8, c_int) callconv(.c) c_int;
     extern fn sysdup(fd0: c_int, fd1: c_int) c_int;
     extern fn sysstat(name: [*:0]const u8, buf: [*]u8, n: c_int) c_int;
     extern fn sysfstat(fd: c_int, buf: [*]u8, n: c_int) c_int;
@@ -350,6 +351,14 @@ pub fn setNoteKick(f: *const fn (?*anyopaque) callconv(.c) void) void {
 /// `aux` is set; it must not block or make kernel calls.
 pub fn setProcStatus(f: *const fn (?*anyopaque, [*]u8, c_int, *c_ulong) callconv(.c) void) void {
     if (available) c.h9_procstatus = f;
+}
+
+/// Sets the hook /proc/n/segment calls, with the process's `aux`, for its
+/// text (into a buffer of the given size), returning the length. Like the
+/// status hook, it runs on the reading thread with the target's note lock
+/// held, and only while `aux` is set.
+pub fn setProcSegment(f: *const fn (?*anyopaque, [*]u8, c_int) callconv(.c) c_int) void {
+    if (available) c.h9_procsegment = f;
 }
 
 /// The most of exec's argv /proc/n/args keeps, as 9front's exec.

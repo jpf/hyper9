@@ -16,7 +16,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [baseline](design/0000-baseline.md) | implemented |  | Baseline (h9 before proposals) |
 | [proposals](design/0001-proposals.md) | implemented |  | Proposals replace milestones and the design changelog |
 | [semaphores](design/0003-semaphores.md) | accepted | ready | rendezvous and semaphores |
-| [segattach](design/0004-segattach.md) | accepted | ready | segattach and shared segments |
+| [segattach](design/0004-segattach.md) | implemented |  | segattach and shared segments |
 | [net-policy](design/0005-net-policy.md) | draft |  | Outbound-only network by default, and --net-allow |
 | [ephemeral-writes](design/0006-ephemeral-writes.md) | accepted | ready | Ephemeral writes and a private /tmp |
 | [go-compat](design/0007-go-compat.md) | draft | needs semaphores | Go compatibility |
@@ -45,7 +45,7 @@ flowchart LR
   p_baseline["baseline<br/>implemented"]:::implemented
   p_proposals["#35;1 proposals<br/>implemented"]:::implemented
   p_semaphores["#35;3 semaphores<br/>accepted"]:::accepted
-  p_segattach["#35;4 segattach<br/>accepted"]:::accepted
+  p_segattach["#35;4 segattach<br/>implemented"]:::implemented
   p_net_policy["#35;5 net-policy<br/>draft"]:::draft
   p_ephemeral_writes["#35;6 ephemeral-writes<br/>accepted"]:::accepted
   p_go_compat["#35;7 go-compat<br/>draft"]:::draft
@@ -211,7 +211,10 @@ arm64 hosts, for testing; HVF runs arm64 only.
 Syscalls go through drawterm's kern: open, create, close, dup, pread, pwrite,
 seek, stat, fstat, wstat, fwstat, fd2path, bind, chdir, remove, errstr, brk_,
 sleep, notify, noted, exits, and for process trees rfork, exec (including `#!`
-scripts), await and pipe; `/fd` is devdup. Notes are delivered as on 9front:
+scripts), await and pipe, and the segment calls segattach, segdetach,
+segbrk, segfree and segflush for `shared` and `memory` segments (so `seg`
+works; named `#g` segments and device memory aren't served); `/fd` is
+devdup. Notes are delivered as on 9front:
 a handler set with notify gets the note and a saved Ureg on its stack, and a
 process without one dies with the note as its status, so a write to a closed
 pipe ends the writer with `sys: write on closed pipe pc=...`, and a fault or
@@ -220,7 +223,7 @@ bad syscall can be caught.
 `/proc` lists the machine's own processes by their machine-local pids, as
 on 9front, so `ps` and `kill` work: `kill sleep | rc` posts a `kill` note
 to each sleep. Each process has `args`, `ctl` (`kill`, `close`, `closefiles`),
-`fd`, `note`, `noteid`, `notepg`, `ns`, `ppid`, `status` and `wait`; the CPU
+`fd`, `note`, `noteid`, `notepg`, `ns`, `ppid`, `segment`, `status` and `wait`; the CPU
 times in `status` read 0 for now, and `ns` shows the host paths of bound
 host trees.
 
@@ -322,7 +325,7 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 | `tests/backends.zig` | backend conformance tests |
 | `tests/integration.zig` | real 9front binaries through the h9 CLI |
 | `tests/term.zig` | a pty (ConPTY on Windows) for the interactive integration cases |
-| `tests/fixtures` | test programs and binary generators |
+| `tests/fixtures` | test programs and binary generators; `segattach/` holds the arm64 programs for the segattach backend cases, assembled at build time |
 | `scripts/mkroot.py` | builds the 9front root tree from the pinned image |
 | `scripts/release.sh` | builds the release assets (`h9`, `h9-emu` and its source) into `dist/` |
 | `.local/` | gitignored: tools, caches, upstream clones, 9front images, prebuilt Unicorn, test VMs |

@@ -368,6 +368,7 @@ h9_kern_postmach(void *v, int all, char *msg, int flag)
 /* For devproc.c (hproc.h). */
 
 void	(*h9_procstatus)(void*, char*, int, ulong*);
+int	(*h9_procsegment)(void*, char*, int);
 
 Hproc*
 h9_uphproc(void)

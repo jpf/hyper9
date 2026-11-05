@@ -2,7 +2,7 @@
 id: 4
 slug: segattach
 title: segattach and shared segments
-status: accepted
+status: implemented
 created: 2026-11-03
 authors: [progrium]
 depends: []

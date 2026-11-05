@@ -231,6 +231,7 @@ pub const Machine = struct {
         job.pool.gpa = m.gpa;
         kern.setNoteKick(Proc.noteKick);
         kern.setProcStatus(Proc.status);
+        kern.setProcSegment(Proc.segments);
         job.m = &job.mc;
         job.mc.err_msg = "";
         job.con_id = kern.addConsole(&job.con) catch |e| {
@@ -491,11 +492,14 @@ pub const Machine = struct {
         mem_kb: std.atomic.Value(u64) = .init(0),
 
         fn noteMem(p: *Proc) void {
-            var n: u64 = 0;
-            inline for (.{ "text", "data", "stack" }) |f| if (@field(p.segs, f)) |seg| {
-                n += seg.top - seg.base;
-            };
-            p.mem_kb.store(n / 1024, .release);
+            p.mem_kb.store(p.segs.mapped() / 1024, .release);
+        }
+
+        /// The kernel's hook for /proc/n/segment. Runs on the reading
+        /// thread.
+        fn segments(aux: ?*anyopaque, buf: [*]u8, n: c_int) callconv(.c) c_int {
+            const p: *Proc = @ptrCast(@alignCast(aux orelse return 0));
+            return @intCast(p.segs.segmentText(buf[0..@intCast(n)]));
         }
 
         /// The kernel's hook for /proc/n/status: the state, as 9front's
@@ -658,7 +662,8 @@ pub const Machine = struct {
 
         p.as = try m.backend.newAddressSpace();
         const img = try loader.load(m.gpa, m.backend, p.as.?, bytes, j.argv, p.pid);
-        p.segs = img.segs;
+        // Under the lock, since /proc/n/segment may be read already.
+        p.segs.replace(p.as.?, img.segs);
         p.tos = img.tos;
         p.ureg = .initExec(img.arch, img.entry, img.sp, img.tos);
         p.extra = .initExec(img.arch);
@@ -961,26 +966,30 @@ pub const Machine = struct {
         } else argv.appendSlice(arena, @ptrCast(e.argv)) catch return failWith("no memory");
 
         const nas = m.backend.newAddressSpace() catch return failWith("virtual memory allocation failed");
-        const img = loader.load(m.gpa, m.backend, nas, bytes, argv.items, p.pid) catch |err| {
+        var img = loader.load(m.gpa, m.backend, nas, bytes, argv.items, p.pid) catch |err| {
             nas.destroy();
             return failWith(switch (err) {
                 error.BadExec, error.Truncated, error.BadMagic => ebadexec,
                 else => "virtual memory allocation failed",
             });
         };
+        // segattach's segments carry over, except SG_CEXEC ones.
+        img.segs.inherit(&p.segs, nas) catch {
+            img.segs.release(nas);
+            nas.destroy();
+            return failWith("virtual memory allocation failed");
+        };
         vcpu.setAddressSpace(nas) catch {
-            var segs = img.segs;
-            segs.release(nas);
+            img.segs.release(nas);
             nas.destroy();
             return failWith("virtual memory allocation failed");
         };
 
         // Committed.
         const old = p.as.?;
-        p.segs.release(old);
+        p.segs.replace(old, img.segs);
         old.destroy();
         p.as = nas;
-        p.segs = img.segs;
         p.tos = img.tos;
         p.sys.as = nas;
         p.sys.notify = 0;
