@@ -95,6 +95,11 @@ struct Node
 	Node	*parent;	/* nil once detached */
 	Node	*child;
 	Node	*next;
+	Node	*prev;	/* in the parent's child list, for unlinking in O(1) */
+	Node	*hnext;	/* in the parent's hash chain */
+	Node	**htab;	/* a directory's children by name, once it has many; host memory */
+	int	hsize;
+	int	nchild;
 	char	*name;
 	char	*uid;
 	char	*gid;
@@ -374,9 +379,13 @@ nodefree(Inst *in, Node *n)
 		nc = c->next;
 		c->parent = nil;
 		c->next = nil;
+		c->prev = nil;
+		c->hnext = nil;
 		nodeunref(in, c);
 	}
 	n->child = nil;
+	free(n->htab);
+	n->htab = nil;
 	trimblocks(in, n, 0);
 	ovstrfree(in, n->name);
 	ovstrfree(in, n->uid);
@@ -392,40 +401,106 @@ nodeunref(Inst *in, Node *n)
 		nodefree(in, n);
 }
 
+static ulong
+namehash(char *name)
+{
+	ulong h;
+
+	h = 2166136261U;
+	while(*name != '\0')
+		h = (h ^ (uchar)*name++) * 16777619U;
+	return h;
+}
+
+/*
+ * Rebuilds d's hash table with n buckets (a power of two). On failure the
+ * old table stays: chains get longer, lookups stay right.
+ */
+static void
+rehash(Node *d, int n)
+{
+	Node **t, *c;
+	ulong h;
+
+	t = mallocz(n * sizeof(Node*), 1);
+	if(t == nil)
+		return;
+	for(c = d->child; c != nil; c = c->next){
+		h = namehash(c->name) & (n - 1);
+		c->hnext = t[h];
+		t[h] = c;
+	}
+	free(d->htab);
+	d->htab = t;
+	d->hsize = n;
+}
+
 static Node*
 findchild(Node *d, char *name)
 {
 	Node *c;
 
+	if(d->htab != nil){
+		for(c = d->htab[namehash(name) & (d->hsize - 1)]; c != nil; c = c->hnext)
+			if(strcmp(c->name, name) == 0)
+				return c;
+		return nil;
+	}
 	for(c = d->child; c != nil; c = c->next)
 		if(strcmp(c->name, name) == 0)
 			return c;
 	return nil;
 }
 
+enum { Hmin = 64 };	/* a directory with more children than this gets a table */
+
 static void
 ovlink(Node *d, Node *c)
 {
+	ulong h;
+
 	c->parent = d;
+	c->prev = nil;
 	c->next = d->child;
+	if(d->child != nil)
+		d->child->prev = c;
 	d->child = c;
+	d->nchild++;
+	if(d->htab != nil){
+		h = namehash(c->name) & (d->hsize - 1);
+		c->hnext = d->htab[h];
+		d->htab[h] = c;
+	}
+	if(d->nchild > (d->htab != nil ? 2 * d->hsize : Hmin))
+		rehash(d, d->htab != nil ? 2 * d->hsize : 2 * Hmin);
 }
 
 /* Takes c out of its directory and drops the tree's reference. */
 static void
 ovunlink(Inst *in, Node *c)
 {
-	Node **l;
+	Node *d, **l;
 
-	if(c->parent == nil)
+	d = c->parent;
+	if(d == nil)
 		return;
-	for(l = &c->parent->child; *l != nil; l = &(*l)->next)
-		if(*l == c){
-			*l = c->next;
-			break;
-		}
+	if(c->prev != nil)
+		c->prev->next = c->next;
+	else
+		d->child = c->next;
+	if(c->next != nil)
+		c->next->prev = c->prev;
+	if(d->htab != nil)
+		for(l = &d->htab[namehash(c->name) & (d->hsize - 1)]; *l != nil; l = &(*l)->hnext)
+			if(*l == c){
+				*l = c->hnext;
+				break;
+			}
+	d->nchild--;
 	c->parent = nil;
 	c->next = nil;
+	c->prev = nil;
+	c->hnext = nil;
 	nodeunref(in, c);
 }
 
