@@ -2,7 +2,7 @@
 id: 3
 slug: semaphores
 title: rendezvous and semaphores
-status: accepted
+status: implemented
 created: 2026-11-03
 authors: [progrium]
 depends: []
@@ -131,3 +131,9 @@ Each case runs on every backend in `H9_TEST_BACKENDS` with the same output. The 
 ## Open issues
 
 - Whether Unicorn performs guest `LDXR`/`STXR` as host compare-and-swaps. If it doesn't, cases that mix guest atomics with kernel semaphores between `RFMEM` processes may be flaky on the emulator until [zig-interpreter](0019-zig-interpreter.md) lands.
+
+## Updates
+
+**Nov 5, 2026.** `rendezvous` is 9front's `sysrendezvous` ported into `src/kern/sema.c`, on drawterm's Rgrp and Proc fields, rather than drawterm's `sysrendezvous` called as it is. drawterm's sleeps without checking for a pending note, so a note posted after the call starts but before the process is on the rendezvous hash list sets `notepending` without waking it, and the process stays blocked until another note. The port sets the state, fences, and checks `notepending` under the group's lock, so either `procinterrupt` finds the process on the list or the process sees the note and returns `~0`. `procinterrupt` is unchanged and `third_party/` is still untouched.
+
+The backend tests in `tests/backends.zig` also run hand-assembled arm64 programs (`tests/fixtures/sema/`) for rendezvous, semacquire, the timed and non-blocking forms, a contended counter, the bad-argument cases and note interruption, so the calls are covered on hosts without the root tree, such as the emulator on x86\_64 Linux.

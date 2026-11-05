@@ -103,6 +103,32 @@ const c_stub = struct {
     fn h9_kern_sleep(_: c_long) c_int {
         return -1;
     }
+    fn h9_rendezvous(_: usize, _: usize) usize {
+        return std.math.maxInt(usize);
+    }
+    fn h9_semacquire(_: *i32, _: c_int) c_int {
+        return -1;
+    }
+    fn h9_tsemacquire(_: *i32, _: c_uint) c_int {
+        return -1;
+    }
+    fn h9_semrelease(_: *i32, _: c_int, _: *c_int) c_int {
+        return -1;
+    }
+    fn h9_tflag_new() ?*anyopaque {
+        return null;
+    }
+    fn h9_tflag_free(_: ?*anyopaque) void {}
+    fn h9_tflag_set(_: ?*anyopaque) void {}
+    fn h9_tflag_sleep(_: ?*anyopaque, _: c_uint) c_int {
+        return -1;
+    }
+    fn h9_ntimers() c_int {
+        return 0;
+    }
+    fn h9_kern_nanomono() u64 {
+        return 0;
+    }
     fn h9_cons_wake(_: c_ulong) void {}
     var no_err: [ERRMAX:0]u8 = @splat(0);
     fn h9_kern_errstr() [*:0]u8 {
@@ -195,6 +221,16 @@ const c_real = struct {
     extern fn h9_kern_self() ?*anyopaque;
     extern fn h9_kern_interrupt(p: ?*anyopaque) void;
     extern fn h9_kern_sleep(ms: c_long) c_int;
+    extern fn h9_rendezvous(tag: usize, val: usize) usize;
+    extern fn h9_semacquire(addr: *i32, block: c_int) c_int;
+    extern fn h9_tsemacquire(addr: *i32, ms: c_uint) c_int;
+    extern fn h9_semrelease(addr: *i32, count: c_int, value: *c_int) c_int;
+    extern fn h9_tflag_new() ?*anyopaque;
+    extern fn h9_tflag_free(f: ?*anyopaque) void;
+    extern fn h9_tflag_set(f: ?*anyopaque) void;
+    extern fn h9_tflag_sleep(f: ?*anyopaque, ms: c_uint) c_int;
+    extern fn h9_ntimers() c_int;
+    extern fn h9_kern_nanomono() u64;
     extern fn h9_cons_wake(id: c_ulong) void;
     extern fn h9_kern_errstr() [*:0]u8;
     extern fn h9_fd2path(fd: c_int, buf: [*]u8, n: c_uint) c_int;
@@ -553,6 +589,34 @@ pub fn interrupt(p: *Proc) void {
 /// Sleeps for `ms` milliseconds, or until the process is interrupted.
 pub fn sleep(ms: i64) Error!void {
     _ = try check(c.h9_kern_sleep(@intCast(std.math.clamp(ms, std.math.minInt(c_long), std.math.maxInt(c_long)))));
+}
+
+/// rendezvous(tag, val): waits for another process in the rendezvous group
+/// to call it with the same tag, and returns that process's value; or
+/// ~0 if a note interrupted the wait.
+pub fn rendezvous(tag: u64, val: u64) u64 {
+    return c.h9_rendezvous(@intCast(tag), @intCast(val));
+}
+
+/// semacquire on the host word backing a guest semaphore, which the caller
+/// has checked: aligned, and in a writable segment that stays attached
+/// while the call blocks. Returns whether it was acquired; fails with
+/// "interrupted" on a note, or "bad arg in system call" for a negative value.
+pub fn semacquire(addr: *i32, block: bool) Error!bool {
+    return try check(c.h9_semacquire(addr, @intFromBool(block))) != 0;
+}
+
+/// tsemacquire: as `semacquire`, waiting at most `ms` milliseconds.
+pub fn tsemacquire(addr: *i32, ms: u32) Error!bool {
+    return try check(c.h9_tsemacquire(addr, ms)) != 0;
+}
+
+/// semrelease: adds `count` to the semaphore, wakes up to `count` waiters,
+/// and returns the new value.
+pub fn semrelease(addr: *i32, count: i32) Error!i32 {
+    var v: c_int = 0;
+    _ = try check(c.h9_semrelease(addr, count, &v));
+    return v;
 }
 
 /// The sandbox plan devfs checks for the calling thread's process (see
@@ -1206,4 +1270,83 @@ test "#p lists and serves only the caller's machine, by machine-local pid" {
     try std.testing.expectEqualStrings("1 ", t.lists[1][0..t.list_lens[1]]);
     try std.testing.expectEqualStrings("prog 'a b' c", t.args[0..t.args_len]);
     try std.testing.expectEqualStrings("Killed", t.killed[0..t.killed_len]);
+}
+
+test "tsleep returns at its deadline, returns early on wakeup, and fails with interrupted on a note, leaving no timer behind" {
+    if (!available) return error.SkipZigTest;
+    const T = struct {
+        const Self = @This();
+        err: ?anyerror = null,
+        where: []const u8 = "",
+        done: std.atomic.Value(bool) = .init(false),
+        proc: std.atomic.Value(?*Proc) = .init(null),
+        flag: ?*anyopaque = null,
+        rs: [3]c_int = @splat(9),
+        ms: [3]u64 = @splat(0),
+        timers: [3]c_int = @splat(9),
+        intr: [ERRMAX]u8 = undefined,
+        intr_len: usize = 0,
+
+        fn run(t: *Self) void {
+            defer t.done.store(true, .release);
+            t.body() catch |e| {
+                t.err = e;
+            };
+        }
+
+        /// tsleep on the flag for `ms`, after `then` (if any) runs on
+        /// another thread 50 ms in.
+        fn step(t: *Self, i: usize, ms: c_uint, then: ?*const fn (*Self) void) !void {
+            var th: ?std.Thread = null;
+            if (then) |f| th = try std.Thread.spawn(.{}, struct {
+                fn later(tt: *Self, g: *const fn (*Self) void) void {
+                    std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
+                    g(tt);
+                }
+            }.later, .{ t, f });
+            const t0 = c.h9_kern_nanomono();
+            t.rs[i] = c.h9_tflag_sleep(t.flag, ms);
+            t.ms[i] = (c.h9_kern_nanomono() - t0) / std.time.ns_per_ms;
+            if (th) |h| h.join();
+            t.timers[i] = c.h9_ntimers();
+        }
+
+        fn body(t: *Self) !void {
+            t.proc.store(self(), .release);
+            t.flag = c.h9_tflag_new() orelse return error.OutOfMemory;
+            defer c.h9_tflag_free(t.flag);
+            try t.step(0, 100, null);
+            try t.step(1, 5000, struct {
+                fn f(tt: *Self) void {
+                    c.h9_tflag_set(tt.flag);
+                }
+            }.f);
+            c.h9_tflag_free(t.flag);
+            t.flag = c.h9_tflag_new() orelse return error.OutOfMemory;
+            try t.step(2, 5000, struct {
+                fn f(tt: *Self) void {
+                    interrupt(tt.proc.load(.acquire).?);
+                }
+            }.f);
+            const e = errstr();
+            @memcpy(t.intr[0..e.len], e);
+            t.intr_len = e.len;
+        }
+    };
+    var t: T = .{};
+    try spawn("tsleep", T, T.run, &t);
+    while (!t.done.load(.acquire)) std.Thread.yield() catch {};
+    if (t.err) |e| return e;
+    errdefer std.debug.print("results {any}, ms {any}, timers {any}\n", .{ t.rs, t.ms, t.timers });
+    // The deadline: not set, and not early.
+    try std.testing.expectEqual(0, t.rs[0]);
+    try std.testing.expect(t.ms[0] >= 100 and t.ms[0] < 1000);
+    // Set 50 ms in, well before the deadline.
+    try std.testing.expectEqual(1, t.rs[1]);
+    try std.testing.expect(t.ms[1] < 2500);
+    // Interrupted 50 ms in.
+    try std.testing.expectEqual(-1, t.rs[2]);
+    try std.testing.expect(t.ms[2] < 2500);
+    try std.testing.expectEqualStrings("interrupted", t.intr[0..t.intr_len]);
+    try std.testing.expectEqual([3]c_int{ 0, 0, 0 }, t.timers);
 }

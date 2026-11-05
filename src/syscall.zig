@@ -43,6 +43,10 @@ pub const Nr = enum(u64) {
     segdetach = 31,
     segfree = 32,
     segflush = 33,
+    rendezvous = 34,
+    semacquire = 37,
+    semrelease = 38,
+    tsemacquire = 52,
     _,
 };
 
@@ -396,8 +400,52 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
             p.segs.segflush(try a.u(0), try a.uint(1)) catch |e| return segFail(e);
             return ok(0);
         },
+        .rendezvous => {
+            // rendezvous(void *tag, void *val): both whole words.
+            p.note("0x{x} 0x{x}", .{ try a.u(0), try a.u(1) });
+            return .{ .ret = kern.rendezvous(try a.u(0), try a.u(1)) };
+        },
+        .semacquire => {
+            // semacquire(long *addr, int block)
+            p.note("0x{x} {d}", .{ try a.u(0), try a.int(1) });
+            const w = try semWord(p, try a.u(0)) orelse return fail;
+            return ok(@intFromBool(kern.semacquire(w, try a.int(1) != 0) catch return fail));
+        },
+        .tsemacquire => {
+            // tsemacquire(long *addr, ulong ms)
+            p.note("0x{x} {d}", .{ try a.u(0), try a.uint(1) });
+            const w = try semWord(p, try a.u(0)) orelse return fail;
+            return ok(@intFromBool(kern.tsemacquire(w, try a.uint(1)) catch return fail));
+        },
+        .semrelease => {
+            // semrelease(long *addr, long count)
+            p.note("0x{x} {d}", .{ try a.u(0), try a.int(1) });
+            const w = try semWord(p, try a.u(0)) orelse return fail;
+            return ok(kern.semrelease(w, try a.int(1)) catch return fail);
+        },
         _ => return sysNote(p, "sys: bad sys call"),
     }
+}
+
+/// The host word behind a semaphore's guest address, checked as 9front's
+/// evenaddr and seg checks are (design/0003-semaphores.md): an odd address
+/// posts "sys: odd address", an unmapped one is a bad address, and one
+/// outside a writable segment fails; those two fail with "bad arg in system
+/// call" and return null. A Plan 9 long is 32 bits, and an aligned one
+/// never crosses a page. The word stays valid while the call blocks: the
+/// caller's address space keeps the segment attached, and a shared
+/// segment's pages never move (src/segment.zig).
+fn semWord(p: *Process, addr: u64) gm.Error!?*i32 {
+    if (addr & 3 != 0) {
+        _ = sysNote(p, "sys: odd address");
+        return null;
+    }
+    const s = gm.contiguous(p.as, addr, 4) orelse return error.BadAddress;
+    if (!p.segs.writable(addr, 4)) {
+        kern.setErrstr("bad arg in system call");
+        return null;
+    }
+    return @ptrCast(@alignCast(s.ptr));
 }
 
 /// Copies exec's file name and argv out of guest memory.

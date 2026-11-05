@@ -116,6 +116,12 @@ const segattach_fixtures = [_][]const u8{
     "brkstop",      "exec_a",       "exec_b", "sibling",   "procseg",
 };
 
+/// Programs in tests/fixtures/sema, for tests/backends.zig; they include
+/// the segattach fixtures' lib.S.
+const sema_fixtures = [_][]const u8{
+    "rendezvous", "semacquire", "count", "badarg", "odd", "unmapped", "interrupt",
+};
+
 /// Runs tests/integration.zig against the h9 binary. `filters` selects
 /// cases by name; with `pending`, cases tagged with a proposal that isn't
 /// implemented run instead of skipping.
@@ -400,7 +406,7 @@ pub fn build(b: *std.Build) void {
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "fscheck.c" },
+        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "fscheck.c", "tsleep.c", "sema.c" },
         .flags = flags,
     });
     for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
@@ -640,6 +646,19 @@ pub fn build(b: *std.Build) void {
         obj.root_module.addIncludePath(b.path("tests/fixtures/segattach"));
         const bin = b.addObjCopy(obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
         backend_tests.root_module.addAnonymousImport(b.fmt("seg_{s}", .{name}), .{ .root_source_file = bin.getOutput() });
+    }
+    for (sema_fixtures) |name| {
+        const obj = b.addObject(.{
+            .name = name,
+            .root_module = b.createModule(.{
+                .target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .freestanding }),
+                .optimize = .ReleaseSmall,
+            }),
+        });
+        obj.root_module.addAssemblyFile(b.path(b.fmt("tests/fixtures/sema/{s}.S", .{name})));
+        obj.root_module.addIncludePath(b.path("tests/fixtures/segattach"));
+        const bin = b.addObjCopy(obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
+        backend_tests.root_module.addAnonymousImport(b.fmt("sema_{s}", .{name}), .{ .root_source_file = bin.getOutput() });
     }
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);

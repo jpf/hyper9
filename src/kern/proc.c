@@ -815,11 +815,19 @@ struct Spawn {
 
 static Proc *bootproc;
 
-/* Called once the kernel is up, from the boot Proc (glue.c). */
+extern void h9_tsleepinit(void);	/* tsleep.c */
+extern void h9_semainit(void);		/* sema.c */
+
+/*
+ * Called once the kernel is up, from the boot Proc (glue.c). Starts the
+ * timer kproc that tsleep needs, and sets up the semaphore wait lists.
+ */
 void
 h9_proc_boot(void)
 {
 	bootproc = up;
+	h9_semainit();
+	h9_tsleepinit();
 }
 
 void h9_kern_exit(void);

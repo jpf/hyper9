@@ -15,17 +15,17 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | --- | --- | --- | --- |
 | [baseline](design/0000-baseline.md) | implemented |  | Baseline (h9 before proposals) |
 | [proposals](design/0001-proposals.md) | implemented |  | Proposals replace milestones and the design changelog |
-| [semaphores](design/0003-semaphores.md) | accepted | ready | rendezvous and semaphores |
+| [semaphores](design/0003-semaphores.md) | implemented |  | rendezvous and semaphores |
 | [segattach](design/0004-segattach.md) | implemented |  | segattach and shared segments |
 | [net-policy](design/0005-net-policy.md) | accepted | ready | Outbound-only network by default, and --net-allow |
 | [ephemeral-writes](design/0006-ephemeral-writes.md) | accepted | ready | Ephemeral writes and a private /tmp |
-| [go-compat](design/0007-go-compat.md) | accepted | needs semaphores | Go compatibility |
-| [devsrv](design/0008-devsrv.md) | accepted | needs semaphores | devsrv, /srv and mount |
+| [go-compat](design/0007-go-compat.md) | accepted | ready | Go compatibility |
+| [devsrv](design/0008-devsrv.md) | accepted | ready | devsrv, /srv and mount |
 | [i386](design/0009-i386.md) | accepted | ready | 386 binaries |
 | [self-host](design/0010-self-host.md) | draft |  | Self-hosting |
 | [overlay](design/0011-overlay.md) | accepted | needs ephemeral-writes | Copy-on-write overlay as the root's default |
 | [browser-host](design/0012-browser-host.md) | draft | needs i386 | A browser host on wasm, with v86 |
-| [9p-roots](design/0013-9p-roots.md) | draft | needs semaphores | 9P roots |
+| [9p-roots](design/0013-9p-roots.md) | draft |  | 9P roots |
 | [image-roots](design/0014-image-roots.md) | draft | needs devsrv, 9p-roots | Disk-image roots |
 | [gfx](design/0015-gfx.md) | accepted | needs devsrv | Graphics (--gfx) |
 | [kvm](design/0016-kvm.md) | draft |  | KVM backend |
@@ -46,7 +46,7 @@ flowchart LR
   classDef closed fill:#eee,stroke:#999,color:#777
   p_baseline["baseline<br/>implemented"]:::implemented
   p_proposals["#35;1 proposals<br/>implemented"]:::implemented
-  p_semaphores["#35;3 semaphores<br/>accepted"]:::accepted
+  p_semaphores["#35;3 semaphores<br/>implemented"]:::implemented
   p_segattach["#35;4 segattach<br/>implemented"]:::implemented
   p_net_policy["#35;5 net-policy<br/>accepted"]:::accepted
   p_ephemeral_writes["#35;6 ephemeral-writes<br/>accepted"]:::accepted
@@ -222,8 +222,9 @@ seek, stat, fstat, wstat, fwstat, fd2path, bind, chdir, remove, errstr, brk_,
 sleep, notify, noted, exits, and for process trees rfork, exec (including `#!`
 scripts), await and pipe, and the segment calls segattach, segdetach,
 segbrk, segfree and segflush for `shared` and `memory` segments (so `seg`
-works; named `#g` segments and device memory aren't served); `/fd` is
-devdup. Notes are delivered as on 9front:
+works; named `#g` segments and device memory aren't served), and rendezvous,
+semacquire, tsemacquire and semrelease, so contended `qlock`s and libthread
+park as on 9front; `/fd` is devdup. Notes are delivered as on 9front:
 a handler set with notify gets the note and a saved Ureg on its stack, and a
 process without one dies with the note as its status, so a write to a closed
 pipe ends the writer with `sys: write on closed pipe pc=...`, and a fault or
