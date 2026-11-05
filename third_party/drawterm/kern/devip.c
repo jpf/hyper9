@@ -6,6 +6,7 @@
 #include "ip.h"
 
 #include "devip.h"
+#include "netcheck.h"	/* h9: sandbox hooks */
 
 void	csclose(Chan*);
 long	csread(Chan*, void*, long, vlong);
@@ -486,21 +487,26 @@ setladdrport(Conv *c, char *str)
 {
 	char *p;
 	uchar addr[IPaddrlen];
+	int port;
 
 	p = strchr(str, '!');
 	if(p == 0) {
 		p = str;
-		ipzero(c->laddr);
+		ipzero(addr);
 	}
 	else {
 		*p++ = 0;
 		parseip(addr, str);
-		ipmove(c->laddr, addr);
 	}
 	if(*p == '*')
-		c->lport = 0;
+		port = 0;
 	else
-		c->lport = atoi(p);
+		port = atoi(p);
+	/* h9: checked before anything is bound */
+	if(h9_net_check(H9_NETANNOUNCE, c->p->stype, addr, port) < 0)
+		error(Eperm);
+	ipmove(c->laddr, addr);
+	c->lport = port;
 
 	setlport(c);
 }
@@ -516,6 +522,9 @@ setraddrport(Conv *c, char *str)
 		return "malformed address";
 	*p++ = 0;
 	parseip(addr, str);
+	/* h9: checked before a port is bound or the host is dialed */
+	if(h9_net_check(H9_NETCONNECT, c->p->stype, addr, atoi(p)) < 0)
+		error(Eperm);
 	ipmove(c->raddr, addr);
 	c->rport = atoi(p);
 	p = strchr(p, '!');
@@ -853,9 +862,20 @@ cswrite(Chan *c, void *a, long n, vlong offset)
 			ips[0] = smprint("%I", ip);
 			nips = 1;
 		} else {
+			/* h9: names outside the policy never reach the host's resolver */
+			if(h9_net_lookup(h9_net_proto(f[0]), f[1], port) < 0)
+				error("no translation for host found");
 			nips = so_gethostbyname(f[1], ips, nelem(ips));
 			if(nips <= 0)
 				error("no translation for host found");
+			{
+				uchar addrs[nelem(ips)][IPaddrlen];
+
+				for(i=0; i<nips; i++)
+					if(parseip(addrs[i], ips[i]) == -1)
+						ipzero(addrs[i]);
+				h9_net_resolved(h9_net_proto(f[0]), f[1], port, addrs, nips);
+			}
 		}
 		ns = smprint("/net/%s/clone %s!%d", f[0], ips[0], port);
 		free(ips[0]);

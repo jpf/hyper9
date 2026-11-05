@@ -2,7 +2,7 @@
 id: 5
 slug: net-policy
 title: Outbound-only network by default, and --net-allow
-status: accepted
+status: implemented
 created: 2026-11-03
 authors: [progrium]
 depends: []
@@ -269,3 +269,13 @@ Unit tests in `src/policy.zig` for pattern parsing and matching: IPv4 and IPv6 C
 4. `--net-allow` in `src/cli.zig` and the README's sandbox table.
 5. The integration cases.
 6. DESIGN.md: `net.outbound` and `net.allow` join the capability table, the default profile's network row becomes outbound, the vendor-hooks paragraph gains `h9_net_check`, and the CLI table gains `--net-allow`. Set `status: implemented`.
+
+## Updates
+
+- 2026-11-05: Refinements made while implementing it:
+  - `--net-allow` is a usage error under the tight profile's implicit `--net=disable` too, not only an explicit one, since the patterns would never apply. `--sandbox DIR --net=outbound --net-allow …` is the way to combine them.
+  - A cs request for a protocol other than `tcp` or `udp` is refused when patterns are given, since no pattern can name it.
+  - A `connect` port outside 0-65535 matches no pattern.
+  - The resolved-name table records each answer `cs` gives for a name, so a name looked up repeatedly takes several of its 1024 entries; the oldest are dropped first, as planned. `--trace` doesn't print which name allowed a connect yet.
+  - Besides the integration cases, `tests/backends.zig` has `[net-policy]` cases that write `#I` ctl and `cs` files from small arm64 programs (`tests/fixtures/net`), so the devip hooks are exercised on the emulator without a root tree.
+  - A UDP or TCP `announce` with port 0 fails in drawterm's devip before and after this change ("bad file descriptor"), since it binds only a nonzero port; the cases use a fixed port.

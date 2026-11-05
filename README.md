@@ -17,7 +17,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [proposals](design/0001-proposals.md) | implemented |  | Proposals replace milestones and the design changelog |
 | [semaphores](design/0003-semaphores.md) | implemented |  | rendezvous and semaphores |
 | [segattach](design/0004-segattach.md) | implemented |  | segattach and shared segments |
-| [net-policy](design/0005-net-policy.md) | accepted | ready | Outbound-only network by default, and --net-allow |
+| [net-policy](design/0005-net-policy.md) | implemented |  | Outbound-only network by default, and --net-allow |
 | [ephemeral-writes](design/0006-ephemeral-writes.md) | accepted | ready | Ephemeral writes and a private /tmp |
 | [go-compat](design/0007-go-compat.md) | accepted | ready | Go compatibility |
 | [devsrv](design/0008-devsrv.md) | accepted | ready | devsrv, /srv and mount |
@@ -32,7 +32,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [whp](design/0017-whp.md) | draft | needs kvm | WHP backend |
 | [linux-personality](design/0018-linux-personality.md) | draft | needs symlinks-in-root, exit-status | Linux personality |
 | [zig-interpreter](design/0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
-| [websocket-9p](design/0021-websocket-9p.md) | draft | needs net-policy, devsrv, 9p-roots | 9P over WebSocket |
+| [websocket-9p](design/0021-websocket-9p.md) | draft | needs devsrv, 9p-roots | 9P over WebSocket |
 | [dotl](design/0022-dotl.md) | draft | needs devsrv, 9p-roots | 9P2000.L and ZeroFS |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [exit-status](design/exit-status.md) | draft |  | Numeric exit statuses at the host boundary |
@@ -53,7 +53,7 @@ flowchart LR
   p_proposals["#35;1 proposals<br/>implemented"]:::implemented
   p_semaphores["#35;3 semaphores<br/>implemented"]:::implemented
   p_segattach["#35;4 segattach<br/>implemented"]:::implemented
-  p_net_policy["#35;5 net-policy<br/>accepted"]:::accepted
+  p_net_policy["#35;5 net-policy<br/>implemented"]:::implemented
   p_ephemeral_writes["#35;6 ephemeral-writes<br/>accepted"]:::accepted
   p_go_compat["#35;7 go-compat<br/>accepted"]:::accepted
   p_devsrv["#35;8 devsrv<br/>accepted"]:::accepted
@@ -293,6 +293,8 @@ h9 --memory 256m --timeout 30s ls   # resource caps
 h9 --pids 32 --cpus 2 --rc 'mk'     # at most 32 processes, 2 running at once
 h9 --print --profile=tight mk       # print the compiled plan and exit
 h9 --strict --write=overlay mk      # exit 2: overlay isn't enforced yet
+h9 --net=enable aux/listen1 -t tcp!*!8080 /bin/cat     # servers need --net=enable
+h9 --net-allow 'tcp!*.example.com!443' myclient        # egress only to these names
 ```
 
 | Flag | Meaning |
@@ -301,7 +303,8 @@ h9 --strict --write=overlay mk      # exit 2: overlay isn't enforced yet
 | `--readable PATH`, `--writable PATH` | Bind a host path read-only or read-write; outside the root and cwd it appears at `/mnt/term/PATH` |
 | `--read-deny PATH` | Hide a host path, even inside a bound tree |
 | `--write none\|scope` | Deny all writes, or allow them only in writable paths (`ephemeral` and `overlay` are [proposed](design/README.md) and deny writes for now) |
-| `--net disable\|enable` | Mask `#I`, or leave it (`outbound` is [proposed](design/0005-net-policy.md)) |
+| `--net disable\|outbound\|enable` | Mask `#I`; allow clients but refuse `announce` (the default, except under `--profile=tight`, which disables); or allow servers too. Without `--net-allow`, connects to link-local addresses (169.254.0.0/16, fe80::/10) are refused |
+| `--net-allow PATTERN` | Repeatable egress allowlist of dial strings, `proto!host!port`: `tcp!10.0.0.0/8!564`, `udp!10.0.0.53!53`, `tcp!*.example.com!443`. With any pattern, every connect and every `/net/cs` name lookup must match one |
 | `--memory SIZE`, `--timeout DURATION` | Cap guest memory (`512m`); post `hangup` after a deadline (`30s`, `1m`) and stop the machine 2 s later |
 | `--pids N`, `--cpus N` | Cap live processes (rfork fails with "no procs"); cap vCPUs running guest code at once |
 | `--host-fs`, `--host-cmd` | Show the whole host read-only at `/mnt/term`; unmask devcmd |
