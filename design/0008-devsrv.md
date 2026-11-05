@@ -2,7 +2,7 @@
 id: 8
 slug: devsrv
 title: devsrv, /srv and mount
-status: draft
+status: accepted
 created: 2026-11-03
 authors: [progrium]
 depends: [3]
@@ -10,6 +10,8 @@ areas: [kern]
 ---
 
 # Proposal: devsrv, /srv and mount
+
+Nov 5, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
 
 ## Abstract
 
