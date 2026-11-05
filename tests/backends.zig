@@ -1490,8 +1490,10 @@ fn runOverlay(kind: vmm.BackendKind, r: *OverlayRoot, text: []const u8, pol: h9.
 }
 
 test "two machines in one host process each get their own /tmp [6]" {
+    // HVF allows one VM per host process, so the second machine is always
+    // the emulator.
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_][2]vmm.BackendKind{ .{ .hvf, .emu }, .{ .emu, .emu } }) |kinds| {
         var r: OverlayRoot = .{ .tmp = undefined };
         try r.init();
         defer r.deinit();
@@ -1505,15 +1507,15 @@ test "two machines in one host process each get their own /tmp [6]" {
                 a.got = runOverlay(a.kind, a.r, @embedFile("ov_tmp_own"), .{}, &a.sb);
             }
         };
-        var a: A = .{ .r = &r, .kind = kind };
+        var a: A = .{ .r = &r, .kind = kinds[0] };
         const th = try std.Thread.spawn(.{}, A.run, .{&a});
         std.Io.sleep(std.testing.io, .fromMilliseconds(1000), .awake) catch {};
         var sb: [300]u8 = undefined;
-        const b = runOverlay(kind, &r, @embedFile("ov_tmp_absent"), .{}, &sb);
+        const b = runOverlay(kinds[1], &r, @embedFile("ov_tmp_absent"), .{}, &sb);
         th.join();
-        errdefer std.debug.print("backend {t}\n", .{kind});
+        errdefer std.debug.print("backends {t} and {t}\n", .{ kinds[0], kinds[1] });
         const got_a = try a.got orelse continue;
-        const got_b = (try b).?;
+        const got_b = try b orelse continue;
         try std.testing.expectEqualStrings("exited ", got_a);
         try std.testing.expect(std.mem.startsWith(u8, got_b, "exited "));
         try std.testing.expect(std.mem.indexOf(u8, got_b, "does not exist") != null);
