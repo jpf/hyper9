@@ -6,15 +6,15 @@ This describes h9 as built. Changes to it go through proposals in [design/](desi
 
 ## Overview
 
-h9 is a small Zig library and CLI that runs native 9front executables directly on macOS, Linux and Windows, using each host's hypervisor API. Each guest process runs in hardware-isolated user mode, and its syscalls are served by drawterm's Plan 9 kernel running in the host process. Prior art: hyper-linux (the same shape for Linux ELF on macOS) and 9vx (Plan 9 binaries on Linux and OS X x86 through a vx32 sandbox).
+h9 is a small Zig library and CLI that runs native 9front executables directly on macOS, Linux and Windows, using each host's hypervisor API. Each guest process runs in hardware-isolated user mode, and its syscalls are served by drawterm's Plan 9 kernel running in the host process. Prior art: hyper-linux (the same shape for Linux ELF on macOS) and [9vx](https://swtch.com/9vx/) (Plan 9 binaries on Linux and OS X x86 through a vx32 sandbox).
 
 **Goals**
 
-- Start and run a 9front binary as fast as a native process: no VM image, no boot, no guest kernel.
+- Start and run a 9front binary as fast as a native process: no VM image, booting, or guest kernel.
 - One invocation can hold a whole process tree (rc pipelines, servers posting to /srv, rio and its clients).
 - Run native code only: arm64 9front binaries on arm64 hosts, amd64 binaries on x86\_64 hosts. 386 binaries run on the emulator, for the browser host ([i386](design/0009-i386.md)).
 - One host backend each for Hypervisor.framework (macOS), KVM (Linux) and Windows Hypervisor Platform (Windows).
-- Self-hosting: the 9front compilers and mk run inside and can rebuild the 9front userland.
+- Self-hosting: the 9front compilers and `mk` run inside and can rebuild the 9front userland.
 
 **Non-goals (for now)**
 
