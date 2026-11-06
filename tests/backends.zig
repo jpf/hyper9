@@ -1320,6 +1320,16 @@ test "segments: /proc/n/segment's text" {
     }.f);
 }
 
+// An 80-stage pipeline (tests/fixtures/pipeline), the shape of the
+// "more live processes than HVF has vCPUs" integration case without the
+// root tree. Most stages block reading a pipe while the rest are forked,
+// which hung on Windows when kern's Lock had no release ordering
+// (src/kern/lock-win32.c). It's a race, so it runs a few times.
+
+test "an 80-process pipeline drains, every time" {
+    for (0..10) |_| try expectSeg(@embedFile("pipe_pipeline"), null, "exited ", "deep\n");
+}
+
 // rendezvous and semaphores (design/0003-semaphores.md), from the programs
 // in tests/fixtures/sema.
 

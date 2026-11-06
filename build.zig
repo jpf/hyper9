@@ -102,10 +102,18 @@ const kern_flags_common = [_][]const u8{
 // PTHREAD, as Make.linux, makes libc/lock.c's Lock a pthread mutex. Without
 // it unlock is a plain store with no release ordering, so on arm64 another
 // thread can take the lock before seeing the writes made under it, which
-// corrupted QLock queues and hung processes under contention.
+// corrupted QLock queues and hung processes under contention. Windows has
+// no pthreads, so it builds src/kern/lock-win32.c in place of lock.c.
 const kern_flags = kern_flags_common ++ [_][]const u8{"-DPTHREAD"};
 // Make.win64's CFLAGS.
 const kern_flags_win32 = kern_flags_common ++ [_][]const u8{ "-DWINDOWS", "-DUNICODE" };
+
+/// `files` without `name`.
+fn without(b: *std.Build, files: []const []const u8, name: []const u8) []const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    for (files) |f| if (!std.mem.eql(u8, f, name)) out.append(b.allocator, f) catch @panic("OOM");
+    return out.items;
+}
 
 /// Zig's own macOS SDK detection runs xcodebuild, which fails in some
 /// environments; SDKROOT (set by scripts/env.sh) is used when present.
@@ -128,6 +136,10 @@ const sema_fixtures = [_][]const u8{
 /// Programs in tests/fixtures/net, for tests/backends.zig. They share
 /// tests/fixtures/segattach/lib.S.
 const net_fixtures = [_][]const u8{ "ctl", "cs" };
+
+/// Programs in tests/fixtures/pipeline, for tests/backends.zig. They share
+/// tests/fixtures/segattach/lib.S.
+const pipeline_fixtures = [_][]const u8{"pipeline"};
 
 /// Runs tests/integration.zig against the h9 binary. `filters` selects
 /// cases by name; with `pending`, cases tagged with a proposal that isn't
@@ -420,7 +432,7 @@ pub fn build(b: *std.Build) void {
     });
     for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
         .root = b.path(b.pathJoin(&.{ drawterm, l.dir })),
-        .files = l.files,
+        .files = if (os == .windows and std.mem.eql(u8, l.dir, "libc")) without(b, l.files, "lock.c") else l.files,
         .flags = flags,
     });
     // Zig's bundled musl memccpy is broken; see src/kern/memccpy.c.
@@ -429,9 +441,13 @@ pub fn build(b: *std.Build) void {
         kern.root_module.addCMacro("memccpy", "h9_memccpy");
     }
     if (os == .windows) {
-        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"glue-win32.c"}, .flags = flags });
+        // lock-win32.c replaces libc/lock.c, whose Windows unlock has no
+        // release ordering (see the file).
+        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "glue-win32.c", "lock-win32.c" }, .flags = flags });
         kern.root_module.linkSystemLibrary("ws2_32", .{});
         kern.root_module.linkSystemLibrary("advapi32", .{});
+        // WaitOnAddress, for lock-win32.c (Synchronization.lib in the SDK).
+        kern.root_module.linkSystemLibrary("api-ms-win-core-synch-l1-2-0", .{});
     }
     kern.root_module.addCSourceFiles(.{
         .root = b.path(drawterm ++ "/posix-port"),
@@ -653,13 +669,14 @@ pub fn build(b: *std.Build) void {
         backend_tests.root_module.linkFramework("Hypervisor", .{});
     }
     linkUnicorn(backend_tests);
-    // The segattach, overlay, sema and net fixtures, assembled freestanding as the shim is, and
+    // The segattach, overlay, sema, net and pipeline fixtures, assembled freestanding as the shim is, and
     // embedded as raw text for tests/backends.zig to wrap in an a.out.
     for ([_]struct { dir: []const u8, prefix: []const u8, names: []const []const u8 }{
         .{ .dir = "segattach", .prefix = "seg", .names = &segattach_fixtures },
         .{ .dir = "overlay", .prefix = "ov", .names = &overlay_fixtures },
         .{ .dir = "sema", .prefix = "sema", .names = &sema_fixtures },
         .{ .dir = "net", .prefix = "net", .names = &net_fixtures },
+        .{ .dir = "pipeline", .prefix = "pipe", .names = &pipeline_fixtures },
     }) |set| for (set.names) |name| {
         const obj = b.addObject(.{
             .name = name,
