@@ -23,7 +23,7 @@ cd "$H9_ROOT"
 # KVM and WHP are built (design/0016-kvm.md, design/0017-whp.md); h9-emu runs
 # everywhere Unicorn builds.
 H9_TARGETS="aarch64-macos"
-EMU_TARGETS="aarch64-macos aarch64-linux-musl x86_64-linux-musl aarch64-windows-gnu"
+EMU_TARGETS="aarch64-macos aarch64-linux-musl x86_64-linux-musl aarch64-windows-gnu x86_64-windows-gnu"
 
 die() { echo "release: $*" >&2; exit 1; }
 

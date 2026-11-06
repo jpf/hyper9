@@ -10,7 +10,7 @@ installed for building: cross-compile h9 on the host and copy it in.
 | `linux` | `zig build -Demu=unicorn -Dtarget=aarch64-linux-musl` |
 | `linux-amd64` | `zig build -Demu=unicorn -Dtarget=x86_64-linux-musl` |
 | `macos` | `zig build -Demu=unicorn` |
-| `windows` | `zig build -Demu=unicorn -Dtarget=aarch64-windows` (Unicorn from source) |
+| `windows` | `zig build -Demu=unicorn -Dtarget=aarch64-windows` (Unicorn from source), or `x86_64-windows`, which runs under Windows' x64 emulation; add `H9_TEST_ARCH=arm64` for its integration tests |
 
 Use `--prefix zig-out/<os>` to keep the builds apart.
 
@@ -66,6 +66,7 @@ zig build install install-tests -Demu=unicorn -Dtarget=aarch64-linux-musl --pref
 scripts/lima/vm test linux                  # both sets
 scripts/lima/vm test windows integration    # just one
 H9_TEST_PENDING=1 scripts/lima/vm test macos integration  # include cases of proposals that aren't implemented
+H9_TEST_ARCH=arm64 scripts/lima/vm test windows  # an x86_64 h9 running the arm64 root tree
 ```
 
 It pushes `h9` and the test binaries from `zig-out/<os>/bin`, runs

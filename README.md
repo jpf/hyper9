@@ -168,7 +168,8 @@ zig build bench -Demu=unicorn                        # compute and syscall speed
 `-Dunicorn=source` builds Unicorn from the patched source instead
 ([third_party/unicorn](third_party/unicorn/README.md)); `scripts/fetch.sh`
 fetches it. The prebuilt libraries exist for macOS arm64 and Linux musl only,
-so Windows arm64 (`-Dtarget=aarch64-windows`) always builds from source. kern
+so Windows (`-Dtarget=aarch64-windows` or `x86_64-windows`) always builds
+from source. kern
 builds for Windows with drawterm's win32 files, so h9.exe runs programs on
 the emulator, and host paths are `/C:/...` in `#U`.
 
@@ -180,7 +181,7 @@ Each GitHub release has two sets of binaries, built by
 | Asset | License | Contents |
 | --- | --- | --- |
 | `h9-<version>-<target>` | MIT | `h9` with the hypervisor backends only (macOS arm64 for now) |
-| `h9-emu-<version>-<target>` | GPLv2 | `h9-emu`: h9 built with `-Demu=unicorn`, for macOS arm64, Linux arm64 and x86_64 (musl, static) and Windows arm64 |
+| `h9-emu-<version>-<target>` | GPLv2 | `h9-emu`: h9 built with `-Demu=unicorn`, for macOS arm64, Linux arm64 and x86_64 (musl, static) and Windows arm64 and x86_64 |
 | `h9-emu-<version>-source.tar.gz` | GPLv2 and MIT | complete corresponding source for `h9-emu`: the h9 tree plus Unicorn's patched source in `.local/src/unicorn` |
 | `SHA256SUMS` | | checksums |
 

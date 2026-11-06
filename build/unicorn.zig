@@ -18,7 +18,11 @@ pub fn configName(t: std.Target) ?[]const u8 {
             .x86_64 => "x86_64-linux-musl",
             else => null,
         } else null,
-        .windows => if (t.cpu.arch == .aarch64 and t.abi == .gnu) "aarch64-windows-gnu" else null,
+        .windows => if (t.abi == .gnu) switch (t.cpu.arch) {
+            .aarch64 => "aarch64-windows-gnu",
+            .x86_64 => "x86_64-windows-gnu",
+            else => null,
+        } else null,
         else => null,
     };
 }
@@ -44,6 +48,8 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .files = if (t.os.tag == .windows) &.{ "qemu/util/oslib-win32.c", "qemu/util/qemu-thread-posix.c" } else &.{ "qemu/util/oslib-posix.c", "qemu/util/qemu-thread-posix.c" },
         .flags = &flags,
     });
+    if (t.os.tag == .windows and t.cpu.arch == .x86_64)
+        core.root_module.addAssemblyFile(src.path(b, "qemu/util/setjmp-win64-mingw.S"));
 
     // QEMU builds each guest target from the same files with a forced
     // include that renames its symbols. Zig keys C objects by path within a

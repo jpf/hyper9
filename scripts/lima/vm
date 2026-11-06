@@ -140,17 +140,19 @@ cmd_test() {
 	if [[ -z "${H9_TEST_SLOW:-}" ]]; then
 		case "$os" in linux-amd64) slow=10 ;; windows) slow=3 ;; esac
 	fi
-	local pend=${H9_TEST_PENDING:-}
+	local pend=${H9_TEST_PENDING:-} arch=${H9_TEST_ARCH:-}
 	local status=0
 	for w in "${which[@]}"; do
 		log "$os: $w tests"
 		if [[ "$os" == windows ]]; then
 			local set="set H9_TEST_BIN=%USERPROFILE%\\h9\\h9.exe&& set H9_TEST_ROOT=%USERPROFILE%/h9/root&& set H9_TEST_BACKENDS=emu&& set H9_TEST_SLOW=$slow&&"
 			[[ -n "$pend" ]] && set+=" set H9_TEST_PENDING=1&&"
+			[[ -n "$arch" ]] && set+=" set H9_TEST_ARCH=$arch&&"
 			ssh_ "$os" "$set cd h9 && $w-tests.exe" </dev/null || status=1
 		else
 			local vars="H9_TEST_BIN=\$HOME/h9/h9 H9_TEST_ROOT=\$HOME/h9/root H9_TEST_BACKENDS=emu H9_TEST_SLOW=$slow"
 			[[ -n "$pend" ]] && vars+=" H9_TEST_PENDING=1"
+			[[ -n "$arch" ]] && vars+=" H9_TEST_ARCH=$arch"
 			ssh_ "$os" "cd h9 && env $vars ./$w-tests" </dev/null || status=1
 		fi
 	done

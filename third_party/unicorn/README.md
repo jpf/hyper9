@@ -23,8 +23,8 @@ corresponding source (see `scripts/release.sh`).
 
 ## Patches
 
-Windows arm64 with mingw-w64 (Zig's libc for `aarch64-windows`). Upstream
-2.1.4 doesn't support Windows arm64 hosts; the open PR
+Windows arm64 and x64 with mingw-w64 (Zig's libc for `aarch64-windows` and
+`x86_64-windows`). Upstream 2.1.4 doesn't support Windows arm64 hosts; the open PR
 [unicorn-engine/unicorn#2286](https://github.com/unicorn-engine/unicorn/pull/2286)
 covers MSVC with a different approach.
 
@@ -42,10 +42,16 @@ covers MSVC with a different approach.
    `FlushInstructionCache`.
 5. `0005-win32-arm64-code-buffer-handler`: the code buffer is reserved and
    committed page by page from a vectored exception handler, which on Windows
-   is bound to its engine by a small x86 trampoline. On arm64 the handler
-   instead looks the faulting address up in a table of live engines (up to
-   64). It's registered first, so earlier handlers (Zig's segfault handler)
-   don't treat the commit faults as crashes.
+   is bound to its engine by a small x86 trampoline. On 64-bit hosts (arm64,
+   which has no trampoline, and x64) the handler instead looks the faulting
+   address up in a table of live engines (up to 1024). It's registered first,
+   so earlier handlers (Zig's segfault handler) don't treat the commit faults
+   as crashes.
+6. `0006-win32-x64-mingw-setjmp`: with UCRT, x64 longjmp unwinds the stack
+   even after `_setjmp(env, NULL)`, and crashes with `STATUS_BAD_STACK` with
+   generated code on it, as on arm64. mingw-w64 has no `__mingw_longjmp` for
+   x64, so a small assembly setjmp/longjmp (`qemu/util/setjmp-win64-mingw.S`)
+   restores registers without unwinding.
 
 To change a patch, edit `.local/src/unicorn` (it isn't a git repo; diff
 against a fresh unpack), regenerate the patch, and run `scripts/fetch.sh` to
@@ -64,5 +70,5 @@ mingw's configure passes and zig cc rejects; macOS needs `SDKROOT` from
 ./scripts/fetch.sh && third_party/unicorn/genconfig.sh
 ```
 
-Hosts: `aarch64-macos`, `aarch64-linux-musl`, `x86_64-linux-musl` and
-`aarch64-windows-gnu`.
+Hosts: `aarch64-macos`, `aarch64-linux-musl`, `x86_64-linux-musl`,
+`aarch64-windows-gnu` and `x86_64-windows-gnu`.

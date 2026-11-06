@@ -10,7 +10,7 @@ src="$H9_LOCAL/src/unicorn"
 [ -x "$src/qemu/configure" ] || { echo "genconfig: no $src (run scripts/fetch.sh)" >&2; exit 1; }
 
 # Each host name is also its zig target.
-hosts="aarch64-macos aarch64-linux-musl x86_64-linux-musl aarch64-windows-gnu"
+hosts="aarch64-macos aarch64-linux-musl x86_64-linux-musl aarch64-windows-gnu x86_64-windows-gnu"
 targets="x86_64-softmmu aarch64-softmmu"
 [ $# -gt 0 ] || set -- $hosts
 
